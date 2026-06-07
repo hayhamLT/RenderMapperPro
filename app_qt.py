@@ -4379,6 +4379,8 @@ class BlenderVideoMapperQt(QMainWindow):
         test_conn_btn.clicked.connect(run_test_connection)
         export_files_btn.clicked.connect(self._export_deadline_files)
 
+        dlg.exec()
+
     def _add_recent_scene(self, path: str) -> None:
         p = str(Path(os.path.expanduser(path.strip())))
         if not p:
