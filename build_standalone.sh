@@ -34,53 +34,13 @@ resolve_python_bin() {
   return 1
 }
 
-# Static ffmpeg/ffprobe so the packaged app ships with them. Source and version
-# are overridable via env vars (FFMPEG_STATIC_BASE / FFMPEG_STATIC_VERSION).
-FFMPEG_STATIC_VERSION="${FFMPEG_STATIC_VERSION:-b6.0}"
-FFMPEG_STATIC_BASE="${FFMPEG_STATIC_BASE:-https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_STATIC_VERSION}}"
-
-detect_plat_arch() {
-  local os arch
-  case "$(uname -s)" in
-    Darwin) os="darwin" ;;
-    Linux)  os="linux" ;;
-    *)      os="unknown" ;;
-  esac
-  case "$(uname -m)" in
-    x86_64|amd64)  arch="x64" ;;
-    arm64|aarch64) arch="arm64" ;;
-    *)             arch="$(uname -m)" ;;
-  esac
-  printf '%s-%s\n' "$os" "$arch"
-}
-
-fetch_ffmpeg() {
-  local platarch dir tool
-  platarch="$(detect_plat_arch)"
-  dir="vendor/ffmpeg/${platarch}"
-  mkdir -p "$dir"
-  for tool in ffmpeg ffprobe; do
-    if [[ -x "$dir/$tool" ]]; then
-      echo "ffmpeg: $dir/$tool already present — skipping download"
-      continue
-    fi
-    echo "Fetching $tool ($platarch) from ${FFMPEG_STATIC_BASE} ..."
-    if ! curl -fsSL -o "$dir/$tool" "${FFMPEG_STATIC_BASE}/${tool}-${platarch}"; then
-      echo "WARNING: could not download $tool — building WITHOUT bundled $tool" >&2
-      rm -f "$dir/$tool"
-      continue
-    fi
-    chmod +x "$dir/$tool"
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-      xattr -dr com.apple.quarantine "$dir/$tool" 2>/dev/null || true
-      codesign --force -s - "$dir/$tool" >/dev/null 2>&1 || true
-    fi
-  done
-}
-
-fetch_ffmpeg
-
 PYTHON_BIN="$(resolve_python_bin)"
+
+# Static ffmpeg/ffprobe so the packaged app ships with them. The fetcher is a
+# cross-platform Python script (shared with CI) — single source of truth.
+# Source/version are overridable via FFMPEG_STATIC_BASE / FFMPEG_STATIC_VERSION.
+"$PYTHON_BIN" tools/fetch_ffmpeg.py
+
 PYTHON_VERSION="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 BUILD_VENV_DIR=".build-venv-py${PYTHON_VERSION}"
 BUILD_PYTHON="$BUILD_VENV_DIR/bin/python"

@@ -237,6 +237,33 @@ def _ffmpeg_platform_dir() -> str:
     return f"{sysn}-{arch}"
 
 
+# Modifier-key glyph for shortcut hints in menu/button text: ⌘ on macOS,
+# "Ctrl+" elsewhere. Qt itself maps QKeySequence("Ctrl+D") to the right key
+# per platform; this is only for the human-readable label.
+MOD_LABEL = "⌘" if sys.platform == "darwin" else "Ctrl+"
+
+
+# Name of the OS file manager, used in menu/button labels so they read
+# natively on each platform ("Reveal in Finder" vs "Show in Explorer").
+def file_manager_name() -> str:
+    if sys.platform == "darwin":
+        return "Finder"
+    if os.name == "nt":
+        return "Explorer"
+    return "File Manager"
+
+
+def reveal_in_file_manager(path) -> None:
+    """Open the OS file manager with ``path`` selected (cross-platform)."""
+    p = Path(path)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(p)])
+    elif os.name == "nt":
+        subprocess.Popen(["explorer", "/select,", str(p)])
+    else:
+        subprocess.Popen(["xdg-open", str(p.parent)])
+
+
 # Common system install locations to check after PATH (GUI apps launched from
 # Finder often have a minimal PATH that misses Homebrew / MacPorts).
 _FFMPEG_SYS_DIRS = [
@@ -2444,9 +2471,9 @@ class QueuePanel(QWidget):
 
         first = selected_ids[0]
         menu = QMenu(self)
-        dup_action = menu.addAction("Duplicate  (⌘D)")
+        dup_action = menu.addAction(f"Duplicate  ({MOD_LABEL}D)")
         menu.addSeparator()
-        reveal_action = menu.addAction("Reveal Output in Finder")
+        reveal_action = menu.addAction(f"Reveal Output in {file_manager_name()}")
         open_action = menu.addAction("Open Output")
         menu.addSeparator()
         up_action = menu.addAction("Move Up")
@@ -4340,12 +4367,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._show_toast("Output not found yet", "warning")
             return
         try:
-            if sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", str(p)])
-            elif os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", str(p)])
-            else:
-                subprocess.Popen(["xdg-open", str(p.parent)])
+            reveal_in_file_manager(p)
         except Exception as exc:
             self._append_log(f"[app] Reveal failed: {exc}")
 
@@ -5033,7 +5055,7 @@ class BlenderVideoMapperQt(QMainWindow):
         open_b = QPushButton("Open Output")
         clear_b = QPushButton("Clear History")
         reveal_b.clicked.connect(lambda: (sel_out() and Path(sel_out()).exists()
-                                          and subprocess.Popen(["open", "-R", sel_out()])))
+                                          and reveal_in_file_manager(sel_out())))
         open_b.clicked.connect(lambda: sel_out() and self._open_path(sel_out()))
 
         def do_clear() -> None:

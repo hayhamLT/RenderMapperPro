@@ -1,0 +1,5 @@
+# Dependencies needed to BUILD the standalone Qt app (CI uses this).
+# The runtime UI is PySide6; PyInstaller packages it. The tkinter-era deps in
+# requirements.txt are not needed for the app_qt.py build.
+PySide6>=6.6.0
+pyinstaller>=6.8.0

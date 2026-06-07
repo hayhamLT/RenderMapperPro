@@ -48,6 +48,10 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Per-platform executable icon: Windows wants a .ico, macOS uses the .icns on
+# the BUNDLE below. Linux ignores the EXE icon (the .desktop file carries it).
+_exe_icon = os.path.join("assets", "app_icon.ico") if sys.platform == "win32" else None
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -64,6 +68,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_exe_icon,
 )
 coll = COLLECT(
     exe,
@@ -74,18 +79,21 @@ coll = COLLECT(
     upx_exclude=[],
     name=APP_NAME,
 )
-app = BUNDLE(
-    coll,
-    name=f'{APP_NAME}.app',
-    icon='assets/app_icon.icns',
-    bundle_identifier='com.toyrobotmedia.rendermapperpro',
-    version=APP_VERSION,
-    info_plist={
-        'CFBundleName': APP_NAME,
-        'CFBundleDisplayName': APP_NAME,
-        'CFBundleShortVersionString': APP_VERSION,
-        'CFBundleVersion': APP_VERSION,
-        'NSHumanReadableCopyright': 'Toy Robot Media',
-        'NSHighResolutionCapable': True,
-    },
-)
+# BUNDLE only does anything on macOS (it wraps COLLECT into a .app). On
+# Windows/Linux the distributable is the COLLECT folder produced above.
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name=f'{APP_NAME}.app',
+        icon='assets/app_icon.icns',
+        bundle_identifier='com.toyrobotmedia.rendermapperpro',
+        version=APP_VERSION,
+        info_plist={
+            'CFBundleName': APP_NAME,
+            'CFBundleDisplayName': APP_NAME,
+            'CFBundleShortVersionString': APP_VERSION,
+            'CFBundleVersion': APP_VERSION,
+            'NSHumanReadableCopyright': 'Toy Robot Media',
+            'NSHighResolutionCapable': True,
+        },
+    )
