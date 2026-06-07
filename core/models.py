@@ -67,6 +67,8 @@ class JobConfig:
     submit_scene: bool = True
     preview_path: str = ""
     preview_frame: int = 0   # >0 → render only this single scene frame (fast preview)
+    prepared_blend_path: str = ""   # set → save a mapped .blend here instead of rendering
+    pack_blend: bool = False         # pack external files (videos) into the prepared .blend
     audio_path: str = ""   # legacy single source clip to mux audio from ("" = silent)
     audio_paths: list[str] = field(default_factory=list)  # clips to mux audio from (one strip each)
     material_assignments: list[MaterialVideoAssignment] = field(default_factory=list)

@@ -121,7 +121,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.3"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -714,6 +714,31 @@ class PreviewFrameThread(QThread):
                 self.done.emit("", f"Preview render failed (exit {rc})")
         except Exception as exc:
             self.done.emit("", str(exc))
+
+
+class ExportBlendThread(QThread):
+    """Runs the worker in prepare mode to bake a standalone .blend (video mapping
+    + render settings) for a render farm, instead of rendering."""
+
+    log = Signal(str)
+    done = Signal(bool, str)  # ok, path-or-error
+
+    def __init__(self, blender: str, worker: str, job: JobConfig, out_path: str) -> None:
+        super().__init__()
+        self.blender = blender
+        self.worker = worker
+        self.job = job
+        self.out_path = out_path
+
+    def run(self) -> None:
+        try:
+            rc = run_blender_job(self.blender, self.worker, self.job, on_log=self.log.emit)
+            if rc == 0 and os.path.exists(self.out_path):
+                self.done.emit(True, self.out_path)
+            else:
+                self.done.emit(False, f"Export failed (exit {rc})")
+        except Exception as exc:
+            self.done.emit(False, str(exc))
 
 
 class RuntimeInstallThread(QThread):
@@ -3390,6 +3415,8 @@ class BlenderVideoMapperQt(QMainWindow):
         profile.addAction("Open Presets Folder", self._open_presets_folder)
 
         tools = mb.addMenu("Tools")
+        tools.addAction("Export Prepared .blend for Render Farm…", self._export_prepared_blend)
+        tools.addSeparator()
         tools.addAction("Render History…", self._show_history_dialog)
         self._open_report_action = QAction("Open Last Run Report", self)
         self._open_report_action.triggered.connect(self._open_last_report)
@@ -4166,18 +4193,41 @@ class BlenderVideoMapperQt(QMainWindow):
     def _show_properties_dialog(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Properties & Settings")
-        dlg.setMinimumWidth(550)
-        lay = QVBoxLayout(dlg)
-        lay.setSpacing(12)
+        dlg.setMinimumWidth(580)
+        dlg.setMinimumHeight(440)
+        root = QVBoxLayout(dlg)
+        tabs = QTabWidget()
+        root.addWidget(tabs)
 
         def section_title(text: str) -> QLabel:
             lbl = QLabel(text)
             lbl.setObjectName("DialogSection")
             return lbl
 
-        # --- General Settings Section ---
-        lay.addWidget(section_title("GENERAL SETTINGS"))
-        
+        def _tab(title: str) -> QVBoxLayout:
+            page = QWidget()
+            v = QVBoxLayout(page)
+            v.setSpacing(10)
+            tabs.addTab(page, title)
+            return v
+
+        def _open_path(target) -> None:
+            target = Path(target)
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                if sys.platform == "darwin":
+                    subprocess.Popen(["open", str(target)])
+                elif os.name == "nt":
+                    os.startfile(str(target))  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen(["xdg-open", str(target)])
+            except Exception:
+                pass
+
+        # ── General ──────────────────────────────────────────────────────
+        lay = _tab("General")
+        lay.addWidget(section_title("BLENDER"))
+
         blender_row = QHBoxLayout()
         blender_edit = QLineEdit(self._blender_path)
         blender_edit.setPlaceholderText("Blender executable path")
@@ -4200,7 +4250,64 @@ class BlenderVideoMapperQt(QMainWindow):
                     QMessageBox.warning(dlg, "Invalid", "Could not find Blender executable there.")
         blender_locate.clicked.connect(do_locate_blender)
 
-        # --- Deadline Repository Section ---
+        detect_row = QHBoxLayout()
+        detect_btn = QPushButton("Auto-detect")
+        detect_btn.setToolTip("Search common install locations for Blender")
+        install_btn = QPushButton("Install Managed Blender…")
+        install_btn.setToolTip(f"Download a self-contained Blender {BLENDER_RUNTIME_VERSION} runtime")
+        detect_row.addWidget(detect_btn)
+        detect_row.addWidget(install_btn)
+        detect_row.addStretch()
+        lay.addLayout(detect_row)
+        blender_ver_lbl = QLabel("")
+        blender_ver_lbl.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        blender_ver_lbl.setWordWrap(True)
+        lay.addWidget(blender_ver_lbl)
+
+        def do_check_version() -> None:
+            exe = blender_edit.text().strip()
+            if not exe or not Path(exe).exists():
+                blender_ver_lbl.setText("No valid Blender path set.")
+                return
+            try:
+                out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15)
+                text = (out.stdout or out.stderr).strip()
+                first = text.splitlines()[0] if text else ""
+                blender_ver_lbl.setText(f"✓ {first}" if first else "Could not read Blender version.")
+            except Exception as exc:
+                blender_ver_lbl.setText(f"Version check failed: {exc}")
+
+        def do_autodetect() -> None:
+            found = _find_blender(blender_edit.text().strip())
+            if found:
+                blender_edit.setText(found)
+                do_check_version()
+            else:
+                blender_ver_lbl.setText("No Blender found in the usual locations.")
+
+        detect_btn.clicked.connect(do_autodetect)
+        install_btn.clicked.connect(self._install_managed_runtime)
+        blender_edit.editingFinished.connect(do_check_version)
+        do_check_version()
+
+        lay.addWidget(section_title("BEHAVIOUR"))
+        behave_row = QHBoxLayout()
+        behave_row.addWidget(QLabel("When render finishes:"))
+        when_combo = QComboBox()
+        _when_opts = [("Do nothing", "nothing"), ("Quit app", "quit"), ("Sleep computer", "sleep")]
+        when_combo.addItems([lbl for lbl, _ in _when_opts])
+        _vals = [v for _, v in _when_opts]
+        when_combo.setCurrentIndex(_vals.index(self._when_done) if self._when_done in _vals else 0)
+        behave_row.addWidget(when_combo)
+        behave_row.addStretch()
+        lay.addLayout(behave_row)
+        preview_cb = QCheckBox("Show a live frame preview while rendering")
+        preview_cb.setChecked(self._preview_enabled)
+        lay.addWidget(preview_cb)
+        lay.addStretch()
+
+        # ── Deadline ─────────────────────────────────────────────────────
+        lay = _tab("Deadline")
         lay.addWidget(section_title("DEADLINE CONFIGURATION"))
 
         # Repo Path
@@ -4251,9 +4358,8 @@ class BlenderVideoMapperQt(QMainWindow):
         comment_row.addWidget(comment_edit, 1)
         lay.addLayout(comment_row)
 
-        # --- Diagnostics Section ---
-        lay.addWidget(section_title("DIAGNOSTICS & CUSTOM TOOLS"))
-        
+        lay.addWidget(section_title("CONNECTION"))
+
         status_lbl = QLabel("Connection status: Not tested")
         status_lbl.setStyleSheet(f"color: {self._palette.text_faint}; font-size: 11px; font-weight: bold;")
         lay.addWidget(status_lbl)
@@ -4266,10 +4372,45 @@ class BlenderVideoMapperQt(QMainWindow):
         diag_btn_layout.addWidget(export_files_btn)
         diag_btn_layout.addStretch()
         lay.addLayout(diag_btn_layout)
+        lay.addStretch()
 
-        # Connect dialog button box
+        # ── Diagnostics ──────────────────────────────────────────────────
+        lay = _tab("Diagnostics")
+        lay.addWidget(section_title("ABOUT"))
+        lay.addWidget(QLabel(f"{APP_NAME}  ·  v{APP_VERSION}  ·  {platform.system()} {platform.machine()}"))
+
+        lay.addWidget(section_title("BUNDLED TOOLS"))
+        ff_lbl = QLabel(f"ffmpeg:   {find_ffmpeg_tool('ffmpeg') or 'not found'}\n"
+                        f"ffprobe:  {_find_ffprobe() or 'not found'}")
+        ff_lbl.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        ff_lbl.setWordWrap(True)
+        lay.addWidget(ff_lbl)
+
+        lay.addWidget(section_title("FILES & LOGS"))
+        data_dir = PROFILE_PATH.parent
+        data_row = QHBoxLayout()
+        data_row.addWidget(QLabel("App data folder:"))
+        data_path = QLineEdit(str(data_dir))
+        data_path.setReadOnly(True)
+        data_row.addWidget(data_path, 1)
+        open_data_btn = QPushButton("Open")
+        open_data_btn.clicked.connect(lambda: _open_path(data_dir))
+        data_row.addWidget(open_data_btn)
+        lay.addLayout(data_row)
+        diag_tools = QHBoxLayout()
+        open_log_btn = QPushButton("Open Logs Folder")
+        open_log_btn.clicked.connect(lambda: _open_path(LOG_PATH.parent))
+        copy_diag_btn = QPushButton("Copy Diagnostics")
+        copy_diag_btn.clicked.connect(self._copy_diagnostics)
+        diag_tools.addWidget(open_log_btn)
+        diag_tools.addWidget(copy_diag_btn)
+        diag_tools.addStretch()
+        lay.addLayout(diag_tools)
+        lay.addStretch()
+
+        # Dialog buttons live below the tabs.
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        lay.addWidget(btns)
+        root.addWidget(btns)
 
         # Handle Ok/Cancel
         def on_accept() -> None:
@@ -4284,7 +4425,17 @@ class BlenderVideoMapperQt(QMainWindow):
             self.deadline_panel.dl_repo_edit.setText(self._deadline_repo_path)
             self.deadline_panel.dl_name_template_edit.setText(self._deadline_job_name_template)
             self.deadline_panel.dl_comment_edit.setText(self._deadline_comment)
-            
+
+            # Behaviour
+            self._when_done = _vals[when_combo.currentIndex()]
+            _menu_label = {"nothing": "Do Nothing", "quit": "Quit App", "sleep": "Sleep Computer"}.get(self._when_done)
+            if _menu_label and hasattr(self, "_when_actions") and _menu_label in self._when_actions:
+                self._when_actions[_menu_label].setChecked(True)
+            if hasattr(self, "preview_action"):
+                self.preview_action.setChecked(preview_cb.isChecked())
+            else:
+                self._preview_enabled = preview_cb.isChecked()
+
             self._schedule_save()
             dlg.accept()
 
@@ -5334,6 +5485,74 @@ class BlenderVideoMapperQt(QMainWindow):
             self.scene_panel.scene_edit.text().strip()
             and self.scene_panel.get_assignments()
         )
+
+    def _export_prepared_blend(self) -> None:
+        """Bake the current video mapping + render settings into a standalone
+        .blend that any render farm (Flamenco, BlendFarm, cloud, plain Blender)
+        can render — no Deadline required."""
+        if self._is_rendering:
+            QMessageBox.information(self, "Busy", "Finish the current render first.")
+            return
+        scene = self.scene_panel.scene_edit.text().strip()
+        assignments = self.scene_panel.get_assignments()
+        if not scene or not file_exists(scene) or not assignments:
+            QMessageBox.information(self, "Export Prepared .blend",
+                                    "Load a scene and map at least one video first.")
+            return
+        blender = self._ensure_blender(interactive=True)
+        if not blender:
+            return
+        try:
+            worker = _resolve_runtime_script("blender_worker.py")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+            return
+        default_name = f"{Path(scene).stem}_prepared.blend"
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Export Prepared .blend", str(Path.home() / default_name), "Blender (*.blend)")
+        if not out:
+            return
+        if not out.lower().endswith(".blend"):
+            out += ".blend"
+        # Offer to pack the videos in so the .blend is fully portable (no shared
+        # storage needed) — at the cost of a larger file.
+        pack = QMessageBox.question(
+            self, "Pack video files?",
+            "Pack the video file(s) into the .blend so it renders on any machine "
+            "without shared storage?\n\nYes = one self-contained (larger) file.\n"
+            "No  = smaller file; workers must be able to reach the source videos.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+
+        asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
+        opts = self.render_panel.render_options()
+        cfg = JobConfig(
+            scene_path=scene, video_path=asn[0].video_path,
+            target_material=asn[0].material_name,
+            target_camera=self.scene_panel.camera_combo.currentText(),
+            output_path=str(Path(out).with_suffix("")), render=opts, safe_mode=True,
+            material_assignments=asn, prepared_blend_path=out, pack_blend=pack,
+        )
+        self._append_log(f"[app] Exporting prepared .blend → {out} (pack={pack})")
+        self._export_thread = ExportBlendThread(blender, worker, cfg, out)
+        self._export_thread.log.connect(self._append_log)
+        self._export_thread.done.connect(self._on_export_blend_done)
+        self._export_thread.start()
+
+    def _on_export_blend_done(self, ok: bool, info: str) -> None:
+        if not ok:
+            self._append_log(f"[error] Prepared .blend export failed: {info}")
+            QMessageBox.warning(self, "Export Failed", info)
+            return
+        self._append_log(f"[app] Prepared .blend ready: {info}")
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", info])
+            elif os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", info])
+            else:
+                subprocess.Popen(["xdg-open", str(Path(info).parent)])
+        except Exception:
+            pass
 
     def _render_preview_frame(self) -> None:
         """Render the selected frame from the *current UI state* into the Live

@@ -592,6 +592,27 @@ def main() -> None:
         )
     configure_render(config)
 
+    # Prepared-.blend export: the scene now has the video mapping and render
+    # settings baked in, so save it as a standalone .blend that any render farm
+    # (Flamenco, BlendFarm, cloud, or plain Blender) can render — then stop.
+    prepared = str(config.get("prepared_blend_path", "")).strip()
+    if prepared:
+        Path(prepared).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        if config.get("pack_blend", False):
+            try:
+                bpy.ops.file.pack_all()
+                log("Packed external files into the .blend")
+            except Exception as exc:
+                log(f"Warning: could not pack files: {exc}")
+        else:
+            try:
+                bpy.ops.file.make_paths_relative()
+            except Exception:
+                pass
+        bpy.ops.wm.save_as_mainfile(filepath=str(Path(prepared).expanduser()))
+        log(f"Prepared .blend saved: {prepared}")
+        return
+
     setup_audio(
         bpy.context.scene,
         config.get("audio_paths") or str(config.get("audio_path", "")).strip(),
