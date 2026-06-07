@@ -56,10 +56,47 @@ def load_scene(scene_path: Path) -> None:
         raise RuntimeError(f"Unsupported scene extension: {ext}")
 
 
+def discover_settings() -> dict:
+    """Read render/timeline/colour settings straight from the .blend so the app
+    can mirror what the artist set up in the scene."""
+    s: dict = {}
+    try:
+        scene = bpy.context.scene
+        r = scene.render
+        # Effective fps (accounts for NTSC bases like 23.976 → fps 24 / base 1.001).
+        base = getattr(r, "fps_base", 1.0) or 1.0
+        s["fps"] = int(round(r.fps / base))
+        s["frame_start"] = int(scene.frame_start)
+        s["frame_end"] = int(scene.frame_end)
+        s["frame_step"] = int(getattr(scene, "frame_step", 1))
+        s["width"] = int(r.resolution_x)
+        s["height"] = int(r.resolution_y)
+        s["resolution_percentage"] = int(r.resolution_percentage)
+        s["engine"] = str(r.engine)
+        s["film_transparent"] = bool(getattr(r, "film_transparent", False))
+        # Engine-specific sample counts.
+        eng = str(r.engine)
+        if eng == "CYCLES" and hasattr(scene, "cycles"):
+            s["samples"] = int(getattr(scene.cycles, "samples", 64))
+            s["use_denoise"] = bool(getattr(scene.cycles, "use_denoising", False))
+        elif "EEVEE" in eng and hasattr(scene, "eevee"):
+            s["samples"] = int(getattr(scene.eevee, "taa_render_samples", 64))
+        # Colour management.
+        vs = getattr(scene, "view_settings", None)
+        if vs is not None:
+            s["view_transform"] = str(vs.view_transform)
+            s["look"] = str(vs.look)
+            s["exposure"] = float(vs.exposure)
+            s["gamma"] = float(vs.gamma)
+    except Exception as exc:  # never let settings probing break discovery
+        log(f"settings probe warning: {exc}")
+    return s
+
+
 def discover() -> dict:
     materials = sorted({m.name for m in bpy.data.materials if m is not None and m.name})
     cameras = sorted({obj.name for obj in bpy.data.objects if obj and obj.type == "CAMERA"})
-    return {"materials": materials, "cameras": cameras}
+    return {"materials": materials, "cameras": cameras, "settings": discover_settings()}
 
 
 def main() -> None:

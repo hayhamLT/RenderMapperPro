@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-
 VIDEO_MAPPING_MODE_EMISSION = "EMISSION_FULL_BRIGHT"
 VIDEO_MAPPING_MODE_BASE_COLOR = "BASE_COLOR_ALPHA"
 
@@ -67,6 +66,7 @@ class JobConfig:
     deadline_whitelist: str = ""
     submit_scene: bool = True
     preview_path: str = ""
+    preview_frame: int = 0   # >0 → render only this single scene frame (fast preview)
     audio_path: str = ""   # legacy single source clip to mux audio from ("" = silent)
     audio_paths: list[str] = field(default_factory=list)  # clips to mux audio from (one strip each)
     material_assignments: list[MaterialVideoAssignment] = field(default_factory=list)

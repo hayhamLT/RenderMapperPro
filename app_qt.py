@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QTabBar,
     QTableWidget,
@@ -114,6 +115,9 @@ DISCOVERY_TIMEOUT = 600
 PROFILE_PATH = Path.home() / ".blender_video_mapper" / "profile.json"
 PRESETS_DIR = Path.home() / ".blender_video_mapper" / "presets"
 HISTORY_PATH = Path.home() / ".blender_video_mapper" / "history.json"
+# Branded file extensions (JSON underneath) for user-facing Save/Open.
+PROJECT_EXT = ".rmproj"      # full project: scene, clips, mappings, queue
+PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
@@ -545,6 +549,7 @@ class RenderJob:
     id: int
     video_path: str = ""
     label: str = ""
+    custom_label: bool = False   # True once the user renames the job by hand
     output_path: str = ""
     output_input: str = ""
     scene_path: str = ""
@@ -577,7 +582,7 @@ class RenderJob:
 
 
 class DiscoveryThread(QThread):
-    discovered = Signal(list, list)
+    discovered = Signal(list, list, dict)
     error = Signal(str)
     log = Signal(str)
 
@@ -589,14 +594,14 @@ class DiscoveryThread(QThread):
 
     def run(self) -> None:
         try:
-            mats, cams = discover_scene_elements(
+            mats, cams, settings = discover_scene_elements(
                 blender_executable=self.blender,
                 discovery_script_path=self.script,
                 scene_path=self.scene,
                 on_log=self.log.emit,
                 hard_timeout_seconds=DISCOVERY_TIMEOUT,
             )
-            self.discovered.emit(mats, cams)
+            self.discovered.emit(mats, cams, settings)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -853,9 +858,9 @@ ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
 ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
 ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
 
-_AUDIO_BADGE_PX = 16                    # logical size of the speaker glyph
-_AUDIO_BADGE_MARGIN = 4                # inset from the left row edge (just past the stripe)
-_AUDIO_TEXT_INDENT = 22               # fixed slot reserved on every row so text always aligns
+_AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
+_AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
+_AUDIO_TEXT_INDENT = 17               # fixed slot reserved on every row so text always aligns
 
 
 class MappingStripeDelegate(QStyledItemDelegate):
@@ -913,6 +918,9 @@ class AudioBadgeDelegate(MappingStripeDelegate):
     def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
         super().__init__(panel, "video", parent)
         self._toggle = toggle_cb
+        # Path of the row whose badge the cursor is currently over, set by the
+        # owning VideoListWidget so paint() can give it a hover affordance.
+        self._hover_badge: Optional[str] = None
 
     @staticmethod
     def _badge_rect(item_rect: QRect) -> QRect:
@@ -921,11 +929,33 @@ class AudioBadgeDelegate(MappingStripeDelegate):
         y = item_rect.center().y() - size // 2 + 1
         return QRect(x, y, size, size)
 
+    def _paint_row_background(self, painter, option) -> None:
+        """Fill the full row width with the hover / selection colour so the band
+        sits *behind* the badge slot too — the default delegate would only paint
+        from the indented text edge, leaving the badge floating outside it."""
+        st = option.state
+        pal = active_palette()
+        if st & QStyle.State_Selected:
+            color = QColor(pal.selection)
+        elif st & QStyle.State_MouseOver:
+            color = QColor(pal.surface_hover)
+        else:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(option.rect, T.RADIUS_SM, T.RADIUS_SM)
+        painter.restore()
+
     def paint(self, painter, option, index) -> None:  # type: ignore[override]
         self._paint_cross_highlight(painter, option, index)
-        has_audio = bool(index.data(ROLE_HAS_AUDIO))
-        # All rows share the same left indent so text is always column-aligned,
+        # Paint the hover/selection band across the whole row first so it reads
+        # as one interactive strip (badge included), then draw the label in the
+        # indented text slot. All rows share the same indent so text aligns
         # whether or not a badge is present.
+        self._paint_row_background(painter, option)
+        has_audio = bool(index.data(ROLE_HAS_AUDIO))
         opt = QStyleOptionViewItem(option)
         opt.rect = QRect(option.rect)
         opt.rect.setLeft(opt.rect.left() + _AUDIO_TEXT_INDENT)
@@ -933,9 +963,26 @@ class AudioBadgeDelegate(MappingStripeDelegate):
         self._paint_stripe(painter, option, index)
         if has_audio:
             muted = bool(index.data(ROLE_MUTED))
-            color = active_palette().text_faint if muted else active_palette().accent
+            pal = active_palette()
+            badge_r = self._badge_rect(option.rect)
+            hovered = self._hover_badge is not None and self._hover_badge == index.data(ROLE_VIDEO_PATH)
+            if hovered:
+                # Accent-tinted chip behind the speaker so it clearly reads as a
+                # clickable toggle on hover.
+                chip = QColor(pal.accent)
+                chip.setAlpha(60)
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(chip)
+                painter.drawRoundedRect(badge_r.adjusted(-3, -2, 3, 2), 5, 5)
+                painter.restore()
+            if muted:
+                color = pal.text_muted if hovered else pal.text_faint
+            else:
+                color = pal.accent
             pm = icons.pixmap("volume_x" if muted else "volume", color, _AUDIO_BADGE_PX)
-            painter.drawPixmap(self._badge_rect(option.rect).topLeft(), pm)
+            painter.drawPixmap(badge_r.topLeft(), pm)
 
     def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
         # Intercept press/release/double-click on the badge so the click toggles
@@ -970,8 +1017,25 @@ class VideoListWidget(QListWidget):
         self.setAcceptDrops(False)
         self.setMouseTracking(True)
         vp = self.viewport()
+        vp.setMouseTracking(True)
         vp.setAcceptDrops(True)
         vp.installEventFilter(self)
+
+    def _update_badge_hover(self, pos) -> None:
+        """Track whether the cursor is over an audio badge and tell the delegate
+        so it can paint the hover affordance; also swap to a pointing cursor."""
+        deleg = self.itemDelegate()
+        if not isinstance(deleg, AudioBadgeDelegate):
+            return
+        new_path = None
+        idx = self.indexAt(pos)
+        if idx.isValid() and bool(idx.data(ROLE_HAS_AUDIO)):
+            if AudioBadgeDelegate._badge_rect(self.visualRect(idx)).contains(pos):
+                new_path = idx.data(ROLE_VIDEO_PATH)
+        if new_path != deleg._hover_badge:
+            deleg._hover_badge = new_path
+            self.viewport().setCursor(Qt.PointingHandCursor if new_path else Qt.ArrowCursor)
+            self.viewport().update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
@@ -1021,6 +1085,10 @@ class VideoListWidget(QListWidget):
                     self.files_dropped.emit(paths)
                     event.acceptProposedAction()
                     return True
+            elif t == QEvent.MouseMove:
+                self._update_badge_hover(event.position().toPoint())
+            elif t == QEvent.Leave:
+                self._update_badge_hover(QPoint(-1, -1))
         return super().eventFilter(watched, event)
 
 
@@ -1596,6 +1664,13 @@ class ScenePanel(QWidget):
         self._videos = videos
         self._refresh_lists()
 
+    def refresh_videos(self) -> None:
+        """Re-probe the current clips (audio streams, etc.) and rebuild the list.
+        Used on rescan so badges/info reflect the files on disk right now."""
+        for v in self._videos:
+            _audio_probe_cache.pop(v, None)
+        self._refresh_lists()
+
     def set_assignments(self, assignments: list[MaterialVideoAssignment]) -> None:
         self._assignments = assignments
         self._refresh_lists()
@@ -1919,6 +1994,46 @@ class RenderPanel(QWidget):
         except Exception:
             pass
 
+    def apply_scene_settings(self, s: dict) -> None:
+        """Mirror render/timeline/colour settings read from the .blend into the
+        UI. Only keys present in ``s`` are applied, so a partial probe is safe."""
+        if not s:
+            return
+        def setnum(widget, key):
+            if key in s and s[key] is not None:
+                widget.setText(str(int(s[key])) if isinstance(s[key], (int, float)) else str(s[key]))
+        setnum(self.width_edit, "width")
+        setnum(self.height_edit, "height")
+        setnum(self.fps_edit, "fps")
+        setnum(self.frame_start_edit, "frame_start")
+        setnum(self.frame_end_edit, "frame_end")
+        setnum(self.frame_step_edit, "frame_step")
+        setnum(self.samples_edit, "samples")
+        if "use_denoise" in s:
+            self.denoise_cb.setChecked(bool(s["use_denoise"]))
+        if "film_transparent" in s:
+            self.transparent_cb.setChecked(bool(s["film_transparent"]))
+        # Engine: map any EEVEE variant (EEVEE / EEVEE_NEXT) to the combo entry.
+        eng = str(s.get("engine", "")).upper()
+        if eng:
+            target = "CYCLES" if "CYCLES" in eng else ("BLENDER_EEVEE" if "EEVEE" in eng else "")
+            i = self.engine_combo.findText(target)
+            if i >= 0:
+                self.engine_combo.setCurrentIndex(i)
+        # Render scale → nearest preset (100/75/50/25).
+        if "resolution_percentage" in s:
+            pct = int(s["resolution_percentage"])
+            nearest = min((100, 75, 50, 25), key=lambda p: abs(p - pct))
+            self.scale_combo.setCurrentText(f"{nearest}%")
+        # Colour management.
+        vt = s.get("view_transform")
+        if vt and self.view_transform_combo.findText(str(vt)) >= 0:
+            self.view_transform_combo.setCurrentText(str(vt))
+        if "exposure" in s:
+            self.exposure_edit.setText(f"{float(s['exposure']):g}")
+        if "gamma" in s:
+            self.gamma_edit.setText(f"{float(s['gamma']):g}")
+
     def render_options(self) -> RenderOptions:
         def to_int(v: str, d: int) -> int:
             try:
@@ -2237,6 +2352,8 @@ class QueuePanel(QWidget):
     remove_jobs_requested = Signal(object)
     remove_selected_requested = Signal()
     duplicate_jobs_requested = Signal(object)
+    job_renamed = Signal(int, str)
+    clear_queue_requested = Signal()
     reveal_output_requested = Signal(int)
     open_output_requested = Signal(int)
     move_job_requested = Signal(int, int)  # job_id, delta (-1 up / +1 down)
@@ -2250,7 +2367,7 @@ class QueuePanel(QWidget):
         btns.setSpacing(6)
         self.queue_btn = QPushButton("")
         self.queue_btn.setObjectName("IconButton")
-        self.queue_btn.setToolTip("Add current scene/videos to the queue")
+        self.queue_btn.setToolTip("New job — add a copy of the current setup to the queue (⌘D duplicates a selected job)")
         self.queue_btn.setFixedSize(36, 30)
         self.queue_btn.clicked.connect(self.queue_requested.emit)
         self.render_selected_btn = QPushButton("")
@@ -2293,6 +2410,8 @@ class QueuePanel(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self._emit_job_selected)
         self.table.itemChanged.connect(self._on_item_changed)
+        # Double-click the Job name to rename it inline.
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setAlternatingRowColors(True)
@@ -2352,8 +2471,16 @@ class QueuePanel(QWidget):
             if done:
                 run_item.setToolTip("Completed — re-check to render again")
             self.table.setItem(r, 0, run_item)
-            self.table.setItem(r, 1, QTableWidgetItem(j.label or Path(j.video_path).name or f"Job {j.id}"))
-            self.table.setItem(r, 2, QTableWidgetItem(j.output_profile or "H264 MP4"))
+            job_item = QTableWidgetItem(j.label or Path(j.video_path).name or f"Job {j.id}")
+            # Only the Job-name cell is editable (double-click to rename); it
+            # carries the job id so the rename can be routed back.
+            job_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+            job_item.setData(Qt.UserRole, j.id)
+            job_item.setToolTip("Double-click to rename")
+            self.table.setItem(r, 1, job_item)
+            prof_item = QTableWidgetItem(j.output_profile or "H264 MP4")
+            prof_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.table.setItem(r, 2, prof_item)
             status_text = {
                 "idle": "idle",
                 "running": "run",
@@ -2439,12 +2566,22 @@ class QueuePanel(QWidget):
                 self.table.setCurrentCell(r, 1)
                 break
 
+    def _on_cell_double_clicked(self, row: int, col: int) -> None:
+        if col == 1:
+            item = self.table.item(row, 1)
+            if item is not None:
+                self.table.editItem(item)
+
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() != 0:
-            return
-        jid = item.data(Qt.UserRole)
-        if isinstance(jid, int):
-            self.job_run_toggled.emit(jid, item.checkState() == Qt.Checked)
+        if item.column() == 0:
+            jid = item.data(Qt.UserRole)
+            if isinstance(jid, int):
+                self.job_run_toggled.emit(jid, item.checkState() == Qt.Checked)
+        elif item.column() == 1:
+            jid = item.data(Qt.UserRole)
+            name = item.text().strip()
+            if isinstance(jid, int) and name:
+                self.job_renamed.emit(jid, name)
 
     def _selected_row_job_ids(self) -> list[int]:
         ids: list[int] = []
@@ -2466,22 +2603,27 @@ class QueuePanel(QWidget):
             self.table.selectRow(row)
 
         selected_ids = self._selected_row_job_ids()
-        if not selected_ids:
+        menu = QMenu(self)
+        dup_action = reveal_action = open_action = up_action = down_action = delete_action = None
+        if selected_ids:
+            first = selected_ids[0]
+            dup_action = menu.addAction(f"Duplicate  ({MOD_LABEL}D)")
+            menu.addSeparator()
+            reveal_action = menu.addAction(f"Reveal Output in {file_manager_name()}")
+            open_action = menu.addAction("Open Output")
+            menu.addSeparator()
+            up_action = menu.addAction("Move Up")
+            down_action = menu.addAction("Move Down")
+            menu.addSeparator()
+            delete_action = menu.addAction("Delete  (⌫)")
+        # Clear Queue is always available when there are any jobs.
+        clear_action = menu.addAction("Clear Queue…") if self.table.rowCount() else None
+        if menu.isEmpty():
             return
 
-        first = selected_ids[0]
-        menu = QMenu(self)
-        dup_action = menu.addAction(f"Duplicate  ({MOD_LABEL}D)")
-        menu.addSeparator()
-        reveal_action = menu.addAction(f"Reveal Output in {file_manager_name()}")
-        open_action = menu.addAction("Open Output")
-        menu.addSeparator()
-        up_action = menu.addAction("Move Up")
-        down_action = menu.addAction("Move Down")
-        menu.addSeparator()
-        delete_action = menu.addAction("Delete  (⌫)")
-
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action is None:
+            return
         if action == dup_action:
             self.duplicate_jobs_requested.emit(selected_ids)
         elif action == delete_action:
@@ -2494,6 +2636,8 @@ class QueuePanel(QWidget):
             self.move_job_requested.emit(first, -1)
         elif action == down_action:
             self.move_job_requested.emit(first, 1)
+        elif action == clear_action:
+            self.clear_queue_requested.emit()
 
 
 class PresetBrowserPanel(QWidget):
@@ -2619,8 +2763,24 @@ class LogsPanel(QWidget):
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(4)
 
+        # Full history of every line; the view shows everything (detailed),
+        # narrowed live by the text filter and the level selector.
+        self._raw: list[str] = []
+        self._filter_text = ""
+        self._level = "All"
+
         hdr = QHBoxLayout()
         hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setSpacing(6)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter logs…")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(self._on_filter_text)
+        self._filter_icon = self.filter_edit.addAction(QIcon(), QLineEdit.LeadingPosition)
+        self.level_combo = QComboBox()
+        self.level_combo.addItems(["All", "Warnings & errors", "Errors only"])
+        self.level_combo.setToolTip("Show only lines at this level")
+        self.level_combo.currentTextChanged.connect(self._on_level)
         self.clear_btn = QPushButton("")
         self.clear_btn.setObjectName("IconButton")
         self.clear_btn.setToolTip("Clear the log")
@@ -2631,7 +2791,8 @@ class LogsPanel(QWidget):
         self.copy_btn.setToolTip("Copy diagnostics to clipboard")
         self.copy_btn.setFixedSize(30, 24)
         self.copy_btn.clicked.connect(self.copy_diag.emit)
-        hdr.addStretch()
+        hdr.addWidget(self.filter_edit, 1)
+        hdr.addWidget(self.level_combo)
         hdr.addWidget(self.clear_btn)
         hdr.addWidget(self.copy_btn)
         lay.addLayout(hdr)
@@ -2646,6 +2807,47 @@ class LogsPanel(QWidget):
     def restyle(self, pal: T.Palette) -> None:
         self.clear_btn.setIcon(icons.icon("trash", pal.text, 14))
         self.copy_btn.setIcon(icons.icon("copy", pal.text, 14))
+        self._filter_icon.setIcon(icons.icon("search", pal.text_muted, 14))
+
+    # ── filtering ─────────────────────────────────────────────────────────
+    def _on_filter_text(self, text: str) -> None:
+        self._filter_text = text.strip().lower()
+        self._rerender()
+
+    def _on_level(self, level: str) -> None:
+        self._level = level
+        self._rerender()
+
+    @staticmethod
+    def _is_error(low: str) -> bool:
+        return any(k in low for k in ("error", "traceback", "failed", "cannot", "exception", "critical", "not found"))
+
+    @staticmethod
+    def _is_warning(low: str) -> bool:
+        return any(k in low for k in ("warning", "warn", "skipped", "timeout", "unavailable"))
+
+    def _passes(self, line: str) -> bool:
+        low = line.lower()
+        if self._filter_text and self._filter_text not in low:
+            return False
+        if self._level == "Errors only":
+            return self._is_error(low)
+        if self._level == "Warnings & errors":
+            return self._is_error(low) or self._is_warning(low)
+        return True
+
+    def _rerender(self) -> None:
+        self.text.clear()
+        for line in self._raw:
+            self._emit(line)
+
+    def _emit(self, line: str) -> None:
+        import html
+        if not self._passes(line):
+            return
+        color = self._line_color(line, active_palette())
+        safe = html.escape(line).replace(" ", "&nbsp;")
+        self.text.append(f'<span style="color:{color}; white-space:pre;">{safe}</span>')
 
     @staticmethod
     def _line_color(line: str, pal: T.Palette) -> str:
@@ -2664,13 +2866,100 @@ class LogsPanel(QWidget):
         return pal.text_muted
 
     def append(self, line: str) -> None:
-        import html
-        color = self._line_color(line, active_palette())
-        safe = html.escape(line).replace(" ", "&nbsp;")
-        self.text.append(f'<span style="color:{color}; white-space:pre;">{safe}</span>')
+        self._raw.append(line)
+        if len(self._raw) > 8000:          # cap memory for very long sessions
+            self._raw = self._raw[-6000:]
+            self._rerender()
+            return
+        self._emit(line)
 
     def _clear(self) -> None:
+        self._raw.clear()
         self.text.clear()
+
+
+class _PreviewImage(QLabel):
+    """Paints its image scaled-to-fit (Fit) or at 1:1 pixels (100%). Double-click
+    toggles between the two; at 100% it can be grabbed and panned. Falls back to
+    placeholder text when there is no image."""
+
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self._src: Optional[QPixmap] = None
+        self._scroll: Optional[QScrollArea] = None   # set by the panel
+        self._on_toggle = None                       # callback(QPointF) on dbl-click
+        self._pannable = False
+        self._panning = False
+        self._pan_anchor = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+
+    def set_source(self, pm: QPixmap) -> None:
+        self._src = pm
+        self.update()
+
+    def clear_source(self) -> None:
+        self._src = None
+        self.update()
+
+    def set_fit(self) -> None:
+        """Fill the scroll viewport and scale-to-fit."""
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        self.update()
+
+    def set_fixed(self, w: int, h: int) -> None:
+        """Pin to an exact pixel size (1:1); the scroll area pans when this is
+        larger than the viewport."""
+        self.setFixedSize(max(1, int(w)), max(1, int(h)))
+        self.update()
+
+    def set_pannable(self, on: bool) -> None:
+        self._pannable = on
+        if not self._panning:
+            self.setCursor(Qt.OpenHandCursor if on else Qt.ArrowCursor)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        if self._src is not None and not self._src.isNull() and self._on_toggle:
+            self._on_toggle(event.position())
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if self._pannable and event.button() == Qt.LeftButton and self._scroll is not None:
+            self._panning = True
+            self._pan_anchor = event.globalPosition().toPoint()
+            self._h0 = self._scroll.horizontalScrollBar().value()
+            self._v0 = self._scroll.verticalScrollBar().value()
+            self.setCursor(Qt.ClosedHandCursor)
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._panning and self._scroll is not None:
+            delta = event.globalPosition().toPoint() - self._pan_anchor
+            self._scroll.horizontalScrollBar().setValue(self._h0 - delta.x())
+            self._scroll.verticalScrollBar().setValue(self._v0 - delta.y())
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if self._panning:
+            self._panning = False
+            self.setCursor(Qt.OpenHandCursor if self._pannable else Qt.ArrowCursor)
+        else:
+            super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        if self._src is None or self._src.isNull():
+            super().paintEvent(event)   # placeholder text
+            return
+        scaled = self._src.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
 
 
 class PreviewPanel(QWidget):
@@ -2687,23 +2976,103 @@ class PreviewPanel(QWidget):
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(6)
         self.caption = QLabel("Live frame preview")
         self.caption.setObjectName("FieldLabel")
         head.addWidget(self.caption)
         head.addStretch()
-        self.preview_frame_btn = QPushButton("Preview Frame")
-        self.preview_frame_btn.setObjectName("SmallButton")
-        self.preview_frame_btn.setToolTip("Render the first frame with the current mappings")
+        # Preview render scale — full resolution by default, with quick fractions
+        # for faster (lower-res) previews.
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(["Full", "1/2", "1/4", "1/8"])
+        self.scale_combo.setToolTip("Preview render resolution (fraction of the output resolution)")
+        self.scale_combo.setMinimumWidth(78)
+        self.scale_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        head.addWidget(self.scale_combo)
+        self.auto_btn = QPushButton()
+        self.auto_btn.setObjectName("IconButton")
+        self.auto_btn.setFixedSize(34, 28)
+        self.auto_btn.setCheckable(True)
+        self.auto_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_btn.setToolTip("Auto-render: re-render the preview whenever you change a setting or scrub")
+        self.auto_btn.toggled.connect(self._on_auto_toggled)
+        head.addWidget(self.auto_btn)
+        self.preview_frame_btn = QPushButton()
+        self.preview_frame_btn.setObjectName("IconButton")
+        self.preview_frame_btn.setFixedSize(34, 28)
+        self.preview_frame_btn.setCursor(Qt.PointingHandCursor)
+        self.preview_frame_btn.setToolTip("Render the selected frame with the current mappings")
         self.preview_frame_btn.clicked.connect(self.preview_frame_requested.emit)
         head.addWidget(self.preview_frame_btn)
         lay.addLayout(head)
 
+        # ── frame scrubber — a self-contained bar to choose the frame ────────
+        self._sync_guard = False
+
+        def _step_btn(tip: str, delta: int) -> QPushButton:
+            b = QPushButton()
+            b.setObjectName("SmallButton")
+            b.setFixedSize(28, 26)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setToolTip(tip)
+            b.setAutoRepeat(True)
+            b.clicked.connect(lambda: self._nudge_frame(delta))
+            return b
+
+        scrub = QHBoxLayout()
+        scrub.setContentsMargins(10, 7, 12, 7)
+        scrub.setSpacing(8)
+        self.frame_icon = QLabel()
+        self.frame_icon.setFixedSize(16, 16)
+        self.prev_btn = _step_btn("Previous frame", -1)
+        self.next_btn = _step_btn("Next frame", +1)
+        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider.setMinimum(1)
+        self.frame_slider.setMaximum(1)
+        self.frame_slider.setToolTip("Drag to pick the frame to preview")
+        self.frame_spin = QSpinBox()
+        self.frame_spin.setObjectName("FrameSpin")
+        self.frame_spin.setMinimum(1)
+        self.frame_spin.setMaximum(1)
+        self.frame_spin.setFixedWidth(66)
+        self.frame_spin.setAlignment(Qt.AlignCenter)
+        self.frame_spin.setButtonSymbols(QSpinBox.NoButtons)
+        self.total_lbl = QLabel("/ 1")
+        self.total_lbl.setObjectName("HintLabel")
+
+        self.frame_slider.valueChanged.connect(self._on_slider)
+        self.frame_spin.valueChanged.connect(self._on_spin)
+        # Auto-render fires on a *settled* value (slider released / spin commit)
+        # rather than every intermediate tick, so dragging spawns one render.
+        self.scale_combo.currentTextChanged.connect(lambda _v: self._maybe_auto_render())
+        self.frame_slider.sliderReleased.connect(self._maybe_auto_render)
+        self.frame_spin.editingFinished.connect(self._maybe_auto_render)
+
+        scrub.addWidget(self.frame_icon)
+        scrub.addWidget(self.prev_btn)
+        scrub.addWidget(self.frame_slider, 1)
+        scrub.addWidget(self.next_btn)
+        scrub.addWidget(self.frame_spin)
+        scrub.addWidget(self.total_lbl)
+        self.frame_row_widget = QFrame()
+        self.frame_row_widget.setObjectName("ScrubBar")
+        self.frame_row_widget.setLayout(scrub)
+        lay.addWidget(self.frame_row_widget)
+
         self._pixmap: Optional[QPixmap] = None
-        self.image_label = QLabel("No preview yet.\nStart a render with Live Preview enabled.")
+        self.image_label = _PreviewImage("No preview yet.\nStart a render with Live Preview enabled.")
         self.image_label.setObjectName("HintLabel")
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setMinimumHeight(120)
-        self.image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.image_label.setToolTip("Double-click to toggle Fit ⇄ 100% · drag to pan at 100%")
+        # Scroll area lets fixed-zoom previews (100%, 200%…) pan; in Fit mode the
+        # label is resized to the viewport and scaled to fit.
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(self.image_label)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setAlignment(Qt.AlignCenter)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.image_label._scroll = self.scroll
+        self.image_label._on_toggle = self._toggle_zoom
+        self._zoom_100 = False
 
         self._has_video = _HAS_MULTIMEDIA
         if self._has_video:
@@ -2711,7 +3080,7 @@ class PreviewPanel(QWidget):
             frame_wrap = QWidget()
             fl = QVBoxLayout(frame_wrap)
             fl.setContentsMargins(0, 0, 0, 0)
-            fl.addWidget(self.image_label)
+            fl.addWidget(self.scroll)
             self.stack.addWidget(frame_wrap)            # index 0 — live frames
             self.video_widget = QVideoWidget()
             self.stack.addWidget(self.video_widget)     # index 1 — finished video
@@ -2743,7 +3112,115 @@ class PreviewPanel(QWidget):
             self.controls.setVisible(False)
             lay.addWidget(self.controls)
         else:
-            lay.addWidget(self.image_label, 1)
+            lay.addWidget(self.scroll, 1)
+
+        self.auto_btn.setChecked(True)   # auto-render on by default
+        self.restyle(active_palette())
+
+    # ── frame picker ─────────────────────────────────────────────────────
+    def restyle(self, palette) -> None:
+        """Re-tint the scrubber icons for the active palette (called on theme
+        change, and once at construction)."""
+        self.frame_icon.setPixmap(icons.pixmap("film", palette.text_muted, 16))
+        self.prev_btn.setIcon(icons.icon("chevron_left", palette.text, 16))
+        self.next_btn.setIcon(icons.icon("chevron_right", palette.text, 16))
+        self.preview_frame_btn.setIcon(icons.icon("camera", palette.text, 16))
+        self._retint_auto_icon()
+
+    def _retint_auto_icon(self) -> None:
+        pal = active_palette()
+        col = pal.accent_text if self.auto_btn.isChecked() else pal.text
+        self.auto_btn.setIcon(icons.icon("refresh", col, 15))
+
+    def _on_auto_toggled(self, on: bool) -> None:
+        self._retint_auto_icon()
+        # Turning Auto on renders the current frame immediately for feedback.
+        if on and self.frame_row_widget.isEnabled():
+            self.preview_frame_requested.emit()
+
+    def _maybe_auto_render(self) -> None:
+        if self.auto_btn.isChecked() and self.frame_row_widget.isEnabled():
+            self.preview_frame_requested.emit()
+
+    def _nudge_frame(self, delta: int) -> None:
+        before = self.frame_spin.value()
+        self.frame_spin.setValue(before + delta)
+        if self.frame_spin.value() != before:
+            self._maybe_auto_render()
+
+    def _on_slider(self, value: int) -> None:
+        if self._sync_guard:
+            return
+        self._sync_guard = True
+        self.frame_spin.setValue(value)
+        self._sync_guard = False
+
+    def _on_spin(self, value: int) -> None:
+        if self._sync_guard:
+            return
+        self._sync_guard = True
+        self.frame_slider.setValue(value)
+        self._sync_guard = False
+
+    def set_frame_range(self, start: int, end: int) -> None:
+        """Point the slider/spin at the render's frame range, keeping the
+        current selection where possible. A single-frame range disables the
+        picker (nothing to scrub)."""
+        lo, hi = (start, end) if start <= end else (end, start)
+        cur = self.current_frame()
+        self._sync_guard = True
+        for w in (self.frame_slider, self.frame_spin):
+            w.setMinimum(lo)
+            w.setMaximum(hi)
+            w.setValue(min(max(cur, lo), hi))
+        self.frame_slider.setPageStep(max(1, (hi - lo) // 10))
+        self._sync_guard = False
+        self.total_lbl.setText(f"/ {hi}")
+        self.frame_row_widget.setEnabled(hi > lo)
+
+    def current_frame(self) -> int:
+        return self.frame_spin.value()
+
+    def preview_scale(self) -> float:
+        return {"Full": 1.0, "1/2": 0.5, "1/4": 0.25, "1/8": 0.125}.get(self.scale_combo.currentText(), 1.0)
+
+    def _goto_fit(self) -> None:
+        self._zoom_100 = False
+        self.scroll.setWidgetResizable(True)
+        self.image_label.set_pannable(False)
+        self.image_label.set_fit()
+
+    def _goto_100(self, focus=None) -> None:
+        """Switch to 1:1 pixels. ``focus`` (a QPointF in the label's current
+        coordinates) is the point to keep centred — so double-clicking a spot
+        zooms in on that spot, not the middle."""
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        self._zoom_100 = True
+        iw, ih = self._pixmap.width(), self._pixmap.height()
+        # Map the click (in the Fit-scaled, letterboxed label) to a source pixel.
+        cx, cy = iw / 2.0, ih / 2.0
+        if focus is not None:
+            lw, lh = self.image_label.width(), self.image_label.height()
+            fit = min(lw / iw, lh / ih) if iw and ih else 1.0
+            off_x, off_y = (lw - iw * fit) / 2.0, (lh - ih * fit) / 2.0
+            cx = min(max((focus.x() - off_x) / fit, 0.0), iw)
+            cy = min(max((focus.y() - off_y) / fit, 0.0), ih)
+        self.scroll.setWidgetResizable(False)
+        self.image_label.set_fixed(iw, ih)
+        self.image_label.set_pannable(True)
+
+        def _center():
+            vp = self.scroll.viewport()
+            self.scroll.horizontalScrollBar().setValue(int(cx - vp.width() / 2))
+            self.scroll.verticalScrollBar().setValue(int(cy - vp.height() / 2))
+        QTimer.singleShot(0, _center)   # after the resize/layout settles
+
+    def _toggle_zoom(self, focus=None) -> None:
+        if self._zoom_100:
+            self._goto_fit()
+        else:
+            self._goto_100(focus)
 
     # ── live frames ──────────────────────────────────────────────────────
     def set_image_path(self, path: str) -> None:
@@ -2756,18 +3233,11 @@ class PreviewPanel(QWidget):
             return
         self._pixmap = pm
         self.caption.setText("Live frame preview")
-        self._rescale()
-
-    def _rescale(self) -> None:
-        if self._pixmap is None:
-            return
-        self.image_label.setPixmap(
-            self._pixmap.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
-
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        self._rescale()
-        super().resizeEvent(event)
+        self.image_label.set_source(pm)   # _PreviewImage rescales itself on paint/resize
+        # Keep the current zoom across new frames; at 100% re-pin to the new
+        # frame's pixel size (same resolution → preserves the pan position).
+        if self._zoom_100:
+            self.image_label.set_fixed(pm.width(), pm.height())
 
     def clear_preview(self) -> None:
         self._pixmap = None
@@ -2775,9 +3245,10 @@ class PreviewPanel(QWidget):
             self._stop_video()
             self.stack.setCurrentIndex(0)
             self.controls.setVisible(False)
-        self.image_label.clear()
+        self.image_label.clear_source()
         self.image_label.setText("No preview yet.\nStart a render with Live Preview enabled.")
         self.caption.setText("Live frame preview")
+        self._goto_fit()
 
     # ── finished video playback ──────────────────────────────────────────
     def play_video(self, path: str) -> None:
@@ -2817,9 +3288,6 @@ class PreviewPanel(QWidget):
         muted = not self.audio.isMuted()
         self.audio.setMuted(muted)
         self.mute_btn.setText("Unmute" if muted else "Mute")
-
-    def restyle(self, pal: T.Palette) -> None:
-        return
 
 
 class BlenderVideoMapperQt(QMainWindow):
@@ -3052,7 +3520,8 @@ class BlenderVideoMapperQt(QMainWindow):
         list. Click the badge (or right-click → <i>Mute audio</i>) to drop that clip's audio; every
         non-muted mapped clip is mixed into the rendered video.</p>
         <h3>Queue</h3>
-        <p class="muted">Click a row to activate and edit it. Duplicate with <kbd>⌘D</kbd>,
+        <p class="muted">Click a row to activate and edit it; <b>double-click the name</b> to rename.
+        New jobs (the <b>+</b> button) are added at the top. Duplicate with <kbd>⌘D</kbd>,
         delete with <kbd>⌫</kbd>, or right-click for Duplicate / Reveal / Open / Move / Delete.
         Tick the <b>Run</b> box to include a job when you press Start.</p>
         <h3>Layout &amp; appearance</h3>
@@ -3204,6 +3673,9 @@ class BlenderVideoMapperQt(QMainWindow):
         self.render_panel.fps_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.frame_start_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.frame_end_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.frame_start_edit.textChanged.connect(lambda _v: self._sync_preview_frame_range())
+        self.render_panel.frame_end_edit.textChanged.connect(lambda _v: self._sync_preview_frame_range())
+        self._sync_preview_frame_range()  # seed the picker from the default range
         self.render_panel.frame_step_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.engine_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.samples_edit.textChanged.connect(lambda _v: self._on_settings_changed())
@@ -3238,6 +3710,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self.queue_panel.open_output_requested.connect(self._open_job_output)
         self.queue_panel.move_job_requested.connect(self._move_job)
         self.queue_panel.duplicate_jobs_requested.connect(self._duplicate_jobs)
+        self.queue_panel.job_renamed.connect(self._on_job_renamed)
+        self.queue_panel.clear_queue_requested.connect(self._clear_queue)
 
         self.presets_panel.save_requested.connect(self._save_preset)
         self.presets_panel.load_requested.connect(self._load_preset_entry)
@@ -3395,36 +3869,11 @@ class BlenderVideoMapperQt(QMainWindow):
 
     # ── Toast notifications ──────────────────────────────────────────────
     def _show_toast(self, message: str, kind: str = "info") -> None:
-        pal = self._palette
-        color = {"success": pal.success, "error": pal.danger,
-                 "warning": pal.warning, "info": pal.info}.get(kind, pal.info)
-        if self._toast is not None:
-            self._toast.deleteLater()
-            self._toast = None
-        toast = QLabel(message, self)
-        toast.setWordWrap(True)
-        toast.setMaximumWidth(380)
-        toast.setStyleSheet(
-            f"background:{pal.surface_alt}; color:{pal.text};"
-            f"border:1px solid {pal.border_strong}; border-left:4px solid {color};"
-            f"border-radius:8px; padding:11px 15px; font-weight:600; font-size:{T.FONT_BASE}px;"
-        )
-        toast.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        toast.adjustSize()
-        self._position_toast(toast)
-        eff = QGraphicsOpacityEffect(toast)
-        toast.setGraphicsEffect(eff)
-        toast.show()
-        toast.raise_()
-        anim = QPropertyAnimation(eff, b"opacity", self)
-        anim.setDuration(220)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.start()
-        self._toast = toast
-        self._toast_anim = anim
-        QTimer.singleShot(4200, lambda t=toast: self._dismiss_toast(t))
+        # Pop-up notifications were removed by request. Messages are routed to
+        # the Live Logs panel instead so feedback is still available without an
+        # on-screen overlay.
+        prefix = {"error": "[error] ", "warning": "[warn] "}.get(kind, "[app] ")
+        self._append_log(prefix + message)
 
     def _position_toast(self, toast: QWidget) -> None:
         margin = 26
@@ -3967,7 +4416,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._discovery_thread.finished.connect(self._on_discovery_done)
         self._discovery_thread.start()
 
-    def _on_discovery(self, materials: list, cameras: list) -> None:
+    def _on_discovery(self, materials: list, cameras: list, settings: dict) -> None:
         clean_materials = [str(m).strip() for m in materials if str(m).strip()]
         clean_cameras = [str(c).strip() for c in cameras if str(c).strip()]
         self._discovered_materials = clean_materials
@@ -3980,11 +4429,31 @@ class BlenderVideoMapperQt(QMainWindow):
         current = [a for a in current if a.material_name in set(clean_materials)]
         self.scene_panel.set_assignments(current)
 
+        # Pull render/timeline/colour settings from the scene into the UI. Guard
+        # so the per-field edits don't each fire _on_settings_changed; we sync
+        # once at the end.
+        if settings:
+            self._loading_job_into_ui = True
+            try:
+                self.render_panel.apply_scene_settings(settings)
+            finally:
+                self._loading_job_into_ui = False
+            self._sync_preview_frame_range()   # preview slider gets the scene range
+            keys = ", ".join(k for k in ("fps", "frame_start", "frame_end", "width", "height", "samples", "engine") if k in settings)
+            self._append_log(f"[app] Applied scene settings ({keys})")
+
+        # Re-probe the clips so audio badges / info are current.
+        self.scene_panel.refresh_videos()
+
         self._append_log(f"[app] Discovery complete: {len(clean_materials)} materials, {len(clean_cameras)} cameras")
         if not clean_cameras:
             self._append_log("[app] No cameras discovered in scene")
         self._refresh_job_outputs()
-        self._refresh_queue_view()
+        # Push the freshly-applied settings onto the active job, then save.
+        if settings and self._active_job_id is not None:
+            self._on_settings_changed()
+        else:
+            self._refresh_queue_view()
 
     def _on_discovery_error(self, err: str) -> None:
         self._append_log(f"[app] Discovery ERROR: {err}")
@@ -4030,10 +4499,57 @@ class BlenderVideoMapperQt(QMainWindow):
         self._schedule_save()
 
     def _on_assignments_changed(self, _asn: list[MaterialVideoAssignment]) -> None:
+        # Auto-draft: the moment there's a real mapping, materialise it as a live
+        # job so edits are always captured and switching jobs never loses work.
+        self._ensure_active_job()
         self._sync_active_job_from_scene()
         self._refresh_job_outputs()
         self._refresh_queue_view()
         self._schedule_save()
+        self._request_auto_preview()
+
+    def _ensure_active_job(self) -> None:
+        """If there's a scene + a mapping but no active job, create one and make
+        it active. This removes the 'floating unsaved changes' state entirely —
+        from here on edits live-save into this job (auto-draft)."""
+        if self._active_job_id is not None or self._loading_job_into_ui:
+            return
+        if not self.scene_panel.scene_edit.text().strip():
+            return
+        assignments = self.scene_panel.get_assignments()
+        if not assignments:
+            return
+        job = RenderJob(id=self._next_job_id)
+        self._next_job_id += 1
+        job.video_path = assignments[0].video_path
+        self._make_job_snapshot(job, assignments)
+        job.label = self._derive_job_label(job, f"Mapped scene ({len(assignments)} materials)")
+        self._jobs.append(job)
+        self._active_job_id = job.id
+
+    def _request_auto_preview(self) -> None:
+        """Debounced trigger: when Auto is on, re-render the preview a moment
+        after the user stops changing settings/mappings."""
+        if getattr(self, "_loading_job_into_ui", False):
+            return
+        pp = getattr(self, "preview_panel", None)
+        if pp is None or not pp.auto_btn.isChecked():
+            return
+        t = getattr(self, "_auto_preview_timer", None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._fire_auto_preview)
+            self._auto_preview_timer = t
+        t.start(700)
+
+    def _fire_auto_preview(self) -> None:
+        if not self.preview_panel.auto_btn.isChecked() or self._is_rendering:
+            return
+        if not self._preview_ready():
+            return
+        # _render_preview_frame coalesces if a preview is already running.
+        self._render_preview_frame()
 
     def _audio_paths_for(self, assignments: list[MaterialVideoAssignment]) -> list[str]:
         """Audio sources to mux for a job: every mapped clip that carries an
@@ -4115,6 +4631,9 @@ class BlenderVideoMapperQt(QMainWindow):
         job.label = self._derive_job_label(job, fallback)
 
     def _derive_job_label(self, job: RenderJob, fallback: str) -> str:
+        # A hand-typed name always wins and is never auto-overwritten.
+        if getattr(job, "custom_label", False) and (job.label or "").strip():
+            return job.label
         for raw in ((job.output_input or "").strip(), (job.output_path or "").strip()):
             if not raw:
                 continue
@@ -4122,7 +4641,10 @@ class BlenderVideoMapperQt(QMainWindow):
             name = p.name.strip()
             if name:
                 return name
-        return fallback
+        # Auto label: tag with the camera so duplicated variations of the same
+        # scene are distinguishable at a glance.
+        cam = (getattr(job, "target_camera", "") or "").strip()
+        return f"{fallback} · {cam}" if cam else fallback
 
     def _make_job_snapshot(self, job: RenderJob, assignments: list[MaterialVideoAssignment]) -> None:
         job.material_assignments = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
@@ -4211,13 +4733,14 @@ class BlenderVideoMapperQt(QMainWindow):
             QMessageBox.information(self, "Queue", "Nothing to queue. Add videos or assignments first.")
             return
 
-        self._jobs.extend(to_add)
+        # New jobs go to the top of the queue.
+        self._jobs[:0] = to_add
         self._refresh_job_outputs()
         for j in to_add:
             fallback = f"Mapped scene ({len(j.material_assignments)} materials)" if j.material_assignments else (Path(j.video_path).name or f"Job {j.id}")
             j.label = self._derive_job_label(j, fallback)
+        self._active_job_id = to_add[0].id
         self._refresh_queue_view()
-        self._active_job_id = to_add[-1].id
         self.queue_panel.select_job(self._active_job_id)
         self._schedule_save()
 
@@ -4227,7 +4750,30 @@ class BlenderVideoMapperQt(QMainWindow):
             self.queue_panel.select_job(self._active_job_id)
         self._update_health()
 
+    def _unsaved_floating_changes(self) -> bool:
+        """True when the UI holds a mapped setup that isn't backed by any queued
+        job (no active job) — loading another job would silently lose it."""
+        return (
+            self._active_job_id is None
+            and not self._loading_job_into_ui
+            and bool(self.scene_panel.scene_edit.text().strip())
+            and bool(self.scene_panel.get_assignments())
+        )
+
     def _on_queue_job_selected(self, job_id: int) -> None:
+        if getattr(self, "_in_select_guard", False):
+            return
+        # Defensive: with auto-draft this shouldn't happen, but if any unsaved
+        # floating work exists, silently preserve it as a job before switching —
+        # never lose work, never interrupt with a dialog.
+        if self._unsaved_floating_changes():
+            self._in_select_guard = True
+            try:
+                self._ensure_active_job()
+                self._refresh_queue_view()
+            finally:
+                self._in_select_guard = False
+
         self._active_job_id = job_id
         job = next((j for j in self._jobs if j.id == job_id), None)
         if not job:
@@ -4300,6 +4846,10 @@ class BlenderVideoMapperQt(QMainWindow):
             self._loading_job_into_ui = False
 
     def _on_settings_changed(self) -> None:
+        # Auto-preview works off the live UI, so trigger it regardless of whether
+        # there's an active queue job (a camera/resolution change should refresh
+        # the preview even before anything is queued).
+        self._request_auto_preview()
         if self._loading_job_into_ui or self._active_job_id is None:
             return
         job = next((j for j in self._jobs if j.id == self._active_job_id), None)
@@ -4315,6 +4865,16 @@ class BlenderVideoMapperQt(QMainWindow):
         self._refresh_job_outputs()
         fallback = f"Mapped scene ({len(job.material_assignments)} materials)" if job.material_assignments else (Path(job.video_path).name or f"Job {job.id}")
         job.label = self._derive_job_label(job, fallback)
+        self._refresh_queue_view()
+        self._schedule_save()
+
+    def _on_job_renamed(self, job_id: int, new_name: str) -> None:
+        job = next((j for j in self._jobs if j.id == job_id), None)
+        name = (new_name or "").strip()
+        if not job or not name or name == job.label:
+            return
+        job.label = name
+        job.custom_label = True   # never auto-overwrite a hand-typed name
         self._refresh_queue_view()
         self._schedule_save()
 
@@ -4349,6 +4909,24 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _remove_selected_queue_rows(self) -> None:
         self._remove_queue_jobs(self.queue_panel.selected_row_job_ids())
+
+    def _clear_queue(self) -> None:
+        if self._is_rendering:
+            QMessageBox.information(self, "Render In Progress", "Stop rendering before clearing the queue.")
+            return
+        if not self._jobs:
+            return
+        resp = QMessageBox.question(
+            self, "Clear Queue",
+            f"Remove all {len(self._jobs)} job(s) from the queue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        self._jobs = []
+        self._active_job_id = None
+        self._refresh_queue_view()
+        self._schedule_save()
 
     def _job_output_target(self, job_id: int) -> Optional[Path]:
         job = next((j for j in self._jobs if j.id == job_id), None)
@@ -4733,17 +5311,45 @@ class BlenderVideoMapperQt(QMainWindow):
         self._render_thread.all_done.connect(self._on_render_done)
         self._render_thread.start()
 
+    def _sync_preview_frame_range(self) -> None:
+        """Mirror the render settings' frame range onto the preview frame
+        picker so the slider always spans the renderable frames."""
+        def _i(text: str, d: int) -> int:
+            try:
+                return int(float(text.strip()))
+            except (ValueError, AttributeError):
+                return d
+        rp = self.render_panel
+        start = _i(rp.frame_start_edit.text(), 1)
+        end = _i(rp.frame_end_edit.text(), start)
+        self.preview_panel.set_frame_range(start, end)
+
+    def _preview_ready(self) -> bool:
+        """The preview works off the *live* UI (scene + camera + mappings +
+        settings), independent of the render queue — so you don't need an active
+        queued job for it to update."""
+        return bool(
+            self.scene_panel.scene_edit.text().strip()
+            and self.scene_panel.get_assignments()
+        )
+
     def _render_preview_frame(self) -> None:
-        """Render just the first frame with the current mappings into the Live
-        Preview pane, without queuing a full render."""
+        """Render the selected frame from the *current UI state* into the Live
+        Preview pane, without queuing a full render and without needing an
+        active queue job."""
         if self._is_rendering:
-            self._show_toast("A render is already in progress", "warning")
             return
         if getattr(self, "_preview_thread", None) is not None and self._preview_thread.isRunning():
+            # A preview is already rendering — remember that state changed so we
+            # re-render with the *latest* settings as soon as it finishes. Without
+            # this, rapid changes get dropped and the preview looks stuck.
+            self._preview_pending = True
             return
-        if not self._jobs or not any(self._job_has_mapping(j) for j in self._jobs):
-            self._show_toast("Connect a video to a material first", "warning")
-            return
+        scene = self.scene_panel.scene_edit.text().strip()
+        assignments = self.scene_panel.get_assignments()
+        if not scene or not file_exists(scene) or not assignments:
+            return  # nothing mapped yet — silently skip (esp. for auto-preview)
+        self._preview_pending = False
         blender = self._ensure_blender(interactive=True)
         if not blender:
             return
@@ -4752,22 +5358,34 @@ class BlenderVideoMapperQt(QMainWindow):
         except Exception as exc:
             self._show_toast(str(exc), "error")
             return
-        job = next((j for j in self._jobs if self._job_has_mapping(j)), self._jobs[0])
-        asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in job.material_assignments]
-        opts = job.render_options or self.render_panel.render_options()
-        fs = opts.frame_start
-        opts = dataclasses.replace(opts, frame_start=fs, frame_end=fs, output_format="PNG", codec="NONE")
+        # Everything below comes straight from the live UI, not a queued job.
+        asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
+        camera = self.scene_panel.camera_combo.currentText()
+        opts = self.render_panel.render_options()
+        # Render the frame the user picked. We keep the FULL frame range on the
+        # options (so the worker maps the video over the whole timeline and the
+        # clip is in sync), and pass the chosen frame via preview_frame — the
+        # worker collapses the render range to that single frame.
+        fs = self.preview_panel.current_frame()
+        # Preview render resolution = output resolution × the chosen fraction.
+        scale = self.preview_panel.preview_scale()
+        pct = max(1, min(100, round(scale * 100)))
+        opts = dataclasses.replace(opts, output_format="PNG", codec="NONE", resolution_percentage=pct)
+        self._preview_started = time.monotonic()
+        self._preview_frame_num = fs
         primary = asn[0]
         out_dir = tempfile.mkdtemp(prefix="rmp_previewframe_")
         cfg = JobConfig(
-            scene_path=job.scene_path, video_path=primary.video_path,
-            target_material=primary.material_name, target_camera=job.target_camera,
-            output_path=out_dir, render=opts, safe_mode=job.safe_mode, material_assignments=asn,
+            scene_path=scene, video_path=primary.video_path,
+            target_material=primary.material_name, target_camera=camera,
+            output_path=out_dir, render=opts, safe_mode=True, material_assignments=asn,
+            preview_frame=fs,
         )
         self.preview_dock.show()
         self.preview_dock.raise_()
         self.preview_panel.preview_frame_btn.setEnabled(False)
-        self._show_toast("Rendering preview frame…", "info")
+        self.preview_panel.caption.setText(f"Rendering preview · frame {fs}…")
+        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% out={out_dir}")
         self._preview_thread = PreviewFrameThread(blender, worker, cfg, out_dir)
         self._preview_thread.log.connect(self._append_log)
         self._preview_thread.done.connect(self._on_preview_frame_done)
@@ -4777,10 +5395,26 @@ class BlenderVideoMapperQt(QMainWindow):
         self.preview_panel.preview_frame_btn.setEnabled(True)
         if error or not path:
             self._show_toast("Preview failed: " + (error or "no frame"), "error")
-            return
-        self.preview_panel.set_image_path(path)
-        self.preview_panel.caption.setText("Preview frame")
-        self._show_toast("Preview frame ready", "success")
+            self.preview_panel.caption.setText("Preview failed — see log")
+        else:
+            self.preview_panel.set_image_path(path)
+            fn = getattr(self, "_preview_frame_num", None)
+            # Stats: frame · actual pixel size · render time.
+            bits = []
+            if fn is not None:
+                bits.append(f"frame {fn}")
+            pm = self.preview_panel._pixmap
+            if pm is not None and not pm.isNull():
+                bits.append(f"{pm.width()}×{pm.height()}")
+            started = getattr(self, "_preview_started", None)
+            if started is not None:
+                bits.append(f"{time.monotonic() - started:.1f}s")
+            self.preview_panel.caption.setText("Preview · " + "  ·  ".join(bits) if bits else "Preview frame")
+        # If settings changed while this render was running, re-render with the
+        # latest state so the preview always converges to what's on screen.
+        if getattr(self, "_preview_pending", False):
+            self._preview_pending = False
+            QTimer.singleShot(50, self._render_preview_frame)
 
     def _on_job_error(self, job_id: int, message: str) -> None:
         for j in self._jobs:
@@ -4986,11 +5620,12 @@ class BlenderVideoMapperQt(QMainWindow):
     # ── Project save/open ────────────────────────────────────────────────
     def _save_project(self) -> None:
         p, _ = QFileDialog.getSaveFileName(
-            self, "Save Project", str(Path.home() / "render_mapper_project.json"), "Project (*.json)")
+            self, "Save Project", str(Path.home() / f"render_mapper_project{PROJECT_EXT}"),
+            f"Render Mapper Project (*{PROJECT_EXT})")
         if not p:
             return
-        if not p.lower().endswith(".json"):
-            p += ".json"
+        if not p.lower().endswith(PROJECT_EXT):
+            p += PROJECT_EXT
         try:
             Path(p).write_text(json.dumps(self._profile_dict(), indent=2))
             self._show_toast("Project saved", "success")
@@ -4999,7 +5634,8 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _open_project(self) -> None:
         p, _ = QFileDialog.getOpenFileName(
-            self, "Open Project", str(Path.home()), "Project (*.json);;All Files (*)")
+            self, "Open Project", str(Path.home()),
+            f"Render Mapper Project (*{PROJECT_EXT})")
         if not p:
             return
         try:
@@ -5334,7 +5970,7 @@ class BlenderVideoMapperQt(QMainWindow):
             return
         try:
             PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-            p = PRESETS_DIR / f"{safe}.json"
+            p = PRESETS_DIR / f"{safe}{PRESET_EXT}"
             # A preset is a reusable render recipe (settings only) — not the
             # scene/clips/queue. Use Profile → Save Project for the full setup.
             p.write_text(json.dumps(self.render_panel.settings_dict(), indent=2))
@@ -5348,7 +5984,9 @@ class BlenderVideoMapperQt(QMainWindow):
             PRESETS_DIR.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        p, _ = QFileDialog.getOpenFileName(self, "Load Preset", str(PRESETS_DIR), "JSON (*.json);;All Files (*)")
+        p, _ = QFileDialog.getOpenFileName(
+            self, "Load Preset", str(PRESETS_DIR),
+            f"Render Mapper Preset (*{PRESET_EXT})")
         if not p:
             return
         self._load_preset_path(p)
@@ -5444,7 +6082,7 @@ class BlenderVideoMapperQt(QMainWindow):
     def _refresh_preset_browser(self) -> None:
         try:
             PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-            presets = sorted(PRESETS_DIR.glob("*.json"), key=lambda x: x.stem.lower())
+            presets = sorted(PRESETS_DIR.glob(f"*{PRESET_EXT}"), key=lambda x: x.stem.lower())
         except Exception:
             presets = []
         self.presets_panel.set_presets(presets)
@@ -5475,6 +6113,7 @@ class BlenderVideoMapperQt(QMainWindow):
             {
                 "id": j.id,
                 "label": j.label,
+                "custom_label": j.custom_label,
                 "video_path": j.video_path,
                 "output_path": j.output_path,
                 "output_input": j.output_input,
@@ -5539,6 +6178,7 @@ class BlenderVideoMapperQt(QMainWindow):
             "layout_state": layout_state,
             "layout_geometry": layout_geometry,
             "queue_jobs": jobs_data,
+            "active_job_id": self._active_job_id,
             "next_job_id": self._next_job_id,
             "video_files": [
                 {
@@ -5772,6 +6412,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     job = RenderJob(
                         id=int(jd.get("id", self._next_job_id)),
                         label=str(jd.get("label", "")),
+                        custom_label=bool(jd.get("custom_label", False)),
                         video_path=str(jd.get("video_path", "")),
                         output_path=str(jd.get("output_path", "")),
                         output_input=str(jd.get("output_input", "")),
@@ -5811,6 +6452,9 @@ class BlenderVideoMapperQt(QMainWindow):
             if restored:
                 self._jobs = restored
                 self._next_job_id = max((j.id for j in restored), default=0) + 1
+                saved_active = d.get("active_job_id")
+                if isinstance(saved_active, int) and any(j.id == saved_active for j in restored):
+                    self._active_job_id = saved_active
                 self._refresh_job_outputs()
                 self._refresh_queue_view()
         else:
@@ -5830,6 +6474,21 @@ class BlenderVideoMapperQt(QMainWindow):
                 self._schedule_titlebar_sync()
             except Exception:
                 pass
+
+        # Invariant: a non-empty queue always has exactly one active job.
+        self._ensure_active_selection()
+
+    def _ensure_active_selection(self) -> None:
+        """Guarantee the 'one active job' invariant: if the queue is non-empty
+        but nothing is active (e.g. just loaded a saved queue), open the first
+        job. Modern open-document behaviour — there's always a focused item."""
+        if self._active_job_id is not None and any(j.id == self._active_job_id for j in self._jobs):
+            self.queue_panel.select_job(self._active_job_id)
+            return
+        self._active_job_id = None
+        if self._jobs:
+            self._active_job_id = self._jobs[0].id
+            self.queue_panel.select_job(self._active_job_id)
 
     def _load_profile(self) -> None:
         if not PROFILE_PATH.exists():

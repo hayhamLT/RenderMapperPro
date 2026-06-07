@@ -5,12 +5,29 @@ import os
 import select
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
-
 
 DISCOVERY_PREFIX = "DISCOVERY_JSON:"
 DiscoveryLogCallback = Callable[[str], None]
+
+
+def parse_discovery_payload(output_lines: list[str]) -> tuple[list[str], list[str], dict]:
+    """Pure parser: pull the ``DISCOVERY_JSON:`` payload out of Blender's stdout
+    lines and return (materials, cameras, settings). Kept separate from the
+    subprocess plumbing so it can be unit-tested without launching Blender."""
+    payload_line = None
+    for line in output_lines:
+        if line.startswith(DISCOVERY_PREFIX):
+            payload_line = line
+            break
+    if payload_line is None:
+        raise RuntimeError("Discovery did not return scene data.")
+    data = json.loads(payload_line[len(DISCOVERY_PREFIX):])
+    materials = list(data.get("materials", []))
+    cameras = list(data.get("cameras", []))
+    settings = dict(data.get("settings", {}) or {})
+    return materials, cameras, settings
 
 
 def discover_scene_elements(
@@ -20,7 +37,7 @@ def discover_scene_elements(
     on_log: DiscoveryLogCallback | None = None,
     hard_timeout_seconds: int = 0,
     idle_timeout_seconds: int = 0,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], dict]:
     blender_path = os.path.expanduser(blender_executable)
     script_path = Path(discovery_script_path).expanduser().resolve()
     scene = Path(scene_path).expanduser().resolve()
@@ -107,18 +124,4 @@ def discover_scene_elements(
         error_text = "\n".join(output_lines[-40:]).strip()
         raise RuntimeError(error_text or f"Discovery failed with exit code {return_code}")
 
-    payload_line = None
-    for line in output_lines:
-        if line.startswith(DISCOVERY_PREFIX):
-            payload_line = line
-            break
-
-    if payload_line is None:
-        raise RuntimeError("Discovery did not return scene data.")
-
-    payload = payload_line[len(DISCOVERY_PREFIX) :]
-    data = json.loads(payload)
-
-    materials = list(data.get("materials", []))
-    cameras = list(data.get("cameras", []))
-    return materials, cameras
+    return parse_discovery_payload(output_lines)

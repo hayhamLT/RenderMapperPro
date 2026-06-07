@@ -5,7 +5,6 @@ import re
 from datetime import date
 from pathlib import Path
 
-
 # Maps Blender output_format value → file extension (empty = image sequence folder)
 OUTPUT_FORMAT_EXT: dict[str, str] = {
     "MPEG4": ".mp4",
@@ -134,7 +133,7 @@ def file_exists(path: str) -> bool:
 def find_deadlinecommand() -> str | None:
     import shutil
     import sys
-    
+
     # 1. Check if it's already on PATH
     cmd = shutil.which("deadlinecommand")
     if cmd:

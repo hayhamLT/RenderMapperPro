@@ -312,12 +312,18 @@ def stylesheet(p: Palette) -> str:
         padding: 4px;
     }}
     QPushButton#IconButton:hover {{ background: {p.surface_hover}; border-color: {p.accent}; }}
+    QPushButton#IconButton:checked {{ background: {p.accent}; border-color: {p.accent}; }}
+    QPushButton#IconButton:checked:hover {{ background: {p.accent_hover}; border-color: {p.accent_hover}; }}
 
     QPushButton#SmallButton {{
         padding: 2px 9px;
         font-size: {FONT_SM}px;
         border-radius: {RADIUS_SM}px;
     }}
+    QPushButton#SmallButton:checked {{
+        background: {p.accent}; color: {p.accent_text}; border-color: {p.accent};
+    }}
+    QPushButton#SmallButton:checked:hover {{ background: {p.accent_hover}; border-color: {p.accent_hover}; }}
 
     /* ── Labels ───────────────────────────────────────────────────────── */
     QLabel#SectionLabel {{
@@ -352,6 +358,18 @@ def stylesheet(p: Palette) -> str:
     QTableWidget {{ gridline-color: {p.border}; }}
     QTableWidget::item {{ padding: 3px 5px; }}
     QTableWidget::item:selected {{ background: {p.selection}; color: {p.text}; }}
+    QTableWidget::indicator {{
+        width: 16px; height: 16px;
+        border: 1px solid {p.border_strong};
+        border-radius: {RADIUS_SM}px;
+        background: {p.surface};
+    }}
+    QTableWidget::indicator:checked {{
+        background: {p.accent};
+        border-color: {p.accent};
+        image: none;
+    }}
+    QTableWidget::indicator:unchecked:hover {{ border-color: {p.accent}; }}
     QHeaderView::section {{
         background: {p.surface_alt};
         color: {p.text_muted};
@@ -393,6 +411,37 @@ def stylesheet(p: Palette) -> str:
     QScrollBar::handle:horizontal:hover {{ background: {p.text_faint}; }}
     QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
     QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+    /* ── Sliders ──────────────────────────────────────────────────────── */
+    QSlider::groove:horizontal {{
+        height: 6px; border-radius: 3px; background: {p.border};
+    }}
+    QSlider::sub-page:horizontal {{ background: {p.accent}; border-radius: 3px; }}
+    QSlider::add-page:horizontal {{ background: {p.border}; border-radius: 3px; }}
+    QSlider::handle:horizontal {{
+        background: {p.accent}; border: 3px solid {p.surface_alt};
+        width: 13px; height: 13px; margin: -6px 0; border-radius: 10px;
+    }}
+    QSlider::handle:horizontal:hover {{ background: {p.accent_hover}; }}
+    QSlider::handle:horizontal:disabled {{ background: {p.border_strong}; border-color: {p.surface_alt}; }}
+    QSlider::sub-page:horizontal:disabled {{ background: {p.border_strong}; }}
+
+    /* ── Preview scrubber bar ─────────────────────────────────────────── */
+    QFrame#ScrubBar {{
+        background: {p.surface_alt};
+        border: 1px solid {p.border};
+        border-radius: {RADIUS}px;
+    }}
+    QFrame#ScrubBar:disabled {{ background: {p.surface}; }}
+    QSpinBox#FrameSpin {{
+        background: {p.surface};
+        border: 1px solid {p.border_strong};
+        border-radius: {RADIUS_SM}px;
+        padding: 2px 4px;
+        font-weight: 700;
+        color: {p.accent};
+    }}
+    QSpinBox#FrameSpin:disabled {{ color: {p.text_faint}; }}
 
     /* ── Progress bar ─────────────────────────────────────────────────── */
     QProgressBar {{

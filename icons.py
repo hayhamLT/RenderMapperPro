@@ -39,6 +39,8 @@ _BODY: dict[str, str] = {
     "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
     "search": '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
     "chevron_down": '<polyline points="6 9 12 15 18 9"/>',
+    "chevron_left": '<polyline points="15 18 9 12 15 6"/>',
+    "chevron_right": '<polyline points="9 18 15 12 9 6"/>',
     "clock": '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>',
     "check_apply": '<polyline points="20 6 9 17 4 12"/>',
     # domain

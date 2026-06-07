@@ -3,19 +3,30 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import subprocess
 import tempfile
 import time
-import shutil
-import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .models import JobConfig
 
-
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
+
+
+def build_blender_command(
+    blender_path: str, scene_path: str, worker_path: str, config_path: str
+) -> list[str]:
+    """Pure builder for the headless Blender invocation. A .blend is opened
+    directly; other formats are imported by the worker, so only .blend is passed
+    as the positional scene arg. Extracted for unit-testing."""
+    command = [blender_path, "-b"]
+    if str(scene_path).lower().endswith(".blend"):
+        command.append(str(scene_path))
+    command.extend(["--python", str(worker_path), "--", str(config_path)])
+    return command
 
 def submit_deadline_job(
     blender_executable: str,
@@ -212,7 +223,7 @@ def submit_deadline_job(
 
     if on_log:
         on_log(f"[deadline] Submitting job: frames {job.render.frame_start}-{job.render.frame_end}")
-        on_log(f"[deadline] Command: " + " ".join(cmd))
+        on_log("[deadline] Command: " + " ".join(cmd))
 
     try:
         process = subprocess.Popen(
@@ -251,10 +262,7 @@ def run_blender_job(
         config_path = Path(tf.name)
         json.dump(job.to_json_dict(), tf)
 
-    command = [blender_path, "-b"]
-    if scene_path.suffix.lower() == ".blend":
-        command.append(str(scene_path))
-    command.extend(["--python", str(worker_path), "--", str(config_path)])
+    command = build_blender_command(blender_path, str(scene_path), str(worker_path), str(config_path))
 
     hard_timeout = int(getattr(job.render, "timeout_seconds", 0) or 0)
     idle_timeout = int(getattr(job.render, "idle_timeout_seconds", 0) or 0)

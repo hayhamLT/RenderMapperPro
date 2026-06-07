@@ -1,0 +1,19 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+# app_qt.py is the large legacy view pending an incremental split — lint the
+# UI-agnostic core, the Blender scripts, and the tests for now.
+extend-exclude = ["app_qt.py", "patch.py", "vendor", "dist", "build", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["build/", "dist/", "vendor/"]

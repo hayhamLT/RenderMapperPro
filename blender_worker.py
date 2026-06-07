@@ -10,7 +10,6 @@ from pathlib import Path
 
 import bpy
 
-
 VIDEO_MAPPING_MODE_EMISSION = "EMISSION_FULL_BRIGHT"
 VIDEO_MAPPING_MODE_BASE_COLOR = "BASE_COLOR_ALPHA"
 
@@ -138,6 +137,13 @@ def _create_movie_texture_node(
     tex.name = "AUTO_VIDEO_TEXTURE"
     tex.label = "AUTO_VIDEO_TEXTURE"
     tex.location = location
+    # Highest-quality sampling for screen content: cubic magnification, no
+    # tiling/repeat artefacts at the edges.
+    try:
+        tex.interpolation = "Cubic"
+        tex.extension = "EXTEND"
+    except Exception:
+        pass
 
     resolved = str(Path(_resolve_path(video_path)).resolve())
     image = bpy.data.images.load(filepath=resolved, check_existing=True)
@@ -445,6 +451,15 @@ def configure_render(config: dict) -> None:
     except Exception:
         scene.render.resolution_percentage = 100
 
+    # Never let Simplify downscale our video textures — the screens must show
+    # the clip at full resolution regardless of the scene's Simplify setting.
+    try:
+        if hasattr(scene, "cycles"):
+            scene.cycles.texture_limit = "OFF"
+            scene.cycles.texture_limit_render = "OFF"
+    except Exception as exc:
+        log(f"Could not clear texture limit: {exc}")
+
     if scene.render.engine == "CYCLES" and hasattr(scene, "cycles"):
         scene.cycles.samples = int(render.get("samples", 64))
         try:
@@ -583,6 +598,17 @@ def main() -> None:
     )
     setup_live_preview(bpy.context.scene, str(config.get("preview_path", "")).strip())
 
+    # Single-frame preview: video mapping above was set up over the FULL frame
+    # range (so the clip is in sync), but here we collapse the scene render range
+    # to just the requested frame so only that one frame is rendered.
+    preview_frame = int(config.get("preview_frame", 0) or 0)
+    if preview_frame > 0:
+        scene = bpy.context.scene
+        scene.frame_start = preview_frame
+        scene.frame_end = preview_frame
+        scene.frame_set(preview_frame)
+        log(f"Single-frame preview render at frame {preview_frame}")
+
     log("Starting headless animation render")
     bpy.ops.render.render(animation=True)
     log("Render finished successfully")
@@ -610,14 +636,14 @@ def main() -> None:
                 ext = expected_path.suffix
                 fs = int(config["render"]["frame_start"])
                 fe = int(config["render"]["frame_end"])
-                
+
                 possible_names = [
                     f"{stem}{fs:04d}-{fe:04d}{ext}",
                     f"{stem}_{fs:04d}-{fe:04d}{ext}",
                     f"{stem}{fs:04d}_{fe:04d}{ext}",
                     f"{stem}_{fs:04d}_{fe:04d}{ext}",
                 ]
-                
+
                 for name in possible_names:
                     p = parent_dir / name
                     if p.exists():
