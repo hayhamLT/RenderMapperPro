@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+.build-venv-py3.12/
+venv/
+env/
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# PyInstaller
+*.spec.bak
+
+# Vendored static ffmpeg/ffprobe binaries (fetched by build_standalone.sh)
+vendor/ffmpeg/

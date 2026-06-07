@@ -1,0 +1,14 @@
+# Runtime dependencies
+# Tkinter is included with standard Python on macOS.
+customtkinter>=5.2.0
+
+# Optional: build standalone executable
+pyinstaller>=6.8.0
+
+# Optional: drag-and-drop file support for Tkinter
+tkinterdnd2>=0.3.0
+
+# Qt-based UI (full dockable interface — requires a venv)
+# Setup:  uv venv .venv && uv pip install -r requirements.txt --python .venv/bin/python3.12
+# Run:    .venv/bin/python3.12 app_qt.py   (or app.py — auto-detects PySide6)
+PySide6>=6.6.0
