@@ -820,22 +820,71 @@ class RuntimeInstallThread(QThread):
             self.finished_install.emit("", str(exc))
 
 
-# Item-data roles for the video list.
+# Item-data roles for the material / video lists.
 ROLE_VIDEO_PATH = Qt.UserRole          # absolute video path (existing)
 ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
 ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
+ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
 
-_AUDIO_BADGE_PX = 17                    # logical size of the speaker glyph
-_AUDIO_BADGE_MARGIN = 10               # inset from the left row edge
+_AUDIO_BADGE_PX = 16                    # logical size of the speaker glyph
+_AUDIO_BADGE_MARGIN = 4                # inset from the left row edge (just past the stripe)
+_AUDIO_TEXT_INDENT = 22               # fixed slot reserved on every row so text always aligns
 
 
-class AudioBadgeDelegate(QStyledItemDelegate):
-    """Draws a clickable speaker badge on the left of any video row whose
-    clip has audio. Clicking the badge toggles that clip's mute state via the
-    supplied callback; a muted clip shows a struck-through speaker."""
+class MappingStripeDelegate(QStyledItemDelegate):
+    """Base list delegate that draws a thin colour stripe at the left edge for
+    a mapped row (ROLE_MAP_COLOR) — it sits in the row's left margin so the
+    text never shifts and stays aligned with unmapped rows. Also washes the row
+    in accent when ``panel`` reports it as cross-highlighted (the partner of the
+    hovered/selected row in the other list)."""
 
-    def __init__(self, toggle_cb, parent: Optional[QWidget] = None) -> None:
+    _STRIPE_W = 3
+
+    def __init__(self, panel, kind: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._panel = panel
+        self._kind = kind  # "material" | "video"
+
+    def _item_key(self, index):
+        if self._kind == "video":
+            return index.data(ROLE_VIDEO_PATH)
+        return index.data(Qt.DisplayRole)
+
+    def _paint_cross_highlight(self, painter, option, index) -> None:
+        panel = self._panel
+        if panel is not None and panel._is_cross_highlighted(self._kind, self._item_key(index)):
+            c = QColor(active_palette().accent)
+            c.setAlpha(46)
+            painter.save()
+            painter.fillRect(option.rect, c)
+            painter.restore()
+
+    def _paint_stripe(self, painter, option, index) -> None:
+        color = index.data(ROLE_MAP_COLOR)
+        if not color:
+            return
+        r = option.rect
+        bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(bar, 1.5, 1.5)
+        painter.restore()
+
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        self._paint_cross_highlight(painter, option, index)
+        super().paint(painter, option, index)
+        self._paint_stripe(painter, option, index)
+
+
+class AudioBadgeDelegate(MappingStripeDelegate):
+    """Video-list delegate: the mapping stripe plus a clickable speaker badge on
+    the left of any row whose clip has audio. Clicking the badge toggles that
+    clip's mute state; a muted clip shows a struck-through speaker."""
+
+    def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
+        super().__init__(panel, "video", parent)
         self._toggle = toggle_cb
 
     @staticmethod
@@ -846,23 +895,20 @@ class AudioBadgeDelegate(QStyledItemDelegate):
         return QRect(x, y, size, size)
 
     def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        self._paint_cross_highlight(painter, option, index)
         has_audio = bool(index.data(ROLE_HAS_AUDIO))
+        # All rows share the same left indent so text is always column-aligned,
+        # whether or not a badge is present.
+        opt = QStyleOptionViewItem(option)
+        opt.rect = QRect(option.rect)
+        opt.rect.setLeft(opt.rect.left() + _AUDIO_TEXT_INDENT)
+        QStyledItemDelegate.paint(self, painter, opt, index)
+        self._paint_stripe(painter, option, index)
         if has_audio:
-            # Indent the row content to the right so the icon/name clear the
-            # badge on the left.
-            opt = QStyleOptionViewItem(option)
-            opt.rect = QRect(option.rect)
-            opt.rect.setLeft(opt.rect.left() + (_AUDIO_BADGE_PX + _AUDIO_BADGE_MARGIN + 4))
-            super().paint(painter, opt, index)
-        else:
-            super().paint(painter, option, index)
-            return
-
-        pal = active_palette()
-        muted = bool(index.data(ROLE_MUTED))
-        color = pal.text_faint if muted else pal.accent
-        pm = icons.pixmap("volume_x" if muted else "volume", color, _AUDIO_BADGE_PX)
-        painter.drawPixmap(self._badge_rect(option.rect).topLeft(), pm)
+            muted = bool(index.data(ROLE_MUTED))
+            color = active_palette().text_faint if muted else active_palette().accent
+            pm = icons.pixmap("volume_x" if muted else "volume", color, _AUDIO_BADGE_PX)
+            painter.drawPixmap(self._badge_rect(option.rect).topLeft(), pm)
 
     def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
         # Intercept press/release/double-click on the badge so the click toggles
@@ -1062,7 +1108,49 @@ class ScenePanel(QWidget):
         self._assignments: list[MaterialVideoAssignment] = []
         self._recent_scenes: list[str] = []
         self._muted_videos: set[str] = set()
+        # Cross-highlight: partner rows lit up for the hovered/selected row.
+        self._hl_materials: set[str] = set()
+        self._hl_videos: set[str] = set()
+        self._hover_material: Optional[str] = None
+        self._hover_video: Optional[str] = None
         self._build_ui()
+
+    # ── Cross-highlight between the material and video lists ──────────────
+    def _is_cross_highlighted(self, kind: str, key) -> bool:
+        if not key:
+            return False
+        return key in (self._hl_materials if kind == "material" else self._hl_videos)
+
+    def _on_mat_entered(self, item) -> None:
+        self._hover_material = item.text() if item else None
+        self._recompute_cross_highlight()
+
+    def _on_vid_entered(self, item) -> None:
+        self._hover_video = item.data(ROLE_VIDEO_PATH) if item else None
+        self._recompute_cross_highlight()
+
+    def _recompute_cross_highlight(self) -> None:
+        focus_mat = self._hover_material or self.current_material()
+        focus_vid = self._hover_video or self.current_video()
+        hl_vid = {a.video_path for a in self._assignments if a.material_name == focus_mat} if focus_mat else set()
+        hl_mat = {a.material_name for a in self._assignments if a.video_path == focus_vid} if focus_vid else set()
+        if hl_vid == self._hl_videos and hl_mat == self._hl_materials:
+            return
+        self._hl_videos, self._hl_materials = hl_vid, hl_mat
+        self.mat_list.viewport().update()
+        self.vid_list.viewport().update()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        # Clear the hovered row when the cursor leaves a list, so the
+        # cross-highlight falls back to the selection.
+        if event.type() == QEvent.Leave:
+            if obj is self.mat_list.viewport() and self._hover_material is not None:
+                self._hover_material = None
+                self._recompute_cross_highlight()
+            elif obj is self.vid_list.viewport() and self._hover_video is not None:
+                self._hover_video = None
+                self._recompute_cross_highlight()
+        return super().eventFilter(obj, event)
 
     # ── Per-clip audio muting ────────────────────────────────────────────
     def is_muted(self, path: str) -> bool:
@@ -1169,7 +1257,13 @@ class ScenePanel(QWidget):
         self.mat_search.setPlaceholderText("Filter materials")
         self.mat_search.textChanged.connect(self._refresh_lists)
         self.mat_list = MaterialListWidget()
+        self.mat_list.setItemDelegate(MappingStripeDelegate(self, "material", self.mat_list))
+        self.mat_list.setMouseTracking(True)
+        self.mat_list.viewport().setMouseTracking(True)
         self.mat_list.currentItemChanged.connect(lambda *_: self._update_maplink_btn())
+        self.mat_list.currentItemChanged.connect(lambda *_: self._recompute_cross_highlight())
+        self.mat_list.itemEntered.connect(self._on_mat_entered)
+        self.mat_list.viewport().installEventFilter(self)
         self.mat_list.scene_dropped.connect(self._on_scene_file_dropped)
         left.addWidget(self.mat_search)
         left.addWidget(self.mat_list)
@@ -1211,9 +1305,13 @@ class ScenePanel(QWidget):
         self.vid_search.textChanged.connect(self._refresh_lists)
         self.vid_list = VideoListWidget()
         self.vid_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.vid_list.setItemDelegate(AudioBadgeDelegate(self.toggle_mute, self.vid_list))
+        self.vid_list.viewport().setMouseTracking(True)
+        self.vid_list.setItemDelegate(AudioBadgeDelegate(self.toggle_mute, self, self.vid_list))
         self.vid_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.vid_list.customContextMenuRequested.connect(self._show_video_context_menu)
+        self.vid_list.currentItemChanged.connect(lambda *_: self._recompute_cross_highlight())
+        self.vid_list.itemEntered.connect(self._on_vid_entered)
+        self.vid_list.viewport().installEventFilter(self)
         self.vid_list.files_dropped.connect(self._add_video_paths)
 
         remove_video_action = QAction("Remove Selected", self)
@@ -1388,18 +1486,6 @@ class ScenePanel(QWidget):
         self._refresh_lists()
         self.assignments_changed.emit([])
 
-    @staticmethod
-    def _mark_icon(color_hex: str) -> QIcon:
-        pix = QPixmap(10, 10)
-        pix.fill(Qt.transparent)
-        painter = QPainter(pix)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor(color_hex))
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(1, 1, 8, 8)
-        painter.end()
-        return QIcon(pix)
-
     def _refresh_lists(self) -> None:
         mq = self.mat_search.text().strip().lower()
         vq = self.vid_search.text().strip().lower()
@@ -1416,8 +1502,7 @@ class ScenePanel(QWidget):
                 continue
             item = QListWidgetItem(m)
             if m in mat_to_idx:
-                color = LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)]
-                item.setIcon(self._mark_icon(color))
+                item.setData(ROLE_MAP_COLOR, LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)])
             self.mat_list.addItem(item)
         if current_mat:
             for i in range(self.mat_list.count()):
@@ -1435,8 +1520,7 @@ class ScenePanel(QWidget):
             item = QListWidgetItem(name)
             item.setData(ROLE_VIDEO_PATH, v)
             if v in vid_to_idx:
-                color = LINK_COLORS[vid_to_idx[v] % len(LINK_COLORS)]
-                item.setIcon(self._mark_icon(color))
+                item.setData(ROLE_MAP_COLOR, LINK_COLORS[vid_to_idx[v] % len(LINK_COLORS)])
             has_audio = video_has_audio(v)
             muted = v in self._muted_videos
             item.setData(ROLE_HAS_AUDIO, has_audio)
@@ -1454,6 +1538,7 @@ class ScenePanel(QWidget):
                     break
         self.vid_list.blockSignals(False)
         self._update_maplink_btn()
+        self._recompute_cross_highlight()
 
     def set_materials(self, materials: list[str]) -> None:
         self._materials = materials
@@ -2155,9 +2240,6 @@ class QueuePanel(QWidget):
         btns.addWidget(self.render_selected_btn)
         btns.addWidget(self.cancel_btn)
         btns.addStretch()
-        hint = QLabel("⌘D duplicate · ⌫ delete · right-click for more")
-        hint.setObjectName("HintLabel")
-        btns.addWidget(hint)
         lay.addLayout(btns)
 
         # Retained (hidden) so existing render-state wiring keeps working even
@@ -2930,21 +3012,28 @@ class BlenderVideoMapperQt(QMainWindow):
           <li><b>Add videos</b> — click <i>Add</i> or drag &amp; drop clips into the Videos list.
               Pick a <b>Camera</b> for the render.</li>
           <li><b>Connect</b> — select a material and a video, then click the <b>link</b> button
-              between the lists. A colored dot marks the connected pair.</li>
+              between the lists. A colored <b>stripe</b> on the left of each row marks the connected
+              pair; hover or select either side to light up its partner in the other list.</li>
           <li><b>Output</b> auto-fills as <code>&lt;video&gt;_PREVIZ_v001.mp4</code> next to the
               source clip — edit it if you like. Set resolution, frame range, format, and
               (optionally) the collapsed <i>Advanced quality settings</i>.</li>
           <li>Click <b>Queue</b> to add the job, then <b>Start</b>. Watch progress per row and a
               live frame preview; the finished video plays in the <i>Live Preview</i> tab.</li>
         </ol>
+        <h3>Audio</h3>
+        <p class="muted">Any clip that contains sound shows a <b>speaker</b> badge in the Videos
+        list. Click the badge (or right-click → <i>Mute audio</i>) to drop that clip's audio; every
+        non-muted mapped clip is mixed into the rendered video.</p>
         <h3>Queue</h3>
         <p class="muted">Click a row to activate and edit it. Duplicate with <kbd>⌘D</kbd>,
         delete with <kbd>⌫</kbd>, or right-click for Duplicate / Reveal / Open / Move / Delete.
         Tick the <b>Run</b> box to include a job when you press Start.</p>
         <h3>Layout &amp; appearance</h3>
-        <p class="muted"><i>View → Layout</i> offers Default / Render Focus / Stacked presets and
-        <b>Save Current Layout</b>. <i>View → Theme / Accent Color</i> restyle the app. The window
-        opens at 70% of your screen, centered, and remembers your size and position.</p>
+        <p class="muted"><i>View → Layout</i> offers Default, All Panels (grid), Render Focus,
+        Setup Focus, Stacked and Tabbed presets, plus <b>Save Current Layout</b>. Drag a panel's
+        tab to rearrange, tab, or float it, and show/hide panels from <i>View</i>.
+        <i>View → Theme / Accent Color</i> restyle the app. The window opens at 70% of your
+        screen, centered, and remembers your size and position.</p>
         """
         self._show_help_dialog("Quick Start", html)
 
