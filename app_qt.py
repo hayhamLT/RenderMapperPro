@@ -4629,11 +4629,14 @@ class BlenderVideoMapperQt(QMainWindow):
         """Populate the renderer dropdown with the engines that apply to the
         loaded scene: Cinema 4D renderers for a .c4d, Blender engines otherwise."""
         combo = self.render_panel.engine_combo
-        items = ["Redshift", "Standard", "Physical"] if is_c4d else ["CYCLES", "BLENDER_EEVEE"]
-        if [combo.itemText(i) for i in range(combo.count())] == items and not detected:
+        # C4D path only supports Redshift: the video→emission mapping is a
+        # Redshift node-material feature. Standard/Physical use legacy material
+        # channels and are not wired. Blender keeps its own engines.
+        items = ["Redshift"] if is_c4d else ["CYCLES", "BLENDER_EEVEE"]
+        if [combo.itemText(i) for i in range(combo.count())] == items:
             return
         cur = combo.currentText()
-        target = detected or (cur if cur in items else items[0])
+        target = detected if detected in items else (cur if cur in items else items[0])
         combo.blockSignals(True)
         combo.clear()
         combo.addItems(items)
