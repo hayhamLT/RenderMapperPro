@@ -48,8 +48,6 @@ def submit_deadline_job(
         raise FileNotFoundError(f"Scene file not found: {scene_path}")
     if not worker_path.exists():
         raise FileNotFoundError(f"Worker script not found: {worker_path}")
-    if is_c4d and not c4dpy_path:
-        raise RuntimeError("c4dpy path is required to submit a Cinema 4D job to Deadline.")
 
     submit_scene = getattr(job, 'submit_scene', True)
     repo_path = getattr(job, 'deadline_repo_path', '').strip()
@@ -128,23 +126,22 @@ def submit_deadline_job(
     else:
         scene_arg = str(scene_path)  # absolute path; workers must share the drive
 
-    # The Cinema 4D worker shells out to ffmpeg to extract video frames; stage
-    # the bundled binary so farm nodes don't depend on a local install.
+    # The C4D path runs through the RenderMapperPro plugin, which uses the
+    # node's own ffmpeg (resolved from PATH) — so no binary needs staging.
     if is_c4d:
-        ff = str(cfg_dict.get("ffmpeg_path", "") or "")
-        ffp = Path(ff).expanduser() if ff else None
-        if ffp and ffp.exists():
-            staged_ff = staging_dir / ffp.name
-            _safe_copy(ffp, staged_ff)
-            try:
-                os.chmod(staged_ff, 0o755)
-            except OSError:
-                pass
-            cfg_dict["ffmpeg_path"] = str(staged_ff)
+        cfg_dict["ffmpeg_path"] = ""
 
     # Write the config JSON into the staging dir with a fixed name
     staged_config = staging_dir / "blender_job_config.json"
     staged_config.write_text(json.dumps(cfg_dict))
+
+    def _repo_rel(p: Path) -> str:
+        """Path of a staged file relative to the repository root, in the
+        forward-slash form the plugin re-joins against each node's repo root."""
+        try:
+            return str(p.relative_to(Path(repo_path))).replace("\\", "/") if repo_path else ""
+        except ValueError:
+            return ""
 
     # ── Job info file ────────────────────────────────────────────────────────
     job_info_path = staging_dir / "job_info.job"
@@ -164,7 +161,7 @@ def submit_deadline_job(
             name = f"BlenderRender Job - {scene_path.name}"
 
         f.write(f"Name={name}\n")
-        f.write("Plugin=CommandLine\n")
+        f.write(f"Plugin={'RenderMapperPro' if is_c4d else 'CommandLine'}\n")
         f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
         f.write(f"Priority={getattr(job, 'deadline_priority', 50)}\n")
 
@@ -219,29 +216,15 @@ def submit_deadline_job(
     # All paths are fully-qualified absolutes — no CWD ambiguity.
     with open(plugin_info_path, "w") as f:
         if is_c4d:
-            # c4dpy prompts for a license method on stdin and can't take a scene
-            # via flags, so a tiny staged launcher feeds the prompt and runs our
-            # worker. Deadline substitutes the per-task frame range into the
-            # launcher's args, which the worker honours.
-            win = c4dpy_path.lower().endswith(".exe") or "\\" in c4dpy_path
-            if win:
-                launcher = staging_dir / "c4d_launch.bat"
-                launcher.write_text(
-                    "@echo off\r\n"
-                    f'echo 1| "{c4dpy_path}" "{staged_worker}" "{staged_config}" %1 %2\r\n'
-                )
-            else:
-                launcher = staging_dir / "c4d_launch.sh"
-                launcher.write_text(
-                    "#!/bin/sh\n"
-                    f"printf '1\\n' | \"{c4dpy_path}\" \"{staged_worker}\" \"{staged_config}\" \"$1\" \"$2\"\n"
-                )
-                try:
-                    os.chmod(launcher, 0o755)
-                except OSError:
-                    pass
-            f.write(f"Executable={launcher}\n")
-            f.write("Arguments=<STARTFRAME> <ENDFRAME>\n")
+            # The RenderMapperPro plugin runs on the node: it locates the node's
+            # own c4dpy, re-maps these repo-relative paths to the node's repo
+            # mount, feeds the license prompt and renders this task's frames. It
+            # also carries the app icon shown in the Monitor.
+            f.write(f"SubmitRepoRoot={repo_path}\n")
+            f.write(f"ConfigFile={_repo_rel(staged_config)}\n")
+            f.write(f"WorkerScript={_repo_rel(staged_worker)}\n")
+            # Blank = the plugin auto-detects c4dpy per node OS.
+            f.write("C4DPyExecutable=\n")
         else:
             f.write(f"Executable={blender_path}\n")
             # Pass the scene via -b only when we have a guaranteed absolute path.
