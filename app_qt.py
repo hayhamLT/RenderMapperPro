@@ -1282,6 +1282,12 @@ class ScenePanel(QWidget):
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
         self._watch_timer.timeout.connect(self._scan_watch_folder)
         self._watch_scanned.connect(self._apply_watch_scan)
+        # Debounce auto-render: coalesce a burst of new target versions (landing
+        # across several polls) into a single render once the set settles.
+        self._autorender_timer = QTimer(self)
+        self._autorender_timer.setSingleShot(True)
+        self._autorender_timer.setInterval(max(4000, 2 * self._watch_interval_ms))
+        self._autorender_timer.timeout.connect(self._fire_target_set)
 
     # ── Cross-highlight between the material and video lists ──────────────
     def _is_cross_highlighted(self, kind: str, key) -> bool:
@@ -1743,13 +1749,31 @@ class ScenePanel(QWidget):
     def get_targets(self) -> list:
         return list(self._targets)
 
-    def _check_target_set(self) -> None:
-        """When every target material is mapped to a clip, emit the snapshot once
-        per distinct version-set so the main window can auto-render it."""
+    def _target_version_set(self):
+        """The current (target → clip) set if every target is mapped, else None."""
         if not self._targets:
-            return
+            return None
         mapped = {a.material_name: a for a in self._assignments}
         if not all(t in mapped for t in self._targets):
+            return None
+        return mapped
+
+    def _check_target_set(self) -> None:
+        """When every target material is mapped, (re)start a short debounce; the
+        render is queued only once the set stops changing — so a batch of new
+        versions becomes a single render, not one per file."""
+        mapped = self._target_version_set()
+        if mapped is None:
+            self._autorender_timer.stop()       # set no longer complete
+            return
+        version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
+        if version_set == self._autorender_last:
+            return                              # already rendered this exact set
+        self._autorender_timer.start()          # wait for the set to settle, then fire
+
+    def _fire_target_set(self) -> None:
+        mapped = self._target_version_set()
+        if mapped is None:
             return
         version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
         if version_set == self._autorender_last:
@@ -1807,6 +1831,7 @@ class ScenePanel(QWidget):
         self._watch_interval_ms = max(1000, int(interval_ms))
         self._watch_settle = max(0.0, float(settle_s))
         self._watch_timer.setInterval(self._watch_interval_ms)
+        self._autorender_timer.setInterval(max(4000, 2 * self._watch_interval_ms))
 
     def get_watch_options(self) -> tuple[int, float]:
         return self._watch_interval_ms, self._watch_settle
