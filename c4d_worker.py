@@ -79,7 +79,7 @@ def _inject_emission_texture(mat):
                           ("refl_weight", 0.0), ("coat_weight", 0.0), ("sheen_weight", 0.0)):
             port = std.GetInputs().FindChild(STD + "." + leaf)
             if port:
-                port.SetDefaultValue(maxon.Float64(val))
+                port.SetPortValue(maxon.Float64(val))
         transaction.Commit()
         return graph, path_port
     except Exception as exc:
@@ -94,7 +94,7 @@ def _inject_emission_texture(mat):
 def _set_still(graph, path_port, image_path) -> None:
     transaction = graph.BeginTransaction()
     try:
-        path_port.SetDefaultValue(maxon.Url(image_path))
+        path_port.SetPortValue(maxon.Url(image_path))
         transaction.Commit()
     except Exception:
         transaction.Commit()
@@ -181,7 +181,7 @@ def main() -> None:
         doc.ExecutePasses(None, True, True, True, c4d.BUILDFLAGS_NONE)
         bmp = c4d.bitmaps.BaseBitmap()
         bmp.Init(xr, yr, 24)
-        res = documents.RenderDocument(doc, rd.GetData(), bmp, c4d.RENDERFLAGS_EXTERNAL)
+        res = documents.RenderDocument(doc, rd.GetDataInstance(), bmp, c4d.RENDERFLAGS_EXTERNAL)
         out_path = os.path.join(out_dir, f"{f:04d}.png")
         bmp.Save(out_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
         log(f"Frame {f} -> {out_path} (ok={res == c4d.RENDERRESULT_OK})")

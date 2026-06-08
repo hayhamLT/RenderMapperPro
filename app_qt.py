@@ -2910,9 +2910,9 @@ class LogsPanel(QWidget):
         if any(k in low for k in ("finished successfully", "render finished", "complete", "completed",
                                   "success", "installed", "connected", "enabled", "saved", "done")):
             return pal.success
-        if line.lstrip().startswith("[app]"):
+        if "[app]" in line:   # tolerant of a leading [HH:MM:SS] timestamp
             return pal.info
-        if "fra:" in low or low.lstrip().startswith("fra:"):
+        if "fra:" in low:
             return pal.text_faint
         return pal.text_muted
 
@@ -4128,6 +4128,7 @@ class BlenderVideoMapperQt(QMainWindow):
         return super().event(e)
 
     def _append_log(self, line: str) -> None:
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {line}"
         self.logs_panel.append(line)
         try:
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
