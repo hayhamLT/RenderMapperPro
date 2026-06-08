@@ -911,6 +911,9 @@ ROLE_VIDEO_PATH = Qt.UserRole          # absolute video path (existing)
 ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
 ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
 ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
+ROLE_TARGET = Qt.UserRole + 5          # int: 0 none, 1 render target, 2 primary target
+_TARGET_BADGE_PX = 14
+_TARGET_SLOT = 24                      # right padding reserved for the target dot
 
 _AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
 _AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
@@ -1057,6 +1060,62 @@ class AudioBadgeDelegate(MappingStripeDelegate):
                 if path and self._toggle:
                     self._toggle(path)
             return True  # swallow press/dblclick too → selection is untouched
+        return super().editorEvent(event, model, option, index)
+
+
+class TargetBadgeDelegate(MappingStripeDelegate):
+    """Material-list delegate: the mapping stripe plus a clickable target dot at
+    the right of each row. Click toggles whether the material is a render target;
+    the primary target (drives output naming) shows an extra ring."""
+
+    def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
+        super().__init__(panel, "material", parent)
+        self._toggle = toggle_cb
+
+    @staticmethod
+    def _badge_rect(item_rect: QRect) -> QRect:
+        size = _TARGET_BADGE_PX
+        x = item_rect.right() - size - 8
+        y = item_rect.center().y() - size // 2
+        return QRect(x, y, size, size)
+
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        self._paint_cross_highlight(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        opt.rect = QRect(option.rect)
+        opt.rect.setRight(opt.rect.right() - _TARGET_SLOT)   # reserve room for the dot
+        QStyledItemDelegate.paint(self, painter, opt, index)
+        self._paint_stripe(painter, option, index)
+
+        state = int(index.data(ROLE_TARGET) or 0)
+        pal = active_palette()
+        r = self._badge_rect(option.rect)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        inner = r.adjusted(2, 2, -2, -2)
+        if state == 0:
+            painter.setPen(QPen(QColor(pal.text_faint), 1.3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(inner)
+        else:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(pal.accent))
+            painter.drawEllipse(inner)
+            if state == 2:                       # primary → outer ring
+                painter.setPen(QPen(QColor(pal.accent), 1.4))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(r)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
+        badge_events = (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick)
+        if (event.type() in badge_events and event.button() == Qt.LeftButton
+                and self._badge_rect(option.rect).contains(event.position().toPoint())):
+            if event.type() == QEvent.MouseButtonRelease:
+                mat = index.data(Qt.DisplayRole)
+                if mat and self._toggle:
+                    self._toggle(mat)
+            return True                          # swallow so the row isn't (de)selected
         return super().editorEvent(event, model, option, index)
 
 
@@ -1431,7 +1490,8 @@ class ScenePanel(QWidget):
         self.mat_search.setPlaceholderText("Filter materials")
         self.mat_search.textChanged.connect(self._refresh_lists)
         self.mat_list = MaterialListWidget()
-        self.mat_list.setItemDelegate(MappingStripeDelegate(self, "material", self.mat_list))
+        self.mat_list.setItemDelegate(TargetBadgeDelegate(self._toggle_target, self, self.mat_list))
+        self.mat_list.setMouseTracking(True)
         self.mat_list.setMouseTracking(True)
         self.mat_list.viewport().setMouseTracking(True)
         self.mat_list.currentItemChanged.connect(lambda *_: self._update_maplink_btn())
@@ -1729,7 +1789,19 @@ class ScenePanel(QWidget):
         is_target = mat in self._targets
         act = menu.addAction("Unmark Render Target" if is_target else "Mark as Render Target")
         act.triggered.connect(lambda: self._toggle_target(mat))
+        if is_target and len(self._targets) > 1 and self._targets[0] != mat:
+            pri = menu.addAction("Set as Primary Target")
+            pri.triggered.connect(lambda: self._set_primary_target(mat))
         menu.exec(self.mat_list.mapToGlobal(pos))
+
+    def _set_primary_target(self, mat: str) -> None:
+        if mat in self._targets:
+            self._targets.remove(mat)
+            self._targets.insert(0, mat)        # primary = first → drives output naming
+            self._autorender_last = None
+            self._refresh_lists()
+            self.targets_changed.emit(list(self._targets))
+            self._check_target_set()
 
     def _toggle_target(self, mat: str) -> None:
         if mat in self._targets:
@@ -1954,11 +2026,14 @@ class ScenePanel(QWidget):
             if m in mat_to_idx:
                 item.setData(ROLE_MAP_COLOR, LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)])
             if m in self._targets:
+                primary = self._targets and self._targets[0] == m
+                item.setData(ROLE_TARGET, 2 if primary else 1)
                 f = item.font()
                 f.setBold(True)
                 item.setFont(f)
-                item.setForeground(QColor(active_palette().accent_text))
-                item.setToolTip(f"{m}\n◉ Render target")
+                item.setToolTip(f"{m}\n◉ {'Primary render target' if primary else 'Render target'}")
+            else:
+                item.setData(ROLE_TARGET, 0)
             self.mat_list.addItem(item)
         if current_mat:
             for i in range(self.mat_list.count()):
@@ -5400,7 +5475,7 @@ class BlenderVideoMapperQt(QMainWindow):
         screens = ", ".join(a.material_name for a in assignments)
         self._append_log(f"[app] Auto-render queued: {job.label}  ({len(assignments)} screens: {screens})")
         if self._autorender_start and not self._is_rendering:
-            self._start_render(render_all=False)
+            self._start_render(only_job_ids={job.id})   # start just this auto-render job
 
     def _request_auto_preview(self) -> None:
         """Debounced trigger: when Auto is on, re-render the preview a moment
@@ -6063,7 +6138,7 @@ class BlenderVideoMapperQt(QMainWindow):
             return True
         return False
 
-    def _start_render(self, render_all: bool = False) -> None:
+    def _start_render(self, render_all: bool = False, only_job_ids: Optional[set] = None) -> None:
         if self._is_rendering:
             return
 
@@ -6097,7 +6172,10 @@ class BlenderVideoMapperQt(QMainWindow):
             QMessageBox.critical(self, "Preflight Failed", "\n".join(errs))
             return
 
-        selected_ids = set(self.queue_panel.selected_job_ids()) if not render_all else set(j.id for j in self._jobs)
+        if only_job_ids is not None:
+            selected_ids = set(only_job_ids)
+        else:
+            selected_ids = set(self.queue_panel.selected_job_ids()) if not render_all else set(j.id for j in self._jobs)
         pending = [j for j in self._jobs if j.id in selected_ids and j.status != "success"]
         if not pending:
             QMessageBox.information(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
