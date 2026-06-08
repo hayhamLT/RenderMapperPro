@@ -254,3 +254,90 @@ def auto_match_media_to_materials(
         result[mat] = f
         used_files.add(f)
     return result
+
+
+# ── Watch-folder version handling ───────────────────────────────────────────
+# Files that share a base name but differ by a version token (Screen_v1.mp4,
+# Screen_v2.mp4, Screen_3.mp4) are treated as versions of the same clip. The
+# highest version wins (ties broken by newest modification time), so a watch
+# folder always uses the latest and supersedes an older one already in use.
+
+_VERSION_V_RE = re.compile(r"[._\-\s]*v(\d+)", re.I)   # _v2, v002, -V3
+_VERSION_TRAIL_RE = re.compile(r"[._\-\s]+(\d+)$")      # _2, " 3", -10
+
+
+def parse_version(stem: str) -> tuple[str, int]:
+    """Split a filename stem into (normalized base, version number).
+    No version token → version 0."""
+    s = str(stem)
+    matches = list(_VERSION_V_RE.finditer(s))
+    if matches:
+        last = matches[-1]
+        version = int(last.group(1))
+        base = s[:last.start()] + s[last.end():]
+    else:
+        trail = _VERSION_TRAIL_RE.search(s)
+        if trail:
+            version = int(trail.group(1))
+            base = s[:trail.start()]
+        else:
+            version, base = 0, s
+    base = re.sub(r"[^a-z0-9]+", " ", base.lower()).strip()
+    return base, version
+
+
+def _version_rank(path: str, mtimes: dict | None) -> tuple[int, float]:
+    _base, version = parse_version(Path(path).stem)
+    return version, float((mtimes or {}).get(path, 0.0))
+
+
+def latest_by_base(files: list[str], mtimes: dict | None = None) -> dict[str, str]:
+    """Pick the latest file for each base name (highest version, then newest)."""
+    best: dict[str, tuple[tuple[int, float], str]] = {}
+    for f in files:
+        base, _v = parse_version(Path(f).stem)
+        rank = _version_rank(f, mtimes)
+        if base not in best or rank > best[base][0]:
+            best[base] = (rank, f)
+    return {base: val[1] for base, val in best.items()}
+
+
+def reconcile_versions(
+    current_videos: list[str],
+    folder_files: list[str],
+    mtimes: dict | None = None,
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Given the clips already loaded and the files now in the watch folder,
+    return (videos_after, replacements, added):
+      - replacements: {old_path: new_path} where a newer version supersedes a
+        clip already in use (same base, higher rank).
+      - added: brand-new clips (base not already loaded) at their latest version.
+    Older versions are dropped from videos_after."""
+    latest = latest_by_base(folder_files, mtimes)
+    cur_by_base: dict[str, str] = {}
+    for v in current_videos:
+        base, _v = parse_version(Path(v).stem)
+        # if two loaded clips share a base, keep the higher-ranked one as current
+        if base not in cur_by_base or _version_rank(v, mtimes) > _version_rank(cur_by_base[base], mtimes):
+            cur_by_base[base] = v
+
+    replacements: dict[str, str] = {}
+    added: list[str] = []
+    for base, new_file in latest.items():
+        old = cur_by_base.get(base)
+        if old is None:
+            if new_file not in current_videos:
+                added.append(new_file)
+        elif old != new_file and _version_rank(new_file, mtimes) > _version_rank(old, mtimes):
+            replacements[old] = new_file
+
+    videos_after = []
+    for v in current_videos:
+        videos_after.append(replacements.get(v, v))
+    for f in added:
+        if f not in videos_after:
+            videos_after.append(f)
+    # de-dup preserving order
+    seen: set[str] = set()
+    videos_after = [v for v in videos_after if not (v in seen or seen.add(v))]
+    return videos_after, replacements, added

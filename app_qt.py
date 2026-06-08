@@ -94,7 +94,7 @@ from core.models import (
     VIDEO_MAPPING_MODE_EMISSION,
 )
 from core.runner import run_blender_job, submit_deadline_job
-from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand, auto_match_media_to_materials
+from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand, auto_match_media_to_materials, reconcile_versions
 
 
 OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
@@ -1249,6 +1249,8 @@ class ScenePanel(QWidget):
     recent_scene_selected = Signal(str)
     mute_changed = Signal()
     auto_mapped = Signal(int, int)   # (matched, total materials)
+    watch_status = Signal(str)       # log message from the watch folder
+    watch_changed = Signal(str, bool)  # (folder, enabled) — for persistence
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1262,7 +1264,12 @@ class ScenePanel(QWidget):
         self._hl_videos: set[str] = set()
         self._hover_material: Optional[str] = None
         self._hover_video: Optional[str] = None
+        self._watch_folder: str = ""
+        self._watch_seen: dict[str, float] = {}
         self._build_ui()
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(3000)   # poll (robust on network shares)
+        self._watch_timer.timeout.connect(self._scan_watch_folder)
 
     # ── Cross-highlight between the material and video lists ──────────────
     def _is_cross_highlighted(self, kind: str, key) -> bool:
@@ -1480,6 +1487,27 @@ class ScenePanel(QWidget):
         right.addWidget(self.vid_search)
         right.addWidget(self.vid_list)
 
+        # Watch folder: auto-import + version-update clips dropped into a folder.
+        watch_row = QHBoxLayout()
+        watch_row.setSpacing(4)
+        self.watch_btn = QPushButton("")
+        self.watch_btn.setObjectName("IconButton")
+        self.watch_btn.setCheckable(True)
+        self.watch_btn.setFixedSize(26, 22)
+        self.watch_btn.setToolTip("Watch a folder — auto-import new clips and update to the latest version")
+        self.watch_btn.toggled.connect(self._on_watch_toggled)
+        self.watch_label = QLabel("No watch folder")
+        self.watch_label.setObjectName("FieldLabel")
+        self.watch_browse_btn = QPushButton("")
+        self.watch_browse_btn.setObjectName("IconButton")
+        self.watch_browse_btn.setFixedSize(26, 22)
+        self.watch_browse_btn.setToolTip("Choose watch folder")
+        self.watch_browse_btn.clicked.connect(self._choose_watch_folder)
+        watch_row.addWidget(self.watch_btn)
+        watch_row.addWidget(self.watch_label, 1)
+        watch_row.addWidget(self.watch_browse_btn)
+        right.addLayout(watch_row)
+
         lists.addLayout(left, 5)
         lists.addLayout(middle, 2)
         lists.addLayout(right, 5)
@@ -1492,6 +1520,8 @@ class ScenePanel(QWidget):
         c = pal.text
         self.automap_btn.setIcon(icons.icon("check_apply", c))
         self.clear_map_btn.setIcon(icons.icon("reset", c))
+        self.watch_btn.setIcon(icons.icon("clock", pal.accent_text if self.watch_btn.isChecked() else c))
+        self.watch_browse_btn.setIcon(icons.icon("folder", c))
         self.add_video_btn.setIcon(icons.icon("plus", c, 13))
         self.browse_scene_btn.setIcon(icons.icon("folder", pal.accent_text))
         self.scan_btn.setIcon(icons.icon("refresh", c))
@@ -1667,6 +1697,95 @@ class ScenePanel(QWidget):
         if announce:
             self.auto_mapped.emit(len(matches), len(self._materials))
         return len(matches)
+
+    # ── Watch folder ─────────────────────────────────────────────────────
+    def _choose_watch_folder(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Choose watch folder",
+                                             self._watch_folder or str(Path.home()))
+        if d:
+            self.set_watch_folder(d, True)
+            self.watch_changed.emit(self._watch_folder, True)
+
+    def _on_watch_toggled(self, on: bool) -> None:
+        self._update_watch_ui()
+        if on and self._watch_folder:
+            self._watch_seen = {}          # force a fresh scan
+            self._scan_watch_folder()
+            self._watch_timer.start()
+        else:
+            self._watch_timer.stop()
+        self.watch_changed.emit(self._watch_folder, self.watch_btn.isChecked())
+
+    def set_watch_folder(self, folder: str, enabled: bool) -> None:
+        """Set (and optionally start) the watch folder — used on profile load."""
+        self._watch_folder = folder or ""
+        self.watch_btn.blockSignals(True)
+        self.watch_btn.setChecked(bool(enabled and self._watch_folder))
+        self.watch_btn.blockSignals(False)
+        self._update_watch_ui()
+        if self.watch_btn.isChecked():
+            self._watch_seen = {}
+            self._scan_watch_folder()
+            self._watch_timer.start()
+        else:
+            self._watch_timer.stop()
+
+    def get_watch_folder(self) -> tuple[str, bool]:
+        return self._watch_folder, self.watch_btn.isChecked()
+
+    def _update_watch_ui(self) -> None:
+        watching = self.watch_btn.isChecked()
+        name = Path(self._watch_folder).name if self._watch_folder else "No watch folder"
+        self.watch_label.setText(("👁 " + name) if watching else name)
+        self.watch_label.setToolTip(self._watch_folder or "Choose a folder to watch")
+        self.restyle(active_palette())
+
+    def _scan_watch_folder(self) -> None:
+        folder = self._watch_folder
+        if not folder or not os.path.isdir(folder):
+            return
+        files, mtimes = [], {}
+        try:
+            for n in os.listdir(folder):
+                p = os.path.join(folder, n)
+                if os.path.isfile(p) and Path(p).suffix.lower() in (VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS):
+                    files.append(p)
+                    mtimes[p] = os.path.getmtime(p)
+        except OSError:
+            return
+        sig = dict(mtimes)
+        if sig == self._watch_seen:
+            return                          # nothing changed since last poll
+        self._watch_seen = sig
+
+        videos_after, replacements, added = reconcile_versions(self._videos, files, mtimes)
+        if not replacements and not added:
+            return
+        if replacements:
+            for i, a in enumerate(self._assignments):
+                if a.video_path in replacements:
+                    self._assignments[i] = MaterialVideoAssignment(
+                        a.material_name, replacements[a.video_path], a.mapping_mode)
+            for old, new in replacements.items():
+                if old in self._muted_videos:
+                    self._muted_videos.discard(old)
+                    self._muted_videos.add(new)
+        self._videos = videos_after
+        self._refresh_lists()
+        self.videos_changed.emit(list(self._videos))
+        if replacements:
+            self.assignments_changed.emit(list(self._assignments))
+        n_new = self._auto_map_by_name(announce=False) if added else 0
+
+        parts = []
+        if added:
+            parts.append(f"imported {len(added)} new")
+        if replacements:
+            parts.append(f"updated {len(replacements)} to latest version")
+        if n_new:
+            parts.append(f"auto-mapped {n_new}")
+        if parts:
+            self.watch_status.emit("Watch folder: " + ", ".join(parts))
 
     def _refresh_lists(self) -> None:
         mq = self.mat_search.text().strip().lower()
@@ -3907,6 +4026,8 @@ class BlenderVideoMapperQt(QMainWindow):
             lambda n, total: self._append_log(
                 f"[app] Auto-mapped {n} of {total} materials by name"
                 + ("" if n else " — no filenames matched a material name")))
+        self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
+        self.scene_panel.watch_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.mute_changed.connect(self._schedule_save)
         self.scene_panel.render_requested.connect(self._start_render)
 
@@ -6702,11 +6823,14 @@ class BlenderVideoMapperQt(QMainWindow):
             for j in self._jobs
         ]
 
+        watch_folder, watch_enabled = self.scene_panel.get_watch_folder()
         return {
             "version": PROFILE_VERSION,
             "theme_mode": self._theme_mode,
             "accent": self._accent,
             "live_preview": self._preview_enabled,
+            "watch_folder": watch_folder,
+            "watch_enabled": watch_enabled,
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
@@ -6927,6 +7051,12 @@ class BlenderVideoMapperQt(QMainWindow):
             if r:
                 muted.append(r)
         self.scene_panel.set_muted_videos(muted)
+
+        # Restore the watch folder (after videos, so the first scan reconciles
+        # against the loaded clips and version-updates them if needed).
+        wf = str(d.get("watch_folder", "") or "")
+        if wf:
+            self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
 
         cam = d.get("camera", "")
         if cam:
