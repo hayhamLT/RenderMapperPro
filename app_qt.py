@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.request
 import zipfile
@@ -1251,6 +1252,7 @@ class ScenePanel(QWidget):
     auto_mapped = Signal(int, int)   # (matched, total materials)
     watch_status = Signal(str)       # log message from the watch folder
     watch_changed = Signal(str, bool)  # (folder, enabled) — for persistence
+    _watch_scanned = Signal(list)    # internal: background scan results → UI thread
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1267,10 +1269,14 @@ class ScenePanel(QWidget):
         self._watch_folder: str = ""
         self._watch_seen: dict[str, float] = {}
         self._watch_sizes: dict[str, int] = {}   # last-seen size, for write-in-progress detection
+        self._watch_scanning = False             # a background scan is in flight
+        self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
+        self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
         self._build_ui()
         self._watch_timer = QTimer(self)
-        self._watch_timer.setInterval(3000)   # poll (robust on network shares)
+        self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
         self._watch_timer.timeout.connect(self._scan_watch_folder)
+        self._watch_scanned.connect(self._apply_watch_scan)
 
     # ── Cross-highlight between the material and video lists ──────────────
     def _is_cross_highlighted(self, kind: str, key) -> bool:
@@ -1737,35 +1743,60 @@ class ScenePanel(QWidget):
         return self._watch_folder, self.watch_btn.isChecked()
 
     def _update_watch_ui(self) -> None:
-        watching = self.watch_btn.isChecked()
         name = Path(self._watch_folder).name if self._watch_folder else "No watch folder"
-        self.watch_label.setText(("👁 " + name) if watching else name)
+        self.watch_label.setText(name)
         self.watch_label.setToolTip(self._watch_folder or "Choose a folder to watch")
-        self.restyle(active_palette())
+        self.restyle(active_palette())   # the toggle's tint shows the watching state
+
+    def set_watch_options(self, interval_ms: int, settle_s: float) -> None:
+        """Poll cadence + file-stability window (set from Properties)."""
+        self._watch_interval_ms = max(1000, int(interval_ms))
+        self._watch_settle = max(0.0, float(settle_s))
+        self._watch_timer.setInterval(self._watch_interval_ms)
+
+    def get_watch_options(self) -> tuple[int, float]:
+        return self._watch_interval_ms, self._watch_settle
 
     def _scan_watch_folder(self) -> None:
+        """Kick off a directory listing on a worker thread (so a slow network
+        share never blocks the UI); results are applied back on the UI thread."""
         folder = self._watch_folder
-        if not folder or not os.path.isdir(folder):
+        if not folder or not os.path.isdir(folder) or self._watch_scanning:
+            return
+        self._watch_scanning = True
+        exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
+
+        def work():
+            listing = []
+            try:
+                with os.scandir(folder) as it:
+                    for e in it:
+                        try:
+                            if e.is_file() and Path(e.name).suffix.lower() in exts:
+                                st = e.stat()
+                                listing.append((e.path, st.st_size, st.st_mtime))
+                        except OSError:
+                            pass
+            except OSError:
+                listing = []
+            self._watch_scanned.emit(listing)   # queued → delivered on the UI thread
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_watch_scan(self, listing: list) -> None:
+        self._watch_scanning = False
+        if not self._watch_folder:
             return
         now = time.time()
         ready, mtimes, sizes = [], {}, {}
-        try:
-            for n in os.listdir(folder):
-                p = os.path.join(folder, n)
-                if not (os.path.isfile(p) and Path(p).suffix.lower() in (VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS)):
-                    continue
-                st = os.stat(p)
-                sizes[p] = st.st_size
-                # "Ready" = finished copying: non-empty and either its size held
-                # steady since the last poll, or it hasn't been touched for a few
-                # seconds. This avoids ingesting a half-written file mid-copy.
-                stable = st.st_size > 0 and (
-                    self._watch_sizes.get(p) == st.st_size or (now - st.st_mtime) >= 2.0)
-                if stable:
-                    ready.append(p)
-                    mtimes[p] = st.st_mtime
-        except OSError:
-            return
+        for path, size, mtime in listing:
+            sizes[path] = size
+            # "Ready" = finished copying: non-empty and either its size held
+            # steady since the last poll, or it hasn't been touched for a while.
+            # This avoids ingesting a half-written file mid-copy.
+            if size > 0 and (self._watch_sizes.get(path) == size or (now - mtime) >= self._watch_settle):
+                ready.append(path)
+                mtimes[path] = mtime
         self._watch_sizes = sizes           # remember sizes for next poll's stability check
         sig = dict(mtimes)
         if sig == self._watch_seen:
@@ -4678,6 +4709,24 @@ class BlenderVideoMapperQt(QMainWindow):
         preview_cb = QCheckBox("Show a live frame preview while rendering")
         preview_cb.setChecked(self._preview_enabled)
         lay.addWidget(preview_cb)
+
+        lay.addWidget(section_title("WATCH / INGEST"))
+        _wi, _ws = self.scene_panel.get_watch_options()
+        watch_row = QHBoxLayout()
+        watch_interval_edit = QLineEdit(f"{_wi / 1000:g}")
+        watch_interval_edit.setFixedWidth(70)
+        watch_interval_edit.setToolTip("How often the watch folder is polled, in seconds.")
+        watch_settle_edit = QLineEdit(f"{_ws:g}")
+        watch_settle_edit.setFixedWidth(70)
+        watch_settle_edit.setToolTip("How long a file's size must stay steady before it's imported "
+                                     "(guards against half-copied files).")
+        watch_row.addWidget(QLabel("Poll interval (s):"))
+        watch_row.addWidget(watch_interval_edit)
+        watch_row.addSpacing(16)
+        watch_row.addWidget(QLabel("Stability window (s):"))
+        watch_row.addWidget(watch_settle_edit)
+        watch_row.addStretch()
+        lay.addLayout(watch_row)
         lay.addStretch()
 
         # ── Deadline ─────────────────────────────────────────────────────
@@ -4809,6 +4858,16 @@ class BlenderVideoMapperQt(QMainWindow):
                 self.preview_action.setChecked(preview_cb.isChecked())
             else:
                 self._preview_enabled = preview_cb.isChecked()
+
+            # Watch / ingest options
+            def _to_float(s, d):
+                try:
+                    return float(s)
+                except ValueError:
+                    return d
+            interval_ms = int(max(1.0, _to_float(watch_interval_edit.text().strip(), 3.0)) * 1000)
+            settle_s = max(0.0, _to_float(watch_settle_edit.text().strip(), 2.0))
+            self.scene_panel.set_watch_options(interval_ms, settle_s)
 
             self._schedule_save()
             dlg.accept()
@@ -6838,6 +6897,7 @@ class BlenderVideoMapperQt(QMainWindow):
         ]
 
         watch_folder, watch_enabled = self.scene_panel.get_watch_folder()
+        watch_interval_ms, watch_settle = self.scene_panel.get_watch_options()
         return {
             "version": PROFILE_VERSION,
             "theme_mode": self._theme_mode,
@@ -6845,6 +6905,8 @@ class BlenderVideoMapperQt(QMainWindow):
             "live_preview": self._preview_enabled,
             "watch_folder": watch_folder,
             "watch_enabled": watch_enabled,
+            "watch_interval_ms": watch_interval_ms,
+            "watch_settle": watch_settle,
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
@@ -7068,6 +7130,11 @@ class BlenderVideoMapperQt(QMainWindow):
 
         # Restore the watch folder (after videos, so the first scan reconciles
         # against the loaded clips and version-updates them if needed).
+        try:
+            self.scene_panel.set_watch_options(
+                int(d.get("watch_interval_ms", 3000)), float(d.get("watch_settle", 2.0)))
+        except (TypeError, ValueError):
+            pass
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
