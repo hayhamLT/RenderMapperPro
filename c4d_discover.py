@@ -59,6 +59,9 @@ def _settings(doc) -> dict:
         s["frame_step"] = max(1, int(rd[c4d.RDATA_FRAMESTEP]))
         s["width"] = int(rd[c4d.RDATA_XRES])
         s["height"] = int(rd[c4d.RDATA_YRES])
+        # Which C4D render engine the scene uses.
+        engines = {0: "Standard", 1023342: "Physical", 1036219: "Redshift"}
+        s["renderer"] = engines.get(int(rd[c4d.RDATA_RENDERENGINE]), "Redshift")
     except Exception as exc:  # never let settings probing break discovery
         log(f"settings probe warning: {exc}")
     return s

@@ -4625,6 +4625,22 @@ class BlenderVideoMapperQt(QMainWindow):
         self._discovery_thread.finished.connect(self._on_discovery_done)
         self._discovery_thread.start()
 
+    def _set_renderer_options(self, is_c4d: bool, detected: str = "") -> None:
+        """Populate the renderer dropdown with the engines that apply to the
+        loaded scene: Cinema 4D renderers for a .c4d, Blender engines otherwise."""
+        combo = self.render_panel.engine_combo
+        items = ["Redshift", "Standard", "Physical"] if is_c4d else ["CYCLES", "BLENDER_EEVEE"]
+        if [combo.itemText(i) for i in range(combo.count())] == items and not detected:
+            return
+        cur = combo.currentText()
+        target = detected or (cur if cur in items else items[0])
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(items)
+        idx = combo.findText(target)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
     def _on_discovery(self, materials: list, cameras: list, settings: dict) -> None:
         clean_materials = [str(m).strip() for m in materials if str(m).strip()]
         clean_cameras = [str(c).strip() for c in cameras if str(c).strip()]
@@ -4637,6 +4653,11 @@ class BlenderVideoMapperQt(QMainWindow):
         current = self.scene_panel.get_assignments()
         current = [a for a in current if a.material_name in set(clean_materials)]
         self.scene_panel.set_assignments(current)
+
+        # The renderer dropdown reflects the scene type: C4D renderers for a
+        # .c4d, Blender engines otherwise.
+        is_c4d = self.scene_panel.scene_edit.text().strip().lower().endswith(".c4d")
+        self._set_renderer_options(is_c4d, settings.get("renderer", "") if settings else "")
 
         # Pull render/timeline/colour settings from the scene into the UI. Guard
         # so the per-field edits don't each fire _on_settings_changed; we sync

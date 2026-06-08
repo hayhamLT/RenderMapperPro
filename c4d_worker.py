@@ -154,6 +154,12 @@ def main() -> None:
 
     # ── Render settings ──────────────────────────────────────────────────
     rd = doc.GetActiveRenderData()
+    # Honour the chosen C4D render engine (combo sends Redshift/Standard/Physical).
+    engine_ids = {"STANDARD": 0, "PHYSICAL": 1023342, "REDSHIFT": 1036219}
+    eng = str(render.get("engine", "")).strip().upper()
+    if eng in engine_ids:
+        rd[c4d.RDATA_RENDERENGINE] = engine_ids[eng]
+        log(f"Render engine: {eng.title()}")
     width = int(render.get("width", 1920))
     height = int(render.get("height", 1080))
     pct = max(1, min(100, int(render.get("resolution_percentage", 100))))
