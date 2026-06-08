@@ -1,4 +1,11 @@
-from core.utils import auto_match_media_to_materials, match_score, normalize_match_name
+from pathlib import Path
+
+from core.utils import (
+    auto_match_media_to_materials,
+    match_score,
+    normalize_match_name,
+    resolve_output_path,
+)
 
 
 def test_normalize_strips_affixes_and_dup_suffix():
@@ -36,3 +43,15 @@ def test_short_or_unrelated_names_not_forced():
 def test_normalized_separators_match():
     m = auto_match_media_to_materials(["TV Screen 01"], ["/v/tv-screen-01_comp.mp4"])
     assert m["TV Screen 01"].endswith("tv-screen-01_comp.mp4")
+
+
+def test_resolve_output_no_mkdir_when_create_false(tmp_path):
+    vid = tmp_path / "watch" / "Screen.mp4"
+    vid.parent.mkdir()
+    # token template → output resolves next to the clip; create=False must NOT make folders
+    out = resolve_output_path("{video}_out", str(tmp_path / "s.blend"), str(vid),
+                              is_batch=False, output_format="PNG", create=False)
+    assert not Path(out).exists()                 # nothing created on disk
+    out2 = resolve_output_path("{video}_out", str(tmp_path / "s.blend"), str(vid),
+                               is_batch=False, output_format="PNG", create=True)
+    assert Path(out2).exists()                    # create=True still makes it

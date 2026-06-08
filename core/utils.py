@@ -66,7 +66,16 @@ def resolve_output_path(
     job_label: str = "",
     output_format: str = "MPEG4",
     extra_tokens: dict | None = None,
+    create: bool = True,
 ) -> str:
+    """Compute the output path. When ``create`` is False, no directories are
+    made on disk (used while drafting a job, so resolving an output next to a
+    source clip never litters a watch folder); the renderer creates the final
+    directory at render time."""
+    def _mkdir(p: Path) -> None:
+        if create:
+            p.mkdir(parents=True, exist_ok=True)
+
     scene_stem = slugify_filename(Path(scene_path).stem)
     video_stem = slugify_filename(Path(video_path).stem)
     label_stem = slugify_filename(job_label) if job_label.strip() else video_stem
@@ -100,29 +109,29 @@ def resolve_output_path(
     if is_sequence:
         # Image sequences always go into a folder
         folder = output if not output.suffix else output.parent / output.stem
-        folder.mkdir(parents=True, exist_ok=True)
+        _mkdir(folder)
         return str(folder)
 
     if is_batch:
-        output.mkdir(parents=True, exist_ok=True)
+        _mkdir(output)
         return str(output / f"{auto_name}{ext}")
 
     # Input already has the right extension → keep it
     if output.suffix.lower() == ext:
-        output.parent.mkdir(parents=True, exist_ok=True)
+        _mkdir(output.parent)
         return str(output)
 
     # Input has a different extension → correct it
     if output.suffix:
         corrected = output.with_suffix(ext)
-        corrected.parent.mkdir(parents=True, exist_ok=True)
+        _mkdir(corrected.parent)
         return str(corrected)
 
     # No extension: an existing directory gets an auto-named file inside it;
     # otherwise the (token-built) name itself is used as the output filename.
     if output.is_dir():
         return str(output / f"{auto_name}{ext}")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir(output.parent)
     return str(output) + ext
 
 

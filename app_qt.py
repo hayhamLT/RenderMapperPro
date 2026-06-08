@@ -122,7 +122,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -1787,7 +1787,14 @@ class ScenePanel(QWidget):
         self._watch_scanning = False
         if not self._watch_folder:
             return
+        folder = os.path.normpath(self._watch_folder)
         now = time.time()
+        present = {os.path.normpath(p) for p, _s, _m in listing}
+        # Clips that came from the watch folder but are gone now (deleted, or
+        # renamed away) — drop them so a rename doesn't leave a stale duplicate.
+        gone = {v for v in self._videos
+                if os.path.normpath(os.path.dirname(v)) == folder and os.path.normpath(v) not in present}
+
         ready, mtimes, sizes = [], {}, {}
         for path, size, mtime in listing:
             sizes[path] = size
@@ -1798,14 +1805,17 @@ class ScenePanel(QWidget):
                 ready.append(path)
                 mtimes[path] = mtime
         self._watch_sizes = sizes           # remember sizes for next poll's stability check
-        sig = dict(mtimes)
+        sig = (dict(mtimes), tuple(sorted(gone)))
         if sig == self._watch_seen:
-            return                          # nothing new is ready since last poll
+            return                          # nothing changed since last poll
         self._watch_seen = sig
 
-        videos_after, replacements, added = reconcile_versions(self._videos, ready, mtimes)
-        if not replacements and not added:
+        base_videos = [v for v in self._videos if v not in gone]
+        videos_after, replacements, added = reconcile_versions(base_videos, ready, mtimes)
+        if not gone and not replacements and not added:
             return
+
+        assignments_changed = bool(replacements)
         if replacements:
             for i, a in enumerate(self._assignments):
                 if a.video_path in replacements:
@@ -1815,10 +1825,14 @@ class ScenePanel(QWidget):
                 if old in self._muted_videos:
                     self._muted_videos.discard(old)
                     self._muted_videos.add(new)
+        if gone:
+            self._assignments = [a for a in self._assignments if a.video_path not in gone]
+            self._muted_videos -= gone
+            assignments_changed = True
         self._videos = videos_after
         self._refresh_lists()
         self.videos_changed.emit(list(self._videos))
-        if replacements:
+        if assignments_changed:
             self.assignments_changed.emit(list(self._assignments))
         n_new = self._auto_map_by_name(announce=False) if added else 0
 
@@ -1827,6 +1841,8 @@ class ScenePanel(QWidget):
             parts.append(f"imported {len(added)} new")
         if replacements:
             parts.append(f"updated {len(replacements)} to latest version")
+        if gone:
+            parts.append(f"removed {len(gone)} deleted")
         if n_new:
             parts.append(f"auto-mapped {n_new}")
         if parts:
@@ -3904,21 +3920,43 @@ class BlenderVideoMapperQt(QMainWindow):
         html = self._help_css() + """
         <h2>Quick Start</h2>
         <ol>
-          <li><b>Blender</b> is auto-detected. To set it manually use <i>Profile → Properties</i>,
-              or install a managed copy via <i>Runtime → Install Managed Blender</i>.</li>
           <li><b>Pick a scene</b> — drop a 3D file onto the Scene field (or click <i>Browse</i>),
-              then click <b>Scan Scene</b> to load its materials and cameras.</li>
+              then click <b>Scan Scene</b> to load its materials and cameras. Blender (<code>.blend</code>,
+              <code>.fbx</code>, <code>.usd</code>, …) and <b>Cinema&nbsp;4D</b> (<code>.c4d</code>) scenes
+              are both supported — see below.</li>
           <li><b>Add videos</b> — click <i>Add</i> or drag &amp; drop clips into the Videos list.
               Pick a <b>Camera</b> for the render.</li>
           <li><b>Connect</b> — select a material and a video, then click the <b>link</b> button
-              between the lists. A colored <b>stripe</b> on the left of each row marks the connected
-              pair; hover or select either side to light up its partner in the other list.</li>
-          <li><b>Output</b> auto-fills as <code>&lt;video&gt;_PREVIZ_v001.mp4</code> next to the
-              source clip — edit it if you like. Set resolution, frame range, format, and
-              (optionally) the collapsed <i>Advanced quality settings</i>.</li>
-          <li>Click <b>Queue</b> to add the job, then <b>Start</b>. Watch progress per row and a
-              live frame preview; the finished video plays in the <i>Live Preview</i> tab.</li>
+              between the lists. A colored <b>stripe</b> marks the connected pair; hover or select
+              either side to light up its partner. Or just use <b>Auto-map</b> (below).</li>
+          <li><b>Output</b> auto-fills next to the source clip — edit it if you like. Set resolution,
+              frame range, format, and (optionally) the collapsed <i>Advanced quality settings</i>.</li>
+          <li>Click <b>Queue</b> to add the job, then <b>Start</b> (or submit to a <b>render farm</b>).
+              Watch per-row progress and a live frame preview.</li>
         </ol>
+        <h3>Auto-map by name &amp; Watch folder</h3>
+        <p class="muted">A clip is linked to a material automatically when the material's name
+        appears in the clip's filename (e.g. <code>Screen</code> ↔ <code>Screen_final_v3.mp4</code>).
+        This runs the moment you <b>import</b> a clip, or on demand with the <b>Auto-map</b> button —
+        it only fills empty materials, never overwriting a manual mapping.</p>
+        <p class="muted">Turn on the <b>Watch folder</b> (clock button under the clip list) and any
+        clip dropped into that folder is imported and mapped automatically. <b>Versions</b> are
+        understood — <code>Screen_v1</code>/<code>Screen_v2</code>/<code>Screen_3</code> are one clip
+        and the <b>latest wins</b>; if a newer version appears, the project updates to it
+        automatically. Files still being copied are skipped until complete. Tune the poll interval
+        and stability window in <i>Properties → General → Watch / Ingest</i>.</p>
+        <h3>Cinema 4D + Redshift</h3>
+        <p class="muted">Import a <code>.c4d</code> scene and the renderer switches to <b>Redshift</b>
+        automatically. The clip is mapped to a material's Redshift emission (full-bright). The
+        Advanced panel shows Redshift controls — a <b>Speed Preset</b> (Draft→Final), Max/Min samples,
+        adaptive <b>Noise Threshold</b>, Denoise, GI bounces / on-off, and Max Ray Depth — to trade
+        quality for render time. Settings panels adapt to the active renderer so every control is real.</p>
+        <h3>Render farm (Deadline)</h3>
+        <p class="muted">Enable the <b>Deadline</b> panel to submit jobs to a Thinkbox Deadline farm.
+        Blender jobs run via the worker on each node; <b>Cinema 4D</b> jobs are baked into a
+        self-contained scene and rendered with the licensed Cinema 4D command-line renderer (the same
+        engine the stock Cinema4D plugin uses), so node licensing just works. Frames distribute across
+        nodes, and jobs show the app icon in the Deadline Monitor.</p>
         <h3>Audio</h3>
         <p class="muted">Any clip that contains sound shows a <b>speaker</b> badge in the Videos
         list. Click the badge (or right-click → <i>Mute audio</i>) to drop that clip's audio; every
@@ -5699,6 +5737,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     job_label=j.label or Path(src).stem,
                     output_format=out_fmt,
                     extra_tokens=extra,
+                    create=False,   # don't make folders while drafting (esp. inside a watch folder)
                 )
             except Exception:
                 j.output_path = ""
@@ -5916,6 +5955,14 @@ class BlenderVideoMapperQt(QMainWindow):
             opts = j.render_options or self.render_panel.render_options()
             out_fmt, codec = OUTPUT_PROFILES.get(j.output_profile or "H264 MP4", ("MPEG4", "H264"))
             opts = dataclasses.replace(opts, output_format=out_fmt, codec=codec)
+
+            # Create the output location now (drafting no longer pre-creates it,
+            # so a watch folder stays clean until you actually render).
+            try:
+                op = Path(j.output_path)
+                (op if op.suffix == "" else op.parent).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
 
             primary = asn[0] if asn else MaterialVideoAssignment("", j.video_path)
             audio_src = asn if asn else ([primary] if primary.video_path else [])

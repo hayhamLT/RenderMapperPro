@@ -1,8 +1,8 @@
 # Render Mapper Pro
 
-A standalone desktop app that maps videos onto Blender materials and renders them headlessly — built for LED‑wall / screen‑content workflows where one scene drives many video surfaces.
+A standalone desktop app that maps videos onto 3D‑scene materials and renders them headlessly — built for LED‑wall / screen‑content workflows where one scene drives many video surfaces.
 
-It runs Blender in the background (`-b`), so a Blender crash can never take down the app, and ships a bundled static `ffmpeg`/`ffprobe` so audio muxing and clip probing work out of the box.
+It supports **two render backends**, chosen automatically by scene type: **Blender** (`.blend`, `.fbx`, `.usd`, …) and **Cinema 4D + Redshift** (`.c4d`). It runs the renderer in the background, so a renderer crash can never take down the app, and ships bundled static `ffmpeg`/`ffprobe` so audio muxing and clip probing work out of the box.
 
 ## Download
 
@@ -21,13 +21,18 @@ Every push to `main` also publishes the three builds as downloadable **workflow 
 
 ## What it does
 
-- Load a 3D scene (`.blend`, `.fbx`, `.obj`, `.glb`, `.usd`, `.abc`, …) and one or many videos.
-- **Scan** the scene to populate materials and cameras — and pull the scene's own render settings (fps, frame range, resolution, engine, samples, colour management) straight into the UI.
+- Load a 3D scene — **Blender** (`.blend`, `.fbx`, `.obj`, `.glb`, `.usd`, `.abc`, …) or **Cinema 4D** (`.c4d`) — and one or many videos.
+- **Scan** the scene to populate materials and cameras — and pull the scene's own render settings (fps, frame range, resolution, engine, samples, and for C4D the Redshift sampling/optimization) straight into the UI.
 - Map videos onto materials (full‑bright **emission** or **base‑color/alpha**) — multiple video→material pairs render in a single pass.
+- **Auto‑map by name:** clips link to materials automatically when the material name appears in the filename — on import or via a button (gap‑fill only, never clobbers manual mappings).
+- **Watch folder:** point at a folder and dropped clips import + map themselves. Version‑aware (`Screen_v1`/`v2`/`_3` → latest wins) and auto‑updates the project to a newer version; half‑copied files are skipped until complete.
 - Video textures render at **full quality** (cubic sampling, texture‑size limits forced off, no mip down‑scaling).
 - Per‑clip **audio**: clips with sound show a speaker badge; click to mute/include per clip.
-- Configure resolution, fps, frame range/step, engine (Cycles/EEVEE), samples, denoise, colour transform/exposure/gamma, output profile (H.264 MP4, ProRes MOV, PNG/EXR sequence, …).
-- Optional **Thinkbox Deadline** farm submission.
+- **Renderer‑aware settings** — the panel adapts to the active engine so every control is real:
+  - **Blender:** Cycles/EEVEE, samples, denoise, device, colour transform/exposure/gamma, transparent.
+  - **Redshift:** Speed Preset (Draft→Final), Max/Min samples, adaptive Noise Threshold, denoise, GI bounces / on‑off, Max Ray Depth.
+- Output profiles: H.264 MP4, ProRes MOV, PNG/EXR sequence.
+- **Render farm (Thinkbox Deadline):** submit Blender *and* Cinema 4D jobs. C4D jobs are baked and rendered with the licensed Cinema 4D command‑line renderer; jobs carry the app icon in the Deadline Monitor and distribute frames across nodes.
 
 ### Live Preview
 
@@ -56,11 +61,12 @@ Both are JSON under the hood. App data lives in `~/.blender_video_mapper/`:
 
 - `app_qt.py` — the Qt (PySide6) desktop UI.
 - `theme.py` / `icons.py` — dark theme tokens + SVG icon set that drive all styling.
-- `blender_worker.py` — headless render script run inside Blender.
-- `blender_discover.py` — scene discovery (materials, cameras, render settings).
-- `core/` — UI‑agnostic logic: `models.py` (job config), `runner.py` (subprocess + Deadline), `discovery.py`, `utils.py`.
-- `tests/` — pytest suite for `core/`.
-- `BlenderVideoMapper.spec` — PyInstaller build spec.
+- `blender_worker.py` / `blender_discover.py` — headless Blender render + scene discovery.
+- `c4d_worker.py` / `c4d_discover.py` — headless Cinema 4D + Redshift render/bake + discovery (run under `c4dpy`).
+- `deadline/RenderMapperPro/` — custom Deadline plugin (app icon + cross‑platform C4D Commandline render); installed into the repository's `custom/plugins/`.
+- `core/` — UI‑agnostic logic: `models.py` (job config), `runner.py` (subprocess + Deadline submission), `discovery.py`, `utils.py` (output paths, name auto‑match, version reconciliation).
+- `tests/` — pytest suite for `core/` (matching, versioning, runner, Deadline submission).
+- `BlenderVideoMapper.spec` — PyInstaller build spec (bundles both workers + ffmpeg).
 
 ## Run from source
 
@@ -100,3 +106,9 @@ CI runs the same lint + tests as a gate before the build matrix.
 - The worker creates/updates `AUTO_VIDEO_TEXTURE` nodes per mapped material; emission mode wires the clip to an emission shader so screens stay fully visible.
 - Video clips map over the full timeline; the single‑frame preview renders one scene frame while keeping that timeline in sync.
 - Timeout / idle‑timeout controls can terminate stalled runs; safe mode validates paths/extensions in the worker.
+
+## Cinema 4D + Redshift notes
+
+- Requires Cinema 4D 2026 (auto‑detected via `c4dpy`) with Redshift; the clip is injected into the target material's **Redshift emission** as a full‑bright image sequence (Redshift can't read `.mp4`, so frames are extracted with the bundled `ffmpeg`).
+- **Local renders/preview** run under `c4dpy`. **Farm renders** bake a self‑contained `.c4d` (relative sequence paths) and render it with the licensed Cinema 4D **Commandline** — so any node that already renders C4D works, with no extra licensing setup.
+- **Farm prerequisites:** each render node needs Cinema 4D + Redshift licensed (as for the stock Cinema4D plugin). The `RenderMapperPro` Deadline plugin lives in `deadline/RenderMapperPro/` and is installed into the repository's `custom/plugins/`.
