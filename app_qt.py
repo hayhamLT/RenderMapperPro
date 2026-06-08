@@ -1583,6 +1583,11 @@ class ScenePanel(QWidget):
         self.vid_search.blockSignals(False)
         self._refresh_lists()
         self.videos_changed.emit(list(self._videos))
+        # Auto-map freshly imported clips to materials by name (gap-fill only;
+        # silent unless something actually matched).
+        added = self._auto_map_by_name(announce=False)
+        if added:
+            self.auto_mapped.emit(added, len(self._materials))
 
     def _remove_selected_video(self) -> None:
         items = self.vid_list.selectedItems() or ([self.vid_list.currentItem()] if self.vid_list.currentItem() else [])
@@ -1643,24 +1648,25 @@ class ScenePanel(QWidget):
         self._refresh_lists()
         self.assignments_changed.emit([])
 
-    def _auto_map_by_name(self) -> None:
-        """Map clips to materials whose name appears in the clip's filename.
-        Confident matches are applied (existing mode preserved); ambiguous
-        materials are left untouched for manual mapping."""
-        matches = auto_match_media_to_materials(self._materials, self._videos)
-        existing_mode = {a.material_name: a.mapping_mode for a in self._assignments}
+    def _auto_map_by_name(self, announce: bool = True) -> int:
+        """Fill in mappings for materials whose name appears in a clip's
+        filename. Gap-fill only: already-mapped materials and already-used clips
+        are left as-is, so manual choices are never overwritten. Returns the
+        number of new mappings added."""
+        mapped_mats = {a.material_name for a in self._assignments}
+        used_vids = {a.video_path for a in self._assignments}
+        free_mats = [m for m in self._materials if m not in mapped_mats]
+        free_vids = [v for v in self._videos if v not in used_vids]
+        matches = auto_match_media_to_materials(free_mats, free_vids)
         for material, video in matches.items():
-            mode = existing_mode.get(material, VIDEO_MAPPING_MODE_EMISSION)
-            replacement = MaterialVideoAssignment(material, video, mode)
-            for i, a in enumerate(self._assignments):
-                if a.material_name == material:
-                    self._assignments[i] = replacement
-                    break
-            else:
-                self._assignments.append(replacement)
-        self._refresh_lists()
-        self.assignments_changed.emit(list(self._assignments))
-        self.auto_mapped.emit(len(matches), len(self._materials))
+            self._assignments.append(
+                MaterialVideoAssignment(material, video, VIDEO_MAPPING_MODE_EMISSION))
+        if matches:
+            self._refresh_lists()
+            self.assignments_changed.emit(list(self._assignments))
+        if announce:
+            self.auto_mapped.emit(len(matches), len(self._materials))
+        return len(matches)
 
     def _refresh_lists(self) -> None:
         mq = self.mat_search.text().strip().lower()
