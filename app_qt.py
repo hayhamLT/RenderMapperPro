@@ -1253,6 +1253,8 @@ class ScenePanel(QWidget):
     watch_status = Signal(str)       # log message from the watch folder
     watch_changed = Signal(str, bool)  # (folder, enabled) — for persistence
     _watch_scanned = Signal(list)    # internal: background scan results → UI thread
+    targets_changed = Signal(list)   # render-target materials changed (persist)
+    target_set_ready = Signal(list)  # all targets mapped + the set changed → auto-render
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1272,6 +1274,9 @@ class ScenePanel(QWidget):
         self._watch_scanning = False             # a background scan is in flight
         self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
         self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
+        self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
+        self._targets: list[str] = []            # materials marked as render targets
+        self._autorender_last = None             # last complete target version-set emitted
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
@@ -1428,6 +1433,8 @@ class ScenePanel(QWidget):
         self.mat_list.itemEntered.connect(self._on_mat_entered)
         self.mat_list.viewport().installEventFilter(self)
         self.mat_list.scene_dropped.connect(self._on_scene_file_dropped)
+        self.mat_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mat_list.customContextMenuRequested.connect(self._show_material_context_menu)
         left.addWidget(self.mat_search)
         left.addWidget(self.mat_list)
 
@@ -1703,7 +1710,54 @@ class ScenePanel(QWidget):
             self.assignments_changed.emit(list(self._assignments))
         if announce:
             self.auto_mapped.emit(len(matches), len(self._materials))
+        self._check_target_set()
         return len(matches)
+
+    # ── Render targets (for auto-render) ─────────────────────────────────
+    def _show_material_context_menu(self, pos) -> None:
+        item = self.mat_list.itemAt(pos)
+        if item is None:
+            return
+        mat = item.text()
+        menu = QMenu(self)
+        is_target = mat in self._targets
+        act = menu.addAction("Unmark Render Target" if is_target else "Mark as Render Target")
+        act.triggered.connect(lambda: self._toggle_target(mat))
+        menu.exec(self.mat_list.mapToGlobal(pos))
+
+    def _toggle_target(self, mat: str) -> None:
+        if mat in self._targets:
+            self._targets.remove(mat)
+        else:
+            self._targets.append(mat)
+        self._autorender_last = None     # re-evaluate against the new target set
+        self._refresh_lists()
+        self.targets_changed.emit(list(self._targets))
+        self._check_target_set()
+
+    def set_targets(self, targets: list) -> None:
+        self._targets = [str(t) for t in targets if str(t)]
+        self._autorender_last = None
+        self._refresh_lists()
+
+    def get_targets(self) -> list:
+        return list(self._targets)
+
+    def _check_target_set(self) -> None:
+        """When every target material is mapped to a clip, emit the snapshot once
+        per distinct version-set so the main window can auto-render it."""
+        if not self._targets:
+            return
+        mapped = {a.material_name: a for a in self._assignments}
+        if not all(t in mapped for t in self._targets):
+            return
+        version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
+        if version_set == self._autorender_last:
+            return
+        self._autorender_last = version_set
+        snapshot = [MaterialVideoAssignment(t, mapped[t].video_path, mapped[t].mapping_mode)
+                    for t in self._targets]
+        self.target_set_ready.emit(snapshot)
 
     # ── Watch folder ─────────────────────────────────────────────────────
     def _choose_watch_folder(self) -> None:
@@ -1765,6 +1819,7 @@ class ScenePanel(QWidget):
             return
         self._watch_scanning = True
         exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
+        ignore = os.path.normpath(self._watch_ignore) if self._watch_ignore else ""
 
         def work():
             listing = []
@@ -1772,6 +1827,10 @@ class ScenePanel(QWidget):
                 with os.scandir(folder) as it:
                     for e in it:
                         try:
+                            # Skip the auto-render output dir so rendered PREVIZ
+                            # files are never re-ingested (no feedback loop).
+                            if ignore and os.path.normpath(e.path) == ignore:
+                                continue
                             if e.is_file() and Path(e.name).suffix.lower() in exts:
                                 st = e.stat()
                                 listing.append((e.path, st.st_size, st.st_mtime))
@@ -1780,6 +1839,9 @@ class ScenePanel(QWidget):
             except OSError:
                 listing = []
             self._watch_scanned.emit(listing)   # queued → delivered on the UI thread
+
+    def set_watch_ignore_dir(self, path: str) -> None:
+        self._watch_ignore = path or ""
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1847,6 +1909,7 @@ class ScenePanel(QWidget):
             parts.append(f"auto-mapped {n_new}")
         if parts:
             self.watch_status.emit("Watch folder: " + ", ".join(parts))
+        self._check_target_set()        # new versions of targets → auto-render
 
     def _refresh_lists(self) -> None:
         mq = self.mat_search.text().strip().lower()
@@ -1865,6 +1928,12 @@ class ScenePanel(QWidget):
             item = QListWidgetItem(m)
             if m in mat_to_idx:
                 item.setData(ROLE_MAP_COLOR, LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)])
+            if m in self._targets:
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+                item.setForeground(QColor(active_palette().accent_text))
+                item.setToolTip(f"{m}\n◉ Render target")
             self.mat_list.addItem(item)
         if current_mat:
             for i in range(self.mat_list.count()):
@@ -3753,6 +3822,12 @@ class BlenderVideoMapperQt(QMainWindow):
         self._restored_geometry = False
         self._recent_scenes: list[str] = []
         self._when_done = "nothing"           # nothing | quit | sleep
+        # Auto-render (target-driven): when all marked target materials have a
+        # clip, queue one multi-screen render; re-fire on new versions.
+        self._autorender_enabled = False
+        self._autorender_output = ""          # where PREVIZ renders go (≠ watch folder)
+        self._autorender_pattern = "{clip}_PREVIZ"
+        self._autorender_start = False        # auto-start vs queue-only
         self._last_report_path = ""
         self._job_durations: dict[int, float] = {}
         self._preview_thread: Optional[PreviewFrameThread] = None
@@ -3945,6 +4020,14 @@ class BlenderVideoMapperQt(QMainWindow):
         and the <b>latest wins</b>; if a newer version appears, the project updates to it
         automatically. Files still being copied are skipped until complete. Tune the poll interval
         and stability window in <i>Properties → General → Watch / Ingest</i>.</p>
+        <h3>Auto-render targets</h3>
+        <p class="muted">Right-click a material → <b>Mark as Render Target</b> to flag the screens
+        a finished render must cover. With <b>Auto-render</b> on (<i>Properties → General →
+        Auto-render</i>), the watch folder queues <b>one multi-screen render</b> the moment every
+        target has a clip — and queues a fresh one whenever a newer version of a target lands. The
+        output is named after the clips with a <code>PREVIZ</code> suffix (customizable), and lands
+        in its own folder so it's never re-ingested. Choose <i>queue only</i> or <i>start
+        automatically</i>.</p>
         <h3>Cinema 4D + Redshift</h3>
         <p class="muted">Import a <code>.c4d</code> scene and the renderer switches to <b>Redshift</b>
         automatically. The clip is mapped to a material's Redshift emission (full-bright). The
@@ -4111,6 +4194,8 @@ class BlenderVideoMapperQt(QMainWindow):
                 + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
         self.scene_panel.watch_changed.connect(lambda *_: self._save_profile())
+        self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
+        self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
         self.scene_panel.mute_changed.connect(self._schedule_save)
         self.scene_panel.render_requested.connect(self._start_render)
 
@@ -4765,6 +4850,39 @@ class BlenderVideoMapperQt(QMainWindow):
         watch_row.addWidget(watch_settle_edit)
         watch_row.addStretch()
         lay.addLayout(watch_row)
+
+        lay.addWidget(section_title("AUTO-RENDER (TARGETS)"))
+        ar_enable_cb = QCheckBox("Queue a multi-screen render once all target screens have clips")
+        ar_enable_cb.setChecked(self._autorender_enabled)
+        ar_enable_cb.setToolTip("Mark materials as targets (right-click a material → Mark as Render Target). "
+                                "When the watch folder fills every target — or a newer version arrives — "
+                                "a single render covering all of them is queued.")
+        lay.addWidget(ar_enable_cb)
+        ar_start_cb = QCheckBox("Start the render automatically (otherwise just queue it)")
+        ar_start_cb.setChecked(self._autorender_start)
+        lay.addWidget(ar_start_cb)
+        ar_out_row = QHBoxLayout()
+        ar_out_edit = QLineEdit(self._autorender_output)
+        ar_out_edit.setPlaceholderText("Output folder (blank = a PREVIZ subfolder of the watch folder)")
+        ar_out_browse = QPushButton("Browse")
+        def _pick_ar_out() -> None:
+            d = QFileDialog.getExistingDirectory(dlg, "Auto-render output folder", ar_out_edit.text() or str(Path.home()))
+            if d:
+                ar_out_edit.setText(d)
+        ar_out_browse.clicked.connect(_pick_ar_out)
+        ar_out_row.addWidget(QLabel("Output:"))
+        ar_out_row.addWidget(ar_out_edit, 1)
+        ar_out_row.addWidget(ar_out_browse)
+        lay.addLayout(ar_out_row)
+        ar_pat_row = QHBoxLayout()
+        ar_pat_edit = QLineEdit(self._autorender_pattern)
+        ar_pat_edit.setToolTip("Output filename. Tokens: {clip} (primary target's clip), {scene}, {date}.")
+        ar_pat_row.addWidget(QLabel("Name:"))
+        ar_pat_row.addWidget(ar_pat_edit, 1)
+        ar_pat_hint = QLabel("tokens: {clip} {scene} {date}")
+        ar_pat_hint.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        ar_pat_row.addWidget(ar_pat_hint)
+        lay.addLayout(ar_pat_row)
         lay.addStretch()
 
         # ── Deadline ─────────────────────────────────────────────────────
@@ -4906,6 +5024,12 @@ class BlenderVideoMapperQt(QMainWindow):
             interval_ms = int(max(1.0, _to_float(watch_interval_edit.text().strip(), 3.0)) * 1000)
             settle_s = max(0.0, _to_float(watch_settle_edit.text().strip(), 2.0))
             self.scene_panel.set_watch_options(interval_ms, settle_s)
+
+            # Auto-render (targets)
+            self._autorender_enabled = ar_enable_cb.isChecked()
+            self._autorender_start = ar_start_cb.isChecked()
+            self._autorender_output = ar_out_edit.text().strip()
+            self._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
 
             self._schedule_save()
             dlg.accept()
@@ -5215,6 +5339,43 @@ class BlenderVideoMapperQt(QMainWindow):
         job.label = self._derive_job_label(job, f"Mapped scene ({len(assignments)} materials)")
         self._jobs.append(job)
         self._active_job_id = job.id
+
+    def _on_target_set_ready(self, assignments: list) -> None:
+        """All target screens have clips (and the set changed) — queue one
+        multi-screen render named after the clips with a PREVIZ suffix."""
+        if not self._autorender_enabled or not assignments:
+            return
+        scene = self.scene_panel.scene_edit.text().strip()
+        if not scene:
+            return
+        job = RenderJob(id=self._next_job_id)
+        self._next_job_id += 1
+        job.video_path = assignments[0].video_path
+        self._make_job_snapshot(job, assignments)
+
+        primary = Path(assignments[0].video_path).stem
+        base = (self._autorender_pattern or "{clip}_PREVIZ") \
+            .replace("{clip}", primary) \
+            .replace("{scene}", Path(scene).stem) \
+            .replace("{date}", datetime.now().strftime("%Y-%m-%d"))
+        out_fmt, _codec = OUTPUT_PROFILES.get(job.output_profile or "H264 MP4", ("MPEG4", "H264"))
+        ext = ext_for_format(out_fmt) or ".mp4"
+        watch_folder, _en = self.scene_panel.get_watch_folder()
+        out_dir = self._autorender_output or (
+            os.path.join(watch_folder, "PREVIZ") if watch_folder
+            else str(Path(assignments[0].video_path).parent / "PREVIZ"))
+        self.scene_panel.set_watch_ignore_dir(out_dir)   # never re-ingest our own renders
+        job.output_path = str(Path(out_dir) / f"{base}{ext}")
+        job.output_input = job.output_path
+        job.custom_label = True
+        job.label = f"Auto · {base}"
+        self._jobs.insert(0, job)
+        self._refresh_queue_view()
+        self._schedule_save()
+        screens = ", ".join(a.material_name for a in assignments)
+        self._append_log(f"[app] Auto-render queued: {job.label}  ({len(assignments)} screens: {screens})")
+        if self._autorender_start and not self._is_rendering:
+            self._start_render(render_all=False)
 
     def _request_auto_preview(self) -> None:
         """Debounced trigger: when Auto is on, re-render the preview a moment
@@ -6954,6 +7115,11 @@ class BlenderVideoMapperQt(QMainWindow):
             "watch_enabled": watch_enabled,
             "watch_interval_ms": watch_interval_ms,
             "watch_settle": watch_settle,
+            "render_targets": self.scene_panel.get_targets(),
+            "autorender_enabled": self._autorender_enabled,
+            "autorender_start": self._autorender_start,
+            "autorender_output": self._autorender_output,
+            "autorender_pattern": self._autorender_pattern,
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
@@ -7182,6 +7348,13 @@ class BlenderVideoMapperQt(QMainWindow):
                 int(d.get("watch_interval_ms", 3000)), float(d.get("watch_settle", 2.0)))
         except (TypeError, ValueError):
             pass
+        self._autorender_enabled = bool(d.get("autorender_enabled", False))
+        self._autorender_start = bool(d.get("autorender_start", False))
+        self._autorender_output = str(d.get("autorender_output", "") or "")
+        self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
+        tg = d.get("render_targets", [])
+        if isinstance(tg, list):
+            self.scene_panel.set_targets(tg)
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
