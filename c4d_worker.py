@@ -100,6 +100,121 @@ def _set_still(graph, path_port, image_path) -> None:
         transaction.Commit()
 
 
+def _inject_emission_sequence(mat, first_frame_path, fstart, fend, fps) -> bool:
+    """Bake the clip into the material as a Redshift image-sequence emission so
+    the scene renders the right frame *natively* — letting the licensed Cinema 4D
+    Commandline renderer drive it on the farm with no Python/c4dpy per node."""
+    nm = mat.GetNodeMaterialReference()
+    if nm is None or not nm.HasSpace(maxon.Id(RS_SPACE)):
+        log(f"  '{mat.GetName()}' is not a Redshift node material — skipped")
+        return False
+    graph = nm.GetGraph(maxon.Id(RS_SPACE))
+    tr = graph.BeginTransaction()
+    try:
+        stds = maxon.GraphModelHelper.FindNodesByAssetId(graph, maxon.Id(STD), True)
+        if not stds:
+            tr.Commit()
+            return False
+        std = stds[0]
+        tex = graph.AddChild(maxon.Id(""), maxon.Id(TEX), maxon.DataDictionary())
+        tex.GetOutputs().FindChild(TEX + ".outcolor").Connect(
+            std.GetInputs().FindChild(STD + ".emission_color"))
+        for leaf, val in (("emission_weight", 1.0), ("base_color_weight", 0.0),
+                          ("refl_weight", 0.0), ("coat_weight", 0.0), ("sheen_weight", 0.0)):
+            p = std.GetInputs().FindChild(STD + "." + leaf)
+            if p:
+                p.SetPortValue(maxon.Float64(val))
+        tex0 = tex.GetInputs().FindChild(TEX + ".tex0")
+
+        def setsub(leaf, value):
+            for sub in tex0.GetChildren():
+                if str(sub.GetId()).split(".")[-1] == leaf:
+                    try:
+                        sub.SetPortValue(value)
+                        return True
+                    except Exception as exc:
+                        log(f"   seq port '{leaf}' err: {exc}")
+            return False
+
+        setsub("path", maxon.Url(first_frame_path))
+        setsub("animation", maxon.Bool(True))
+        setsub("framestart", maxon.Int32(int(fstart)))
+        setsub("frameend", maxon.Int32(int(fend)))
+        setsub("framerate", maxon.Float64(float(fps)))
+        tr.Commit()
+        return True
+    except Exception as exc:
+        log(f"  sequence mapping error on '{mat.GetName()}': {exc}")
+        try:
+            tr.Commit()
+        except Exception:
+            pass
+        return False
+
+
+def prepare_scene(cfg) -> None:
+    """Bake the video mapping + render settings into a standalone .c4d that the
+    licensed Cinema 4D Commandline renderer can render on the farm. Frames are
+    pre-extracted to an image sequence next to the prepared scene."""
+    render = cfg.get("render", {})
+    doc = documents.LoadDocument(cfg["scene_path"],
+                                 c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS)
+    if doc is None:
+        raise RuntimeError(f"Could not load scene: {cfg['scene_path']}")
+    documents.InsertBaseDocument(doc)
+    documents.SetActiveDocument(doc)
+    fps = int(render.get("fps", 30))
+    doc.SetFps(fps)
+
+    ffmpeg = str(cfg.get("ffmpeg_path", "")).strip() or shutil.which("ffmpeg") or "ffmpeg"
+    prepared = cfg["prepare_c4d_path"]
+    seq_dir = cfg.get("sequence_dir") or os.path.join(os.path.dirname(prepared), "seq")
+    os.makedirs(seq_dir, exist_ok=True)
+    fstart = int(render.get("frame_start", 1))
+    fend = int(render.get("frame_end", 1))
+
+    mats = {m.GetName(): m for m in doc.GetMaterials()}
+    for i, a in enumerate(cfg.get("material_assignments", [])):
+        name, vid = a.get("material_name"), a.get("video_path")
+        if name not in mats or not vid:
+            continue
+        log(f"Baking '{name}' <- {os.path.basename(vid)} ({fstart}-{fend})")
+        first = None
+        for f in range(fstart, fend + 1):
+            out_png = os.path.join(seq_dir, f"clip{i}_{f:04d}.png")
+            if _extract_frame(ffmpeg, vid, f, fps, out_png):
+                first = first or out_png
+        if first:
+            # Store the sequence path *relative* to the prepared scene so it
+            # resolves on any node regardless of where the repo is mounted.
+            rel = os.path.relpath(first, os.path.dirname(prepared))
+            _inject_emission_sequence(mats[name], rel, fstart, fend, fps)
+
+    cam_name = str(cfg.get("target_camera", "")).strip()
+    if cam_name:
+        cam = _find_object(doc, cam_name)
+        bd = doc.GetActiveBaseDraw()
+        if cam and bd:
+            bd.SetSceneCamera(cam)
+
+    rd = doc.GetActiveRenderData()
+    _apply_redshift_quality(rd, render)
+    width = int(render.get("width", 1920))
+    height = int(render.get("height", 1080))
+    pct = max(1, min(100, int(render.get("resolution_percentage", 100))))
+    rd[c4d.RDATA_XRES] = float(max(1, width * pct // 100))
+    rd[c4d.RDATA_YRES] = float(max(1, height * pct // 100))
+    rd[c4d.RDATA_FRAMEFROM] = c4d.BaseTime(fstart, fps)
+    rd[c4d.RDATA_FRAMETO] = c4d.BaseTime(fend, fps)
+
+    os.makedirs(os.path.dirname(prepared) or ".", exist_ok=True)
+    if not documents.SaveDocument(doc, prepared, c4d.SAVEDOCUMENTFLAGS_DONTADDTORECENTLIST,
+                                  c4d.FORMAT_C4DEXPORT):
+        raise RuntimeError(f"Failed to save prepared scene: {prepared}")
+    log(f"Prepared scene written: {prepared}")
+    log("Render finished successfully")
+
+
 def _set_vp(vp, const_name: str, value) -> None:
     """Set a Redshift video-post parameter by constant name, if present."""
     if hasattr(c4d, const_name):
@@ -186,6 +301,12 @@ def main() -> None:
     cfg = json.loads(open(sys.argv[1], encoding="utf-8").read())
     render = cfg.get("render", {})
     scene = cfg["scene_path"]
+
+    # Prepare mode: bake the mapping into a .c4d for the licensed Commandline
+    # renderer (used by the Deadline farm path) instead of rendering here.
+    if str(cfg.get("prepare_c4d_path", "")).strip():
+        prepare_scene(cfg)
+        return
 
     doc = documents.LoadDocument(scene, c4d.SCENEFILTER_OBJECTS | c4d.SCENEFILTER_MATERIALS)
     if doc is None:

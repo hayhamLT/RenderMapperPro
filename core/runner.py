@@ -28,6 +28,47 @@ def build_blender_command(
     command.extend(["--python", str(worker_path), "--", str(config_path)])
     return command
 
+def _write_job_info_common(f, job, name: str) -> None:
+    """Write the pool/group/priority/etc. job-info fields shared by both
+    backends. The caller writes Plugin, Frames and Output* lines."""
+    f.write(f"Name={name}\n")
+    f.write(f"Priority={getattr(job, 'deadline_priority', 50)}\n")
+    for key, attr in (("Pool", "deadline_pool"), ("SecondaryPool", "deadline_secondary_pool"),
+                      ("Group", "deadline_group"), ("Comment", "deadline_comment"),
+                      ("Department", "deadline_department"), ("Limits", "deadline_limits")):
+        val = str(getattr(job, attr, "") or "").strip()
+        if val:
+            f.write(f"{key}={val}\n")
+    wl = str(getattr(job, "deadline_whitelist", "") or "").strip()
+    if wl:
+        f.write(f"Whitelist={wl}\n")
+    ml = getattr(job, "deadline_machine_limit", 0)
+    if ml and ml > 0:
+        f.write(f"MachineLimit={ml}\n")
+    if getattr(job, "deadline_suspended", False):
+        f.write("InitialStatus=Suspended\n")
+
+
+def _submit_deadline_files(job, job_info_path, plugin_info_path, on_log) -> int:
+    """Invoke deadlinecommand to submit the prepared job/plugin info files."""
+    from .utils import find_deadlinecommand
+    deadline_cmd = getattr(job, 'deadline_command_path', "").strip() or find_deadlinecommand() or "deadlinecommand"
+    repo_path = getattr(job, 'deadline_repo_path', '').strip()
+    if repo_path:
+        cmd = [deadline_cmd, "RunCommandForRepository", "Direct", repo_path,
+               "SubmitJob", str(job_info_path), str(plugin_info_path)]
+    else:
+        cmd = [deadline_cmd, str(job_info_path), str(plugin_info_path)]
+    if on_log:
+        on_log("[deadline] Command: " + " ".join(cmd))
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    if process.stdout is not None:
+        for line in process.stdout:
+            if on_log:
+                on_log(line.rstrip())
+    return process.wait()
+
+
 def submit_deadline_job(
     blender_executable: str,
     worker_script_path: str,
@@ -87,6 +128,71 @@ def submit_deadline_job(
         except OSError:
             shutil.copy(str(src), str(dst))
 
+    # ── Cinema 4D: bake locally, render with the licensed Commandline ────────
+    # Cinema 4D jobs are baked into a self-contained .c4d here (clip → Redshift
+    # image-sequence emission) using the workstation's licensed c4dpy, then
+    # rendered on the farm by the licensed Cinema 4D Commandline renderer (the
+    # same engine the stock Cinema4D plugin uses) — so node licensing just works
+    # and no Python/c4dpy runs on the nodes.
+    if is_c4d:
+        if not c4dpy_path:
+            raise RuntimeError("c4dpy is required on the submitting machine to bake the Cinema 4D scene.")
+        prepared = staging_dir / "prepared.c4d"
+        prep_cfg = job.to_json_dict()
+        prep_cfg["scene_path"] = str(scene_path)
+        prep_cfg["prepare_c4d_path"] = str(prepared)
+        prep_cfg["sequence_dir"] = str(staging_dir / "seq")
+        prep_cfg_path = staging_dir / "prepare_config.json"
+        prep_cfg_path.write_text(json.dumps(prep_cfg))
+        if on_log:
+            on_log("[deadline] Baking Cinema 4D scene for the farm (extracting clip frames)…")
+        proc = subprocess.Popen([c4dpy_path, str(worker_path), str(prep_cfg_path)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        if proc.stdin:
+            proc.stdin.write(C4D_LICENSE_INPUT)
+            proc.stdin.flush()
+            proc.stdin.close()
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                if on_log:
+                    on_log(line.rstrip())
+        proc.wait()
+        if not prepared.exists():
+            raise RuntimeError("Cinema 4D scene bake failed — prepared .c4d was not produced.")
+
+        out_p = Path(job.output_path)
+        if out_p.suffix:           # a movie/file path → frames next to it
+            out_dir, out_prefix = out_p.parent, out_p.stem + "_"
+        else:
+            out_dir, out_prefix = out_p, scene_path.stem + "_"
+
+        def _rel(p):
+            try:
+                return str(Path(p).relative_to(Path(repo_path))).replace("\\", "/") if repo_path else ""
+            except ValueError:
+                return ""
+
+        name = f"RenderMapperPro - {scene_path.name}"
+        job_info_path = staging_dir / "job_info.job"
+        plugin_info_path = staging_dir / "plugin_info.job"
+        with open(job_info_path, "w") as f:
+            _write_job_info_common(f, job, name)
+            f.write("Plugin=RenderMapperPro\n")
+            f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
+            chunk = getattr(job, "deadline_chunk_size", 1)
+            if chunk and chunk > 1:
+                f.write(f"ChunkSize={chunk}\n")
+            f.write(f"OutputDirectory0={out_dir}\n")
+            f.write(f"OutputFilename0={out_prefix}####.png\n")
+        with open(plugin_info_path, "w") as f:
+            f.write(f"SubmitRepoRoot={repo_path}\n")
+            f.write(f"SceneFile={_rel(prepared)}\n")
+            f.write(f"OutputDirectory={out_dir}\n")
+            f.write(f"OutputPrefix={out_prefix}\n")
+            f.write("CommandlineExecutable=\n")   # blank = node auto-detects
+        return _submit_deadline_files(job, job_info_path, plugin_info_path, on_log)
+
     # Stage blender_worker.py (small – always copied)
     staged_worker = staging_dir / worker_path.name
     _safe_copy(worker_path, staged_worker)
@@ -126,22 +232,12 @@ def submit_deadline_job(
     else:
         scene_arg = str(scene_path)  # absolute path; workers must share the drive
 
-    # The C4D path runs through the RenderMapperPro plugin, which uses the
-    # node's own ffmpeg (resolved from PATH) — so no binary needs staging.
-    if is_c4d:
-        cfg_dict["ffmpeg_path"] = ""
+    # (Cinema 4D is handled above and returns early; everything below is the
+    # Blender backend.)
 
     # Write the config JSON into the staging dir with a fixed name
     staged_config = staging_dir / "blender_job_config.json"
     staged_config.write_text(json.dumps(cfg_dict))
-
-    def _repo_rel(p: Path) -> str:
-        """Path of a staged file relative to the repository root, in the
-        forward-slash form the plugin re-joins against each node's repo root."""
-        try:
-            return str(p.relative_to(Path(repo_path))).replace("\\", "/") if repo_path else ""
-        except ValueError:
-            return ""
 
     # ── Job info file ────────────────────────────────────────────────────────
     job_info_path = staging_dir / "job_info.job"
@@ -161,7 +257,7 @@ def submit_deadline_job(
             name = f"BlenderRender Job - {scene_path.name}"
 
         f.write(f"Name={name}\n")
-        f.write(f"Plugin={'RenderMapperPro' if is_c4d else 'CommandLine'}\n")
+        f.write("Plugin=CommandLine\n")
         f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
         f.write(f"Priority={getattr(job, 'deadline_priority', 50)}\n")
 
@@ -215,26 +311,15 @@ def submit_deadline_job(
     # ── Plugin info file ─────────────────────────────────────────────────────
     # All paths are fully-qualified absolutes — no CWD ambiguity.
     with open(plugin_info_path, "w") as f:
-        if is_c4d:
-            # The RenderMapperPro plugin runs on the node: it locates the node's
-            # own c4dpy, re-maps these repo-relative paths to the node's repo
-            # mount, feeds the license prompt and renders this task's frames. It
-            # also carries the app icon shown in the Monitor.
-            f.write(f"SubmitRepoRoot={repo_path}\n")
-            f.write(f"ConfigFile={_repo_rel(staged_config)}\n")
-            f.write(f"WorkerScript={_repo_rel(staged_worker)}\n")
-            # Blank = the plugin auto-detects c4dpy per node OS.
-            f.write("C4DPyExecutable=\n")
-        else:
-            f.write(f"Executable={blender_path}\n")
-            # Pass the scene via -b only when we have a guaranteed absolute path.
-            # The worker script also opens the scene, but Blender's -b is needed
-            # to pre-load scene data before the Python script runs.
-            f.write(
-                f'Arguments=-b "{scene_arg}"'
-                f' --python "{staged_worker}"'
-                f' -- "{staged_config}"\n'
-            )
+        f.write(f"Executable={blender_path}\n")
+        # Pass the scene via -b only when we have a guaranteed absolute path.
+        # The worker script also opens the scene, but Blender's -b is needed
+        # to pre-load scene data before the Python script runs.
+        f.write(
+            f'Arguments=-b "{scene_arg}"'
+            f' --python "{staged_worker}"'
+            f' -- "{staged_config}"\n'
+        )
 
     # ── Submit ───────────────────────────────────────────────────────────────
     from .utils import find_deadlinecommand

@@ -67,116 +67,75 @@ class RenderMapperProPlugin(DeadlinePlugin):
                 return os.path.join(node_repo, *rel.split("/"))
         return mapped
 
-    def _find_c4dpy(self):
+    def _find_commandline(self):
+        """Locate the licensed Cinema 4D Commandline renderer for this node OS."""
         if os.name == "nt":
-            pats = [r"C:\Program Files\Maxon Cinema 4D *\c4dpy.exe",
-                    r"C:\Program Files\Maxon\Cinema 4D *\c4dpy.exe",
-                    r"C:\Maxon\Cinema 4D *\c4dpy.exe"]
+            pats = [r"C:\Program Files\Maxon Cinema 4D *\Commandline.exe",
+                    r"C:\Program Files\Maxon\Cinema 4D *\Commandline.exe",
+                    r"C:\Maxon\Cinema 4D *\Commandline.exe"]
         elif sys.platform == "darwin":
-            pats = ["/Applications/Maxon Cinema 4D */c4dpy.app/Contents/MacOS/c4dpy"]
+            pats = ["/Applications/Maxon Cinema 4D */Commandline.app/Contents/MacOS/Commandline"]
         else:
-            pats = ["/opt/maxon/cinema4d*/bin/c4dpy", "/opt/Maxon*/c4dpy",
-                    "/usr/local/Maxon*/c4dpy"]
+            pats = ["/opt/maxon/cinema4d*/bin/Commandline", "/opt/Maxon*/Commandline"]
         found = []
         for p in pats:
             found += glob.glob(p)
         found.sort()
         return found[-1] if found else ""
 
-    def _produced(self, out_path, start, cfg):
-        if not out_path:
+    def _produced(self, out_dir, prefix, start):
+        if not out_dir:
             return False
-        fmt = str(cfg.get("render", {}).get("output_format", "")).upper()
-        if fmt in ("MPEG4", "QUICKTIME"):
-            return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
-        return os.path.isfile(os.path.join(out_path, "%04d.png" % start))
+        try:
+            for f in os.listdir(out_dir):
+                if f.startswith(prefix) and ("%04d" % start) in f and os.path.getsize(os.path.join(out_dir, f)) > 0:
+                    return True
+        except Exception:
+            pass
+        return False
 
     # ── render ───────────────────────────────────────────────────────────
     def RenderTasks(self):
         node_repo = RepositoryUtils.GetRootDirectory()
         submit_repo = self.GetPluginInfoEntryWithDefault("SubmitRepoRoot", "").strip()
-        cfg_rel = self.GetPluginInfoEntryWithDefault("ConfigFile", "").strip()
-        worker_rel = self.GetPluginInfoEntryWithDefault("WorkerScript", "").strip()
-        c4dpy_override = self.GetPluginInfoEntryWithDefault("C4DPyExecutable", "").strip()
-        jobs = self.GetJobsDataDirectory()
+        scene_rel = self.GetPluginInfoEntryWithDefault("SceneFile", "").strip()
+        out_dir_in = self.GetPluginInfoEntryWithDefault("OutputDirectory", "").strip()
+        out_prefix = self.GetPluginInfoEntryWithDefault("OutputPrefix", "frame").strip()
+        cmdl_override = self.GetPluginInfoEntryWithDefault("CommandlineExecutable", "").strip()
 
-        cfg_path = self._join_repo(node_repo, cfg_rel)
-        worker = self._join_repo(node_repo, worker_rel)
+        scene = self._join_repo(node_repo, scene_rel)
+        out_dir = self._translate(out_dir_in, submit_repo, node_repo)
+        try:
+            if out_dir and not os.path.isdir(out_dir):
+                os.makedirs(out_dir)
+        except Exception:
+            pass
+
+        exe = cmdl_override or self._find_commandline()
         self.LogInfo("RenderMapperPro: repo=%s" % node_repo)
-        self.LogInfo("RenderMapperPro: config=%s" % cfg_path)
-        self.LogInfo("RenderMapperPro: worker=%s" % worker)
-
-        with open(cfg_path, "r") as fh:
-            cfg = json.load(fh)
-
-        cfg["scene_path"] = self._translate(cfg.get("scene_path", ""), submit_repo, node_repo)
-        if cfg.get("video_path"):
-            cfg["video_path"] = self._translate(cfg["video_path"], submit_repo, node_repo)
-        for a in cfg.get("material_assignments", []):
-            if a.get("video_path"):
-                a["video_path"] = self._translate(a["video_path"], submit_repo, node_repo)
-        out_path = self._translate(cfg.get("output_path", ""), submit_repo, node_repo)
-        cfg["output_path"] = out_path
-        cfg["ffmpeg_path"] = ""  # use the node's PATH ffmpeg
-
-        node_cfg = os.path.join(jobs, "rmp_config.json")
-        with open(node_cfg, "w") as fh:
-            json.dump(cfg, fh)
-
-        c4dpy = c4dpy_override or self._find_c4dpy()
-        if not c4dpy:
-            self.FailRender("RenderMapperPro: could not locate c4dpy on this node. "
-                            "Set 'C4DPyExecutable' in the plugin info to override.")
+        self.LogInfo("RenderMapperPro: scene=%s" % scene)
+        self.LogInfo("RenderMapperPro: output=%s prefix=%s" % (out_dir, out_prefix))
+        self.LogInfo("RenderMapperPro: Commandline=%s" % exe)
+        if not exe:
+            self.FailRender("RenderMapperPro: could not locate the Cinema 4D Commandline "
+                            "renderer on this node. Set 'CommandlineExecutable' to override.")
+            return
+        if not os.path.isfile(scene):
+            self.FailRender("RenderMapperPro: prepared scene not found: %s" % scene)
             return
 
         start, end = self.GetStartFrame(), self.GetEndFrame()
-        # Render log lives in the repo staging dir (next to the config) so it is
-        # visible off-node for diagnosis, not just on the worker's local disk.
-        logf = os.path.join(os.path.dirname(cfg_path), "rmp_render.log")
-        node = os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "?"
-        try:
-            with open(logf, "w") as fh:
-                fh.write("RenderMapperPro node=%s os=%s c4dpy=%s worker=%s frames=%d-%d\n"
-                         % (node, os.name, c4dpy, worker, start, end))
-        except Exception:
-            pass
-        if os.name == "nt":
-            wrapper = os.path.join(jobs, "rmp_run.bat")
-            with open(wrapper, "w") as fh:
-                fh.write("@echo off\r\n")
-                fh.write('echo 1| "%s" "%s" "%s" %d %d >> "%s" 2>&1\r\n'
-                         % (c4dpy, worker, node_cfg, start, end, logf))
-            shell = os.environ.get("COMSPEC", "cmd.exe")
-            args = '/c "%s"' % wrapper
-        else:
-            wrapper = os.path.join(jobs, "rmp_run.sh")
-            with open(wrapper, "w") as fh:
-                fh.write("#!/bin/sh\n")
-                fh.write("printf '1\\n' | \"%s\" \"%s\" \"%s\" %d %d >> \"%s\" 2>&1\n"
-                         % (c4dpy, worker, node_cfg, start, end, logf))
-            try:
-                os.chmod(wrapper, 0o755)
-            except OSError:
-                pass
-            shell = "/bin/sh"
-            args = '"%s"' % wrapper
-
-        self.LogInfo("RenderMapperPro: c4dpy=%s" % c4dpy)
+        out_image = os.path.join(out_dir, out_prefix) if out_dir else out_prefix
+        # The licensed Cinema 4D Commandline renderer — same engine the stock
+        # Cinema4D plugin uses, so node licensing 'just works'. The clip is
+        # already baked into the scene as an image sequence.
+        args = '-nogui -render "%s" -frame %d %d -oimage "%s" -oformat PNG' % (
+            scene, start, end, out_image)
         self.LogInfo("RenderMapperPro: rendering frames %d-%d" % (start, end))
-        exit_code = self.RunProcess(shell, args, jobs, -1)
+        exit_code = self.RunProcess(exe, args, os.path.dirname(scene), -1)
+        self.LogInfo("RenderMapperPro: Commandline exit code %s" % exit_code)
 
-        # Surface the worker's own log into the Deadline task report.
-        try:
-            with open(logf, "r") as fh:
-                for line in fh:
-                    self.LogInfo(line.rstrip())
-        except Exception:
-            pass
-
-        # c4dpy frequently throws on interpreter teardown after a good render,
-        # so success is judged by produced output rather than the exit code.
-        if self._produced(out_path, start, cfg):
+        if self._produced(out_dir, out_prefix, start):
             self.LogInfo("RenderMapperPro: output present — task succeeded.")
             return
-        self.FailRender("RenderMapperPro: no output produced (c4dpy exit code %s). "
-                        "See log above." % exit_code)
+        self.FailRender("RenderMapperPro: no output produced (Commandline exit %s)." % exit_code)
