@@ -4,6 +4,8 @@ A standalone desktop app that maps videos onto 3D‑scene materials and renders 
 
 It supports **two render backends**, chosen automatically by scene type: **Blender** (`.blend`, `.fbx`, `.usd`, …) and **Cinema 4D + Redshift** (`.c4d`). It runs the renderer in the background, so a renderer crash can never take down the app, and ships bundled static `ffmpeg`/`ffprobe` so audio muxing and clip probing work out of the box.
 
+![Render Mapper Pro](docs/screenshots/render-mapper-pro.png)
+
 ## Download
 
 Grab a prebuilt app from the [**Releases**](../../releases) page:
