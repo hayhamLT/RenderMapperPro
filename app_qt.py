@@ -1266,6 +1266,7 @@ class ScenePanel(QWidget):
         self._hover_video: Optional[str] = None
         self._watch_folder: str = ""
         self._watch_seen: dict[str, float] = {}
+        self._watch_sizes: dict[str, int] = {}   # last-seen size, for write-in-progress detection
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(3000)   # poll (robust on network shares)
@@ -1710,6 +1711,7 @@ class ScenePanel(QWidget):
         self._update_watch_ui()
         if on and self._watch_folder:
             self._watch_seen = {}          # force a fresh scan
+            self._watch_sizes = {}
             self._scan_watch_folder()
             self._watch_timer.start()
         else:
@@ -1725,6 +1727,7 @@ class ScenePanel(QWidget):
         self._update_watch_ui()
         if self.watch_btn.isChecked():
             self._watch_seen = {}
+            self._watch_sizes = {}
             self._scan_watch_folder()
             self._watch_timer.start()
         else:
@@ -1744,21 +1747,32 @@ class ScenePanel(QWidget):
         folder = self._watch_folder
         if not folder or not os.path.isdir(folder):
             return
-        files, mtimes = [], {}
+        now = time.time()
+        ready, mtimes, sizes = [], {}, {}
         try:
             for n in os.listdir(folder):
                 p = os.path.join(folder, n)
-                if os.path.isfile(p) and Path(p).suffix.lower() in (VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS):
-                    files.append(p)
-                    mtimes[p] = os.path.getmtime(p)
+                if not (os.path.isfile(p) and Path(p).suffix.lower() in (VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS)):
+                    continue
+                st = os.stat(p)
+                sizes[p] = st.st_size
+                # "Ready" = finished copying: non-empty and either its size held
+                # steady since the last poll, or it hasn't been touched for a few
+                # seconds. This avoids ingesting a half-written file mid-copy.
+                stable = st.st_size > 0 and (
+                    self._watch_sizes.get(p) == st.st_size or (now - st.st_mtime) >= 2.0)
+                if stable:
+                    ready.append(p)
+                    mtimes[p] = st.st_mtime
         except OSError:
             return
+        self._watch_sizes = sizes           # remember sizes for next poll's stability check
         sig = dict(mtimes)
         if sig == self._watch_seen:
-            return                          # nothing changed since last poll
+            return                          # nothing new is ready since last poll
         self._watch_seen = sig
 
-        videos_after, replacements, added = reconcile_versions(self._videos, files, mtimes)
+        videos_after, replacements, added = reconcile_versions(self._videos, ready, mtimes)
         if not replacements and not added:
             return
         if replacements:
