@@ -242,13 +242,87 @@ def submit_deadline_job(
         pass
 
 
+C4D_LICENSE_INPUT = "1\n"   # selects "Maxon App" at c4dpy's license-method prompt
+
+
+def is_c4d_scene(scene_path: str) -> bool:
+    return str(scene_path).lower().endswith(".c4d")
+
+
+def run_c4d_job(
+    c4dpy_executable: str,
+    worker_script_path: str,
+    job: JobConfig,
+    on_log: LogCallback | None = None,
+    should_cancel: CancelCheck | None = None,
+) -> int:
+    """Render a .c4d via c4dpy (Cinema 4D headless Python) + the C4D worker.
+
+    c4dpy resolves the script path from its own install dir, so an absolute
+    worker path is required. The license method is fed on stdin. c4dpy can throw
+    during interpreter teardown, so success is judged by the produced PNGs rather
+    than the exit code."""
+    scene_path = Path(job.scene_path).expanduser().resolve()
+    c4dpy = os.path.expanduser(c4dpy_executable)
+    worker_path = Path(worker_script_path).expanduser().resolve()
+    if not scene_path.exists():
+        raise FileNotFoundError(f"Scene file not found: {scene_path}")
+    if not worker_path.exists():
+        raise FileNotFoundError(f"C4D worker not found: {worker_path}")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
+        config_path = Path(tf.name)
+        json.dump(job.to_json_dict(), tf)
+
+    command = [c4dpy, str(worker_path), str(config_path)]
+    if on_log:
+        on_log("[app] Executing C4D: " + " ".join(command))
+
+    out_dir = Path(job.output_path).expanduser()
+    before = set(out_dir.glob("*.png")) if out_dir.is_dir() else set()
+
+    process = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    try:
+        if process.stdin:
+            process.stdin.write(C4D_LICENSE_INPUT)
+            process.stdin.flush()
+            process.stdin.close()
+        if process.stdout is not None:
+            for line in process.stdout:
+                if should_cancel and should_cancel():
+                    process.terminate()
+                    break
+                if on_log:
+                    on_log(line.rstrip())
+        rc = process.wait()
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+    # c4dpy often crashes on exit after a successful render — treat the job as
+    # successful if it produced output.
+    produced = (set(out_dir.glob("*.png")) - before) if out_dir.is_dir() else set()
+    if produced:
+        return 0
+    return rc if rc != 0 else 1
+
+
 def run_blender_job(
     blender_executable: str,
     worker_script_path: str,
     job: JobConfig,
     on_log: LogCallback | None = None,
     should_cancel: CancelCheck | None = None,
+    c4dpy_executable: str = "",
+    c4d_worker_script: str = "",
 ) -> int:
+    # Route Cinema 4D scenes to the C4D/Redshift backend.
+    if is_c4d_scene(job.scene_path) and c4dpy_executable and c4d_worker_script:
+        return run_c4d_job(c4dpy_executable, c4d_worker_script, job, on_log, should_cancel)
+
     scene_path = Path(job.scene_path).expanduser().resolve()
     blender_path = os.path.expanduser(blender_executable)
     worker_path = Path(worker_script_path).expanduser().resolve()

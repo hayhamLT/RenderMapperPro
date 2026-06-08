@@ -36,6 +36,8 @@ a = Analysis(
     datas=[
         ('blender_worker.py', '.'),
         ('blender_discover.py', '.'),
+        ('c4d_worker.py', '.'),
+        ('c4d_discover.py', '.'),
         ('assets', 'assets'),
     ],
     hiddenimports=[],

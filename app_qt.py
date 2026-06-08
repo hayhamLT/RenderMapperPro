@@ -105,7 +105,7 @@ OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 IMAGE_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr", ".bmp", ".webp", ".tga", ".hdr"}
-SCENE_EXTENSIONS = {".blend", ".fbx", ".obj", ".glb", ".gltf", ".usd", ".usda", ".usdc", ".abc", ".stl", ".ply"}
+SCENE_EXTENSIONS = {".blend", ".c4d", ".fbx", ".obj", ".glb", ".gltf", ".usd", ".usda", ".usdc", ".abc", ".stl", ".ply"}
 LINK_COLORS = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
     "#3498db", "#9b59b6", "#e91e63", "#00bcd4", "#8bc34a",
@@ -203,6 +203,18 @@ def _runtime_download_spec() -> Optional[tuple[str, str]]:
         name = f"blender-{v}-linux-{arch}.tar.xz"
         return f"{base}-linux-{arch}.tar.xz", name
     return None
+
+
+def _find_c4dpy() -> str:
+    """Locate Cinema 4D's headless Python (c4dpy) for the C4D/Redshift backend."""
+    import glob
+    if sys.platform == "darwin":
+        cands = glob.glob("/Applications/Maxon Cinema 4D */c4dpy.app/Contents/MacOS/c4dpy")
+    elif os.name == "nt":
+        cands = glob.glob(r"C:\Program Files\Maxon Cinema 4D *\c4dpy.exe")
+    else:
+        cands = glob.glob("/opt/maxon/*/c4dpy")
+    return sorted(cands, reverse=True)[0] if cands else ""
 
 
 def _find_blender(preferred: str = "") -> Optional[str]:
@@ -586,11 +598,14 @@ class DiscoveryThread(QThread):
     error = Signal(str)
     log = Signal(str)
 
-    def __init__(self, blender: str, script: str, scene: str) -> None:
+    def __init__(self, blender: str, script: str, scene: str,
+                 c4dpy: str = "", c4d_script: str = "") -> None:
         super().__init__()
         self.blender = blender
         self.script = script
         self.scene = scene
+        self.c4dpy = c4dpy
+        self.c4d_script = c4d_script
 
     def run(self) -> None:
         try:
@@ -600,6 +615,8 @@ class DiscoveryThread(QThread):
                 scene_path=self.scene,
                 on_log=self.log.emit,
                 hard_timeout_seconds=DISCOVERY_TIMEOUT,
+                c4dpy_executable=self.c4dpy,
+                c4d_discover_script=self.c4d_script,
             )
             self.discovered.emit(mats, cams, settings)
         except Exception as exc:
@@ -612,11 +629,14 @@ class RenderThread(QThread):
     job_error = Signal(int, str)
     all_done = Signal()
 
-    def __init__(self, blender: str, worker: str, entries: list[dict]) -> None:
+    def __init__(self, blender: str, worker: str, entries: list[dict],
+                 c4dpy: str = "", c4d_worker: str = "") -> None:
         super().__init__()
         self.blender = blender
         self.worker = worker
         self.entries = entries
+        self.c4dpy = c4dpy
+        self.c4d_worker = c4d_worker
         self._cancel = False
         self._skip_current = False
 
@@ -669,6 +689,8 @@ class RenderThread(QThread):
                         job=cfg,
                         on_log=on_log,
                         should_cancel=lambda: self._skip_current,
+                        c4dpy_executable=self.c4dpy,
+                        c4d_worker_script=self.c4d_worker,
                     )
             except Exception as exc:
                 self.log.emit(f"[app] ERROR job {jid}: {exc}")
@@ -696,16 +718,20 @@ class PreviewFrameThread(QThread):
     log = Signal(str)
     done = Signal(str, str)  # image_path, error
 
-    def __init__(self, blender: str, worker: str, job: JobConfig, out_dir: str) -> None:
+    def __init__(self, blender: str, worker: str, job: JobConfig, out_dir: str,
+                 c4dpy: str = "", c4d_worker: str = "") -> None:
         super().__init__()
         self.blender = blender
         self.worker = worker
         self.job = job
         self.out_dir = out_dir
+        self.c4dpy = c4dpy
+        self.c4d_worker = c4d_worker
 
     def run(self) -> None:
         try:
-            rc = run_blender_job(self.blender, self.worker, self.job, on_log=self.log.emit)
+            rc = run_blender_job(self.blender, self.worker, self.job, on_log=self.log.emit,
+                                 c4dpy_executable=self.c4dpy, c4d_worker_script=self.c4d_worker)
             import glob
             pngs = sorted(glob.glob(os.path.join(self.out_dir, "*.png")))
             if rc == 0 and pngs:
@@ -1490,7 +1516,7 @@ class ScenePanel(QWidget):
             self,
             "Select 3D scene file",
             str(Path.home()),
-            "3D Files (*.blend *.fbx *.obj *.glb *.gltf *.usd *.usda *.usdc *.abc *.stl *.ply);;All Files (*)",
+            "3D Files (*.blend *.c4d *.fbx *.obj *.glb *.gltf *.usd *.usda *.usdc *.abc *.stl *.ply);;All Files (*)",
         )
         if path:
             self.scene_edit.setText(path)
@@ -3323,6 +3349,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self.resize(1400, 860)
 
         self._blender_path = ""
+        self._c4dpy_path = _find_c4dpy()   # Cinema 4D headless Python, if installed
         self._deadline_repo_path = ""
         self._deadline_command_path = ""
         self._deadline_job_name_template = "BlenderRender Job - {scene_name}"
@@ -4131,6 +4158,21 @@ class BlenderVideoMapperQt(QMainWindow):
             self._append_log("[app] Auto-scanning restored scene…")
             self._scan_scene()
 
+    def _ensure_c4dpy(self, interactive: bool = False) -> str:
+        if self._c4dpy_path and Path(self._c4dpy_path).exists():
+            return self._c4dpy_path
+        found = _find_c4dpy()
+        if found:
+            self._c4dpy_path = found
+            return found
+        if interactive:
+            QMessageBox.warning(
+                self, "Cinema 4D Not Found",
+                "Couldn't find Cinema 4D's headless Python (c4dpy).\n\n"
+                "Install Cinema 4D (2023+) to render .c4d scenes, or use a "
+                ".blend / FBX / USD scene instead.")
+        return ""
+
     def _ensure_blender(self, interactive: bool = False) -> Optional[str]:
         b = _find_blender(self._blender_path)
         if b:
@@ -4542,10 +4584,20 @@ class BlenderVideoMapperQt(QMainWindow):
         self._schedule_save()
 
     def _scan_scene(self) -> None:
-        blender = self._ensure_blender(interactive=True)
         scene = self.scene_panel.scene_edit.text().strip()
-        if not blender or not scene or not file_exists(scene):
+        if not scene or not file_exists(scene):
             return
+        is_c4d = scene.lower().endswith(".c4d")
+        # Cinema 4D scenes need c4dpy; everything else needs Blender.
+        if is_c4d:
+            c4dpy = self._ensure_c4dpy(interactive=True)
+            if not c4dpy:
+                return
+            blender = self._blender_path
+        else:
+            blender = self._ensure_blender(interactive=True)
+            if not blender:
+                return
         self._add_recent_scene(scene)
         if self._scan_in_progress:
             return
@@ -4556,13 +4608,16 @@ class BlenderVideoMapperQt(QMainWindow):
 
         try:
             script = _resolve_runtime_script("blender_discover.py")
+            c4d_script = _resolve_runtime_script("c4d_discover.py") if is_c4d else ""
         except Exception as exc:
             self._append_log(f"[app] ERROR: {exc}")
             self.scene_panel.scan_btn.setEnabled(True)
             self._scan_in_progress = False
             return
 
-        self._discovery_thread = DiscoveryThread(blender, script, scene)
+        self._discovery_thread = DiscoveryThread(
+            blender, script, scene,
+            c4dpy=(self._c4dpy_path if is_c4d else ""), c4d_script=c4d_script)
         self._discovery_thread.log.connect(self._append_log)
         self._discovery_thread.discovered.connect(self._on_discovery)
         self._discovery_thread.error.connect(self._on_discovery_error)
@@ -4595,8 +4650,17 @@ class BlenderVideoMapperQt(QMainWindow):
             keys = ", ".join(k for k in ("fps", "frame_start", "frame_end", "width", "height", "samples", "engine") if k in settings)
             self._append_log(f"[app] Applied scene settings ({keys})")
 
-        # Re-probe the clips so audio badges / info are current.
+        # Re-read the loaded clips from disk: audio badges AND each file's
+        # fps/length, so a re-exported video is reflected. When clips are loaded
+        # they drive the timeline (fps + frame range); the scene still supplies
+        # resolution / engine / samples / colour.
         self.scene_panel.refresh_videos()
+        self._loading_job_into_ui = True
+        try:
+            self._reprobe_loaded_videos()
+        finally:
+            self._loading_job_into_ui = False
+        self._sync_preview_frame_range()
 
         self._append_log(f"[app] Discovery complete: {len(clean_materials)} materials, {len(clean_cameras)} cameras")
         if not clean_cameras:
@@ -4615,6 +4679,24 @@ class BlenderVideoMapperQt(QMainWindow):
     def _on_discovery_done(self) -> None:
         self._scan_in_progress = False
         self.scene_panel.scan_btn.setEnabled(True)
+
+    def _reprobe_loaded_videos(self) -> None:
+        """Re-read the loaded video files from disk and update fps + frame range
+        from the primary clip, so a re-exported / swapped video is picked up on
+        refresh. No-op when no clips are loaded (then the scene drives the range)."""
+        videos = self.scene_panel.get_videos()
+        if not videos:
+            return
+        info = _parse_mp4_info(videos[0])
+        if not info:
+            return
+        frames, raw_fps = info
+        fps = _normalize_fps(raw_fps, 30)
+        self.render_panel.fps_edit.setText(str(fps))
+        self.render_panel.frame_start_edit.setText("1")
+        if frames and frames > 0:
+            self.render_panel.frame_end_edit.setText(str(frames))
+        self._append_log(f"[app] Re-read video {Path(videos[0]).name}: {frames} frames @ {fps} fps")
 
     def _on_videos_changed(self, videos: list[str]) -> None:
         new_video = next((v for v in videos if v not in self._known_videos), None)
@@ -5355,9 +5437,19 @@ class BlenderVideoMapperQt(QMainWindow):
             )
             return
 
-        blender = self._ensure_blender(interactive=True)
-        if not blender:
-            return
+        # Cinema 4D scenes render via c4dpy/Redshift; others via Blender.
+        _scene_now = self.scene_panel.scene_edit.text().strip()
+        _is_c4d = _scene_now.lower().endswith(".c4d")
+        if _is_c4d:
+            c4dpy = self._ensure_c4dpy(interactive=True)
+            if not c4dpy:
+                return
+            blender = self._blender_path
+        else:
+            c4dpy = ""
+            blender = self._ensure_blender(interactive=True)
+            if not blender:
+                return
 
         errs = self._preflight()
         if errs:
@@ -5387,9 +5479,11 @@ class BlenderVideoMapperQt(QMainWindow):
 
         try:
             worker = _resolve_runtime_script("blender_worker.py")
+            c4d_worker = _resolve_runtime_script("c4d_worker.py") if _is_c4d else ""
         except Exception as exc:
             QMessageBox.critical(self, "Worker Missing", str(exc))
             return
+        _ffmpeg = (find_ffmpeg_tool("ffmpeg") or "") if _is_c4d else ""
 
         # Live preview: one temp JPEG the worker rewrites each frame.
         self._preview_path = ""
@@ -5436,6 +5530,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 preview_path=self._preview_path if not j.use_deadline else "",
                 audio_paths=self._audio_paths_for(audio_src),
                 material_assignments=asn,
+                ffmpeg_path=(_ffmpeg if str(j.scene_path).lower().endswith(".c4d") else ""),
             )
             entries.append({"id": j.id, "label": j.label, "cfg": cfg})
 
@@ -5457,7 +5552,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 self._preview_timer.timeout.connect(self._poll_preview)
             self._preview_timer.start(400)
 
-        self._render_thread = RenderThread(blender, worker, entries)
+        self._render_thread = RenderThread(blender, worker, entries, c4dpy=c4dpy, c4d_worker=c4d_worker)
         self._render_thread.log.connect(self._append_log)
         self._render_thread.job_update.connect(self._on_job_update)
         self._render_thread.job_error.connect(self._on_job_error)
@@ -5478,13 +5573,11 @@ class BlenderVideoMapperQt(QMainWindow):
         self.preview_panel.set_frame_range(start, end)
 
     def _preview_ready(self) -> bool:
-        """The preview works off the *live* UI (scene + camera + mappings +
-        settings), independent of the render queue — so you don't need an active
-        queued job for it to update."""
-        return bool(
-            self.scene_panel.scene_edit.text().strip()
-            and self.scene_panel.get_assignments()
-        )
+        """The preview works off the live UI, independent of the render queue. It
+        only needs a scene — with no mappings yet it just previews the bare 3D
+        model, so you can frame up the scene before linking any video."""
+        scene = self.scene_panel.scene_edit.text().strip()
+        return bool(scene and file_exists(scene))
 
     def _export_prepared_blend(self) -> None:
         """Bake the current video mapping + render settings into a standalone
@@ -5568,14 +5661,24 @@ class BlenderVideoMapperQt(QMainWindow):
             return
         scene = self.scene_panel.scene_edit.text().strip()
         assignments = self.scene_panel.get_assignments()
-        if not scene or not file_exists(scene) or not assignments:
-            return  # nothing mapped yet — silently skip (esp. for auto-preview)
+        if not scene or not file_exists(scene):
+            return  # no scene yet — nothing to preview
+        # With no mappings we still preview the bare 3D model.
         self._preview_pending = False
-        blender = self._ensure_blender(interactive=True)
-        if not blender:
-            return
+        is_c4d = scene.lower().endswith(".c4d")
+        if is_c4d:
+            c4dpy = self._ensure_c4dpy(interactive=True)
+            if not c4dpy:
+                return
+            blender = self._blender_path
+        else:
+            c4dpy = ""
+            blender = self._ensure_blender(interactive=True)
+            if not blender:
+                return
         try:
             worker = _resolve_runtime_script("blender_worker.py")
+            c4d_worker = _resolve_runtime_script("c4d_worker.py") if is_c4d else ""
         except Exception as exc:
             self._show_toast(str(exc), "error")
             return
@@ -5594,20 +5697,22 @@ class BlenderVideoMapperQt(QMainWindow):
         opts = dataclasses.replace(opts, output_format="PNG", codec="NONE", resolution_percentage=pct)
         self._preview_started = time.monotonic()
         self._preview_frame_num = fs
-        primary = asn[0]
+        primary_video = asn[0].video_path if asn else ""
+        primary_mat = asn[0].material_name if asn else ""
         out_dir = tempfile.mkdtemp(prefix="rmp_previewframe_")
         cfg = JobConfig(
-            scene_path=scene, video_path=primary.video_path,
-            target_material=primary.material_name, target_camera=camera,
+            scene_path=scene, video_path=primary_video,
+            target_material=primary_mat, target_camera=camera,
             output_path=out_dir, render=opts, safe_mode=True, material_assignments=asn,
-            preview_frame=fs,
+            preview_frame=fs, ffmpeg_path=(find_ffmpeg_tool("ffmpeg") or "") if is_c4d else "",
         )
         self.preview_dock.show()
         self.preview_dock.raise_()
         self.preview_panel.preview_frame_btn.setEnabled(False)
         self.preview_panel.caption.setText(f"Rendering preview · frame {fs}…")
-        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% out={out_dir}")
-        self._preview_thread = PreviewFrameThread(blender, worker, cfg, out_dir)
+        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% engine={'C4D/Redshift' if is_c4d else 'Blender'}")
+        self._preview_thread = PreviewFrameThread(blender, worker, cfg, out_dir,
+                                                  c4dpy=c4dpy, c4d_worker=c4d_worker)
         self._preview_thread.log.connect(self._append_log)
         self._preview_thread.done.connect(self._on_preview_frame_done)
         self._preview_thread.start()

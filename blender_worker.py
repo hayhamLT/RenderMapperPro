@@ -252,7 +252,11 @@ def apply_video_to_material(
     if material is None:
         raise RuntimeError(f"Material not found: {material_name}")
 
-    if not material.use_nodes:
+    # Ensure the material has a shader node tree. Only touch the deprecated
+    # `use_nodes` flag when there's genuinely no node tree (legacy materials) —
+    # modern Blender materials already have one, and from Blender 6.0 they always
+    # will, so this stays warning-free and forward-compatible.
+    if material.node_tree is None:
         material.use_nodes = True
 
     node_tree = material.node_tree
@@ -347,7 +351,10 @@ def material_assignments_from_config(config: dict) -> list[dict[str, str]]:
             }
         ]
 
-    raise RuntimeError("No material/video assignments configured")
+    # Nothing mapped → render the scene exactly as-is (e.g. previewing the bare
+    # 3D model before any video is linked).
+    log("No video mappings configured — rendering the scene as-is")
+    return []
 
 
 def set_camera(camera_name: str) -> None:

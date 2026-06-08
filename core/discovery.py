@@ -30,6 +30,32 @@ def parse_discovery_payload(output_lines: list[str]) -> tuple[list[str], list[st
     return materials, cameras, settings
 
 
+def _run_c4d_discovery(c4dpy_executable, discover_script, scene, on_log):
+    """Discover a .c4d via c4dpy + the C4D discovery script (license fed on
+    stdin). c4dpy needs an absolute script path."""
+    c4dpy = os.path.expanduser(c4dpy_executable)
+    script = Path(discover_script).expanduser().resolve()
+    if on_log:
+        on_log("[app] Executing C4D discovery: " + " ".join([c4dpy, str(script), str(scene)]))
+    process = subprocess.Popen(
+        [c4dpy, str(script), str(scene)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    output_lines: list[str] = []
+    if process.stdin:
+        process.stdin.write("1\n")  # license method: Maxon App
+        process.stdin.flush()
+        process.stdin.close()
+    if process.stdout is not None:
+        for line in process.stdout:
+            stripped = line.rstrip()
+            output_lines.append(stripped)
+            if on_log and not stripped.startswith(DISCOVERY_PREFIX):
+                on_log(stripped)
+    process.wait()
+    return parse_discovery_payload(output_lines)
+
+
 def discover_scene_elements(
     blender_executable: str,
     discovery_script_path: str,
@@ -37,7 +63,14 @@ def discover_scene_elements(
     on_log: DiscoveryLogCallback | None = None,
     hard_timeout_seconds: int = 0,
     idle_timeout_seconds: int = 0,
+    c4dpy_executable: str = "",
+    c4d_discover_script: str = "",
 ) -> tuple[list[str], list[str], dict]:
+    # Route Cinema 4D scenes to the C4D discovery backend.
+    if str(scene_path).lower().endswith(".c4d") and c4dpy_executable and c4d_discover_script:
+        return _run_c4d_discovery(c4dpy_executable, c4d_discover_script,
+                                  Path(scene_path).expanduser().resolve(), on_log)
+
     blender_path = os.path.expanduser(blender_executable)
     script_path = Path(discovery_script_path).expanduser().resolve()
     scene = Path(scene_path).expanduser().resolve()
