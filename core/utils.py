@@ -187,3 +187,70 @@ def find_deadlinecommand() -> str | None:
 
     return None
 
+
+
+# ── Auto-match media files to materials by name ─────────────────────────────
+# Primary rule (per user's workflow): a file matches a material when the
+# material's name appears in the file's name. We normalise both, score the
+# candidates, and assign greedily one-to-one so a confident guess wins and
+# ambiguous ones are left for manual mapping.
+
+_MAT_AFFIX_TOKENS = {"m", "mat", "material", "mtl", "shader"}
+
+
+def normalize_match_name(name: str) -> str:
+    """Lower-case, drop a Blender duplicate suffix (.001), split on any
+    non-alphanumeric run, and strip leading/trailing material-ish tokens."""
+    name = re.sub(r"\.\d{2,}$", "", str(name)).lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", name) if t]
+    while tokens and tokens[0] in _MAT_AFFIX_TOKENS:
+        tokens = tokens[1:]
+    while tokens and tokens[-1] in _MAT_AFFIX_TOKENS:
+        tokens = tokens[:-1]
+    return " ".join(tokens)
+
+
+def match_score(material: str, file_stem: str) -> float:
+    """Score how strongly a file (by stem) belongs to a material (0..1).
+    Highest for an exact normalized match, then whole-word containment, then
+    a looser substring. Returns 0 for no match / too-short material names."""
+    nm = normalize_match_name(material)
+    ns = normalize_match_name(file_stem)
+    if not nm or not ns or len(nm) < 2:
+        return 0.0
+    if nm == ns:
+        return 1.0
+    coverage = len(nm) / max(len(ns), 1)        # how much of the filename the material covers
+    mat_tokens, stem_tokens = nm.split(), set(ns.split())
+    if all(t in stem_tokens for t in mat_tokens):   # every material word is a whole word in the file
+        return 0.60 + 0.40 * coverage
+    if nm in ns:                                     # appears as a substring anywhere
+        return 0.40 + 0.30 * coverage
+    return 0.0
+
+
+def auto_match_media_to_materials(
+    materials: list[str],
+    files: list[str],
+    min_score: float = 0.45,
+) -> dict[str, str]:
+    """Return {material_name: file_path} for confident name matches. Each file
+    is used at most once and each material matched at most once (greedy by
+    descending score); anything below ``min_score`` is left unmatched."""
+    candidates = []
+    for mat in materials:
+        for f in files:
+            stem = Path(f).stem
+            score = match_score(mat, stem)
+            if score >= min_score:
+                # Tie-break: prefer the shorter filename (tighter fit).
+                candidates.append((score, -len(stem), mat, f))
+    candidates.sort(reverse=True)
+    result: dict[str, str] = {}
+    used_files: set[str] = set()
+    for _score, _neg_len, mat, f in candidates:
+        if mat in result or f in used_files:
+            continue
+        result[mat] = f
+        used_files.add(f)
+    return result

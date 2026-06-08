@@ -94,7 +94,7 @@ from core.models import (
     VIDEO_MAPPING_MODE_EMISSION,
 )
 from core.runner import run_blender_job, submit_deadline_job
-from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand
+from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand, auto_match_media_to_materials
 
 
 OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
@@ -1248,6 +1248,7 @@ class ScenePanel(QWidget):
     render_requested = Signal()
     recent_scene_selected = Signal(str)
     mute_changed = Signal()
+    auto_mapped = Signal(int, int)   # (matched, total materials)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1423,12 +1424,19 @@ class ScenePanel(QWidget):
         self.maplink_btn.setFixedSize(36, 32)
         self.maplink_btn.clicked.connect(self._toggle_map_selected)
 
+        self.automap_btn = QPushButton("")
+        self.automap_btn.setObjectName("IconButton")
+        self.automap_btn.setToolTip("Auto-map clips to materials by name")
+        self.automap_btn.setFixedSize(36, 32)
+        self.automap_btn.clicked.connect(self._auto_map_by_name)
+
         self.clear_map_btn = QPushButton("")
         self.clear_map_btn.setObjectName("IconButton")
         self.clear_map_btn.setToolTip("Clear all mappings")
         self.clear_map_btn.setFixedSize(36, 32)
         self.clear_map_btn.clicked.connect(self._clear_assignments)
         middle.addWidget(self.maplink_btn)
+        middle.addWidget(self.automap_btn)
         middle.addWidget(self.clear_map_btn)
         middle.addStretch()
 
@@ -1482,6 +1490,7 @@ class ScenePanel(QWidget):
     def restyle(self, pal: T.Palette) -> None:
         """Re-tint icons for the current theme/accent."""
         c = pal.text
+        self.automap_btn.setIcon(icons.icon("check_apply", c))
         self.clear_map_btn.setIcon(icons.icon("reset", c))
         self.add_video_btn.setIcon(icons.icon("plus", c, 13))
         self.browse_scene_btn.setIcon(icons.icon("folder", pal.accent_text))
@@ -1633,6 +1642,25 @@ class ScenePanel(QWidget):
         self._assignments = []
         self._refresh_lists()
         self.assignments_changed.emit([])
+
+    def _auto_map_by_name(self) -> None:
+        """Map clips to materials whose name appears in the clip's filename.
+        Confident matches are applied (existing mode preserved); ambiguous
+        materials are left untouched for manual mapping."""
+        matches = auto_match_media_to_materials(self._materials, self._videos)
+        existing_mode = {a.material_name: a.mapping_mode for a in self._assignments}
+        for material, video in matches.items():
+            mode = existing_mode.get(material, VIDEO_MAPPING_MODE_EMISSION)
+            replacement = MaterialVideoAssignment(material, video, mode)
+            for i, a in enumerate(self._assignments):
+                if a.material_name == material:
+                    self._assignments[i] = replacement
+                    break
+            else:
+                self._assignments.append(replacement)
+        self._refresh_lists()
+        self.assignments_changed.emit(list(self._assignments))
+        self.auto_mapped.emit(len(matches), len(self._materials))
 
     def _refresh_lists(self) -> None:
         mq = self.mat_search.text().strip().lower()
@@ -3869,6 +3897,10 @@ class BlenderVideoMapperQt(QMainWindow):
         self.scene_panel.scan_requested.connect(self._scan_scene)
         self.scene_panel.videos_changed.connect(self._on_videos_changed)
         self.scene_panel.assignments_changed.connect(self._on_assignments_changed)
+        self.scene_panel.auto_mapped.connect(
+            lambda n, total: self._append_log(
+                f"[app] Auto-mapped {n} of {total} materials by name"
+                + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.mute_changed.connect(self._schedule_save)
         self.scene_panel.render_requested.connect(self._start_render)
 
