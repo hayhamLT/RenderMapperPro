@@ -675,7 +675,13 @@ class RenderThread(QThread):
                     self.job_update.emit(_j, "running", pct)
 
             try:
-                if getattr(cfg, "use_deadline", False):
+                _is_c4d = str(cfg.scene_path).lower().endswith(".c4d")
+                if getattr(cfg, "use_deadline", False) and _is_c4d:
+                    # The Deadline path is Blender-specific; submitting a .c4d
+                    # would produce a broken command. Render locally instead.
+                    on_log("[app] Cinema 4D farm submission via Deadline isn't supported yet "
+                           "— rendering this job locally.")
+                if getattr(cfg, "use_deadline", False) and not _is_c4d:
                     rc = submit_deadline_job(
                         blender_executable=self.blender,
                         worker_script_path=self.worker,
