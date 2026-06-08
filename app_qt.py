@@ -1932,10 +1932,13 @@ class RenderPanel(QWidget):
         self.quality_combo = QComboBox()
         self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
         self.quality_combo.setCurrentText("High")
-        adv.addLayout(two_col(
-            labeled("Cycles Samples", self.samples_edit),
-            labeled("Video Quality", self.quality_combo),
-        ))
+        self.samples_label = QLabel("Cycles Samples")
+        self.samples_label.setObjectName("FieldLabel")
+        samples_col = QVBoxLayout()
+        samples_col.setSpacing(3)
+        samples_col.addWidget(self.samples_label)
+        samples_col.addWidget(self.samples_edit)
+        adv.addLayout(two_col(samples_col, labeled("Video Quality", self.quality_combo)))
         self.denoise_cb = QCheckBox("Denoise")
         self.denoise_cb.setChecked(True)
         self.transparent_cb = QCheckBox("Transparent background (alpha)")
@@ -1955,24 +1958,35 @@ class RenderPanel(QWidget):
         self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
         self.codec_combo = QComboBox()
         self.codec_combo.addItems(["Default", "H.264", "H.265"])
-        adv.addLayout(two_col(
-            labeled("Device", self.device_combo),
-            labeled("Render Scale", self.scale_combo),
-        ))
+        # Device is Blender-only (Redshift is GPU); wrap it so it can be hidden.
+        self.device_box = QWidget()
+        dev_lay = QVBoxLayout(self.device_box)
+        dev_lay.setContentsMargins(0, 0, 0, 0)
+        dev_lay.addLayout(labeled("Device", self.device_combo))
+        perf_row = QHBoxLayout()
+        perf_row.setSpacing(10)
+        perf_row.addWidget(self.device_box, 1)
+        perf_row.addLayout(labeled("Render Scale", self.scale_combo), 1)
+        adv.addLayout(perf_row)
         adv.addLayout(two_col(labeled("Codec", self.codec_combo)))
 
-        # ── Color management ─────────────────────────────────────────────
-        adv.addWidget(section("COLOR MANAGEMENT"))
+        # ── Color management (Blender only) ──────────────────────────────
+        self.color_box = QWidget()
+        color_lay = QVBoxLayout(self.color_box)
+        color_lay.setContentsMargins(0, 0, 0, 0)
+        color_lay.setSpacing(10)
+        color_lay.addWidget(section("COLOR MANAGEMENT"))
         self.view_transform_combo = QComboBox()
         self.view_transform_combo.addItems(["AgX", "Filmic", "Standard", "Khronos PBR Neutral", "Raw", "False Color"])
         self.view_transform_combo.setCurrentText("AgX")
-        adv.addLayout(labeled("View Transform", self.view_transform_combo))
+        color_lay.addLayout(labeled("View Transform", self.view_transform_combo))
         self.exposure_edit = QLineEdit("0.0")
         self.gamma_edit = QLineEdit("1.0")
-        adv.addLayout(two_col(
+        color_lay.addLayout(two_col(
             labeled("Exposure", self.exposure_edit),
             labeled("Gamma", self.gamma_edit),
         ))
+        adv.addWidget(self.color_box)
 
         self.adv_box.setVisible(False)
         root.addWidget(self.adv_box)
@@ -1984,6 +1998,25 @@ class RenderPanel(QWidget):
         self.adv_box.setVisible(checked)
         arrow = "▾" if checked else "▸"
         self.adv_toggle.setText(f"{arrow}  Advanced quality settings")
+
+    def set_renderer(self, is_c4d: bool) -> None:
+        """Adapt the settings to the active renderer so every visible control is
+        real. Redshift: relabel samples, hide Blender-only Device + Color
+        Management, and offer only output profiles the C4D path can produce."""
+        self.samples_label.setText("Redshift Samples" if is_c4d else "Cycles Samples")
+        self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
+        self.color_box.setVisible(not is_c4d)        # Blender color management
+        self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
+        items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
+        existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
+        if existing != items:
+            cur = self.profile_combo.currentText()
+            self.profile_combo.blockSignals(True)
+            self.profile_combo.clear()
+            self.profile_combo.addItems(items)
+            idx = self.profile_combo.findText(cur)
+            self.profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.profile_combo.blockSignals(False)
 
     def restyle(self, pal: T.Palette) -> None:
         self.browse_out_btn.setIcon(icons.icon("folder", pal.text))
@@ -4628,6 +4661,7 @@ class BlenderVideoMapperQt(QMainWindow):
     def _set_renderer_options(self, is_c4d: bool, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
         loaded scene: Cinema 4D renderers for a .c4d, Blender engines otherwise."""
+        self.render_panel.set_renderer(is_c4d)   # adapt all settings to the renderer
         combo = self.render_panel.engine_combo
         # C4D path only supports Redshift: the video→emission mapping is a
         # Redshift node-material feature. Standard/Physical use legacy material

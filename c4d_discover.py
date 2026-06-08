@@ -62,6 +62,14 @@ def _settings(doc) -> dict:
         # Which C4D render engine the scene uses.
         engines = {0: "Standard", 1023342: "Physical", 1036219: "Redshift"}
         s["renderer"] = engines.get(int(rd[c4d.RDATA_RENDERENGINE]), "Redshift")
+        # Adopt the scene's Redshift sampling/denoise into the UI.
+        vp = rd.GetFirstVideoPost()
+        while vp:
+            if vp.GetType() == 1036219:
+                s["samples"] = int(vp[c4d.REDSHIFT_RENDERER_UNIFIED_MAX_SAMPLES])
+                s["use_denoise"] = bool(vp[c4d.REDSHIFT_RENDERER_DENOISE_ENABLED])
+                break
+            vp = vp.GetNext()
     except Exception as exc:  # never let settings probing break discovery
         log(f"settings probe warning: {exc}")
     return s

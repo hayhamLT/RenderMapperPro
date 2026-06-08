@@ -100,6 +100,52 @@ def _set_still(graph, path_port, image_path) -> None:
         transaction.Commit()
 
 
+def _apply_redshift_quality(rd, samples: int, denoise: bool) -> None:
+    """Drive the Redshift video-post sampling/denoise from the app's render
+    settings, so the panel controls are real (not cosmetic)."""
+    vp = rd.GetFirstVideoPost()
+    while vp:
+        if vp.GetType() == 1036219:  # Redshift
+            try:
+                if samples > 0:
+                    vp[c4d.REDSHIFT_RENDERER_UNIFIED_MAX_SAMPLES] = int(samples)
+                    cur_min = int(vp[c4d.REDSHIFT_RENDERER_UNIFIED_MIN_SAMPLES] or 1)
+                    vp[c4d.REDSHIFT_RENDERER_UNIFIED_MIN_SAMPLES] = min(cur_min, int(samples))
+                vp[c4d.REDSHIFT_RENDERER_DENOISE_ENABLED] = 1 if denoise else 0
+                log(f"Redshift: max samples={samples}, denoise={'on' if denoise else 'off'}")
+            except Exception as exc:
+                log(f"  redshift quality warning: {exc}")
+            break
+        vp = vp.GetNext()
+
+
+def _mux_movie(ffmpeg: str, frames_dir: str, fps: int, out_file: str,
+               out_fmt: str, codec: str, quality: str) -> bool:
+    """Assemble the rendered PNG frames into a movie with the chosen codec/quality."""
+    crf = {"LOSSLESS": "0", "HIGH": "18", "MEDIUM": "23", "LOW": "28", "LOWEST": "32"}
+    pattern = os.path.join(frames_dir, "%06d.png")
+    os.makedirs(os.path.dirname(out_file) or ".", exist_ok=True)
+    # Force even dimensions — H.264/H.265 with yuv420p (and ProRes) reject odd
+    # width/height, which a fractional render scale can produce.
+    even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    cmd = [ffmpeg, "-y", "-framerate", str(fps or 30), "-i", pattern, "-vf", even]
+    if str(codec).upper() == "PRORES" or out_fmt == "QUICKTIME":
+        cmd += ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+    else:
+        cmd += ["-c:v", "libx265" if str(codec).upper() == "H265" else "libx264",
+                "-crf", crf.get(str(quality).upper(), "18"), "-pix_fmt", "yuv420p"]
+    cmd += [out_file]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        ok = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+        if not ok:
+            log(f"  ffmpeg mux failed: {r.stderr.strip()[-400:]}")
+        return ok
+    except Exception as exc:
+        log(f"  ffmpeg mux error: {exc}")
+        return False
+
+
 def _extract_frame(ffmpeg: str, video: str, frame: int, fps: int, out_png: str) -> bool:
     """Pull one frame out of the video to a PNG (fast input-seek by time)."""
     t = max(0, frame - 1) / float(fps or 30)
@@ -154,7 +200,7 @@ def main() -> None:
 
     # ── Render settings ──────────────────────────────────────────────────
     rd = doc.GetActiveRenderData()
-    # Honour the chosen C4D render engine (combo sends Redshift/Standard/Physical).
+    # Engine: the app's C4D path is Redshift-only, but honour the field anyway.
     engine_ids = {"STANDARD": 0, "PHYSICAL": 1023342, "REDSHIFT": 1036219}
     eng = str(render.get("engine", "")).strip().upper()
     if eng in engine_ids:
@@ -168,16 +214,29 @@ def main() -> None:
     rd[c4d.RDATA_XRES] = float(xr)
     rd[c4d.RDATA_YRES] = float(yr)
 
-    out_dir = cfg["output_path"]
-    os.makedirs(out_dir, exist_ok=True)
+    _apply_redshift_quality(rd, int(render.get("samples", 0) or 0),
+                            bool(render.get("use_denoise", True)))
+
     fstart = int(render.get("frame_start", 1))
     fend = int(render.get("frame_end", 1))
     step = max(1, int(render.get("frame_step", 1)))
     preview_frame = int(cfg.get("preview_frame", 0) or 0)
     frames = [preview_frame] if preview_frame > 0 else list(range(fstart, fend + 1, step))
 
-    log(f"Rendering {len(frames)} frame(s) at {xr}x{yr} with Redshift")
-    for f in frames:
+    # Output: a movie profile assembles a film; a sequence profile writes frames
+    # into the output folder. Previews are always single PNGs (no mux).
+    out_fmt = str(render.get("output_format", "PNG")).strip().upper()
+    is_movie = preview_frame <= 0 and out_fmt in ("MPEG4", "QUICKTIME")
+    out_path = cfg["output_path"]
+    if is_movie:
+        frame_dir = tempfile.mkdtemp(prefix="c4d_movie_")
+    else:
+        frame_dir = out_path
+        os.makedirs(frame_dir, exist_ok=True)
+
+    log(f"Rendering {len(frames)} frame(s) at {xr}x{yr} with Redshift"
+        + (f" -> {out_fmt} movie" if is_movie else " (image sequence)"))
+    for idx, f in enumerate(frames, start=1):
         # Swap in this frame's still for every mapped material.
         for (graph, port, vid, tag) in mapped:
             still = os.path.join(tmp_dir, f"clip{tag}_{f:04d}.png")
@@ -188,9 +247,17 @@ def main() -> None:
         bmp = c4d.bitmaps.BaseBitmap()
         bmp.Init(xr, yr, 24)
         res = documents.RenderDocument(doc, rd.GetDataInstance(), bmp, c4d.RENDERFLAGS_EXTERNAL)
-        out_path = os.path.join(out_dir, f"{f:04d}.png")
-        bmp.Save(out_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
-        log(f"Frame {f} -> {out_path} (ok={res == c4d.RENDERRESULT_OK})")
+        frame_path = os.path.join(frame_dir, f"{idx:06d}.png" if is_movie else f"{f:04d}.png")
+        bmp.Save(frame_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
+        log(f"Frame {f} -> {frame_path} (ok={res == c4d.RENDERRESULT_OK})")
+
+    if is_movie:
+        log(f"Encoding movie -> {out_path}")
+        if _mux_movie(ffmpeg, frame_dir, fps, out_path, out_fmt,
+                      str(render.get("video_codec", "")) or str(render.get("codec", "H264")),
+                      str(render.get("video_quality", "HIGH"))):
+            log(f"Movie written: {out_path}")
+        shutil.rmtree(frame_dir, ignore_errors=True)
     log("Render finished successfully")
 
 

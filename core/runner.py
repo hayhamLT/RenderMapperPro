@@ -278,8 +278,9 @@ def run_c4d_job(
     if on_log:
         on_log("[app] Executing C4D: " + " ".join(command))
 
-    out_dir = Path(job.output_path).expanduser()
-    before = set(out_dir.glob("*.png")) if out_dir.is_dir() else set()
+    out_path = Path(job.output_path).expanduser()
+    before = set(out_path.glob("*.png")) if out_path.is_dir() else set()
+    start_ts = time.time()
 
     process = subprocess.Popen(
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -303,9 +304,14 @@ def run_c4d_job(
             process.kill()
 
     # c4dpy often crashes on exit after a successful render — treat the job as
-    # successful if it produced output.
-    produced = (set(out_dir.glob("*.png")) - before) if out_dir.is_dir() else set()
-    if produced:
+    # successful if it produced output: new frames in a sequence folder, or a
+    # freshly written movie file at the output path.
+    produced_seq = (set(out_path.glob("*.png")) - before) if out_path.is_dir() else set()
+    produced_movie = (
+        out_path.is_file() and out_path.stat().st_size > 0
+        and out_path.stat().st_mtime >= start_ts - 1
+    )
+    if produced_seq or produced_movie:
         return 0
     return rc if rc != 0 else 1
 
