@@ -1925,20 +1925,45 @@ class RenderPanel(QWidget):
                 row.addStretch(1)
             return row
 
-        # ── Sampling & quality ───────────────────────────────────────────
+        # ── Sampling & quality (same slot for both renderers) ────────────
         adv.addWidget(section("SAMPLING & QUALITY"))
+        # Speed preset (Redshift only) — sits at the top of sampling.
+        self.rs_preset_combo = QComboBox()
+        self.rs_preset_combo.addItems(["Custom", "Draft (fastest)", "Balanced", "High", "Final (best)"])
+        self.rs_preset_combo.setToolTip("One-click speed/quality tradeoff. Fills the fields below.")
+        self.rs_preset_row = QWidget()
+        _pr = QVBoxLayout(self.rs_preset_row)
+        _pr.setContentsMargins(0, 0, 0, 0)
+        _pr.addLayout(labeled("Speed Preset", self.rs_preset_combo))
+        adv.addWidget(self.rs_preset_row)
+        # Samples: 'Cycles Samples' (Blender) / 'Max Samples' + 'Min Samples' (RS).
         self.samples_edit = QLineEdit("64")
         self.samples_edit.setPlaceholderText("64")
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
-        self.quality_combo.setCurrentText("High")
         self.samples_label = QLabel("Cycles Samples")
         self.samples_label.setObjectName("FieldLabel")
         samples_col = QVBoxLayout()
         samples_col.setSpacing(3)
         samples_col.addWidget(self.samples_label)
         samples_col.addWidget(self.samples_edit)
-        adv.addLayout(two_col(samples_col, labeled("Video Quality", self.quality_combo)))
+        self.rs_min_samples_edit = QLineEdit("4")
+        self.rs_min_box = QWidget()
+        _mb = QVBoxLayout(self.rs_min_box)
+        _mb.setContentsMargins(0, 0, 0, 0)
+        _mb.addLayout(labeled("Min Samples", self.rs_min_samples_edit))
+        samples_row = QHBoxLayout()
+        samples_row.setSpacing(10)
+        samples_row.addLayout(samples_col, 1)
+        samples_row.addWidget(self.rs_min_box, 1)
+        adv.addLayout(samples_row)
+        # Noise threshold (Redshift only) — the biggest speed knob.
+        self.rs_threshold_edit = QLineEdit("0.01")
+        self.rs_threshold_edit.setToolTip("Adaptive noise threshold — higher renders faster (noisier).")
+        self.rs_threshold_row = QWidget()
+        _tr = QVBoxLayout(self.rs_threshold_row)
+        _tr.setContentsMargins(0, 0, 0, 0)
+        _tr.addLayout(labeled("Noise Threshold  (higher = faster)", self.rs_threshold_edit))
+        adv.addWidget(self.rs_threshold_row)
+        # Denoise (both) + transparent (Blender only).
         self.denoise_cb = QCheckBox("Denoise")
         self.denoise_cb.setChecked(True)
         self.transparent_cb = QCheckBox("Transparent background (alpha)")
@@ -1950,25 +1975,50 @@ class RenderPanel(QWidget):
         cb_row.addStretch(1)
         adv.addLayout(cb_row)
 
-        # ── Performance & output ─────────────────────────────────────────
-        adv.addWidget(section("PERFORMANCE & OUTPUT"))
-        self.device_combo = QComboBox()
-        self.device_combo.addItems(["Auto", "GPU", "CPU"])
+        # ── Output (same slot for both renderers) ────────────────────────
+        adv.addWidget(section("OUTPUT"))
         self.scale_combo = QComboBox()
         self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
+        self.quality_combo.setCurrentText("High")
+        adv.addLayout(two_col(
+            labeled("Render Scale", self.scale_combo),
+            labeled("Video Quality", self.quality_combo),
+        ))
         self.codec_combo = QComboBox()
         self.codec_combo.addItems(["Default", "H.264", "H.265"])
+        self.device_combo = QComboBox()
+        self.device_combo.addItems(["Auto", "GPU", "CPU"])
         # Device is Blender-only (Redshift is GPU); wrap it so it can be hidden.
         self.device_box = QWidget()
         dev_lay = QVBoxLayout(self.device_box)
         dev_lay.setContentsMargins(0, 0, 0, 0)
         dev_lay.addLayout(labeled("Device", self.device_combo))
-        perf_row = QHBoxLayout()
-        perf_row.setSpacing(10)
-        perf_row.addWidget(self.device_box, 1)
-        perf_row.addLayout(labeled("Render Scale", self.scale_combo), 1)
-        adv.addLayout(perf_row)
-        adv.addLayout(two_col(labeled("Codec", self.codec_combo)))
+        out_row = QHBoxLayout()
+        out_row.setSpacing(10)
+        out_row.addLayout(labeled("Codec", self.codec_combo), 1)
+        out_row.addWidget(self.device_box, 1)
+        adv.addLayout(out_row)
+
+        # ── Lighting & GI (Redshift only) ────────────────────────────────
+        self.gi_box = QWidget()
+        gi_lay = QVBoxLayout(self.gi_box)
+        gi_lay.setContentsMargins(0, 0, 0, 0)
+        gi_lay.setSpacing(10)
+        gi_lay.addWidget(section("LIGHTING & GI"))
+        self.rs_gi_cb = QCheckBox("Global illumination")
+        self.rs_gi_cb.setChecked(True)
+        self.rs_gi_cb.setToolTip("Turn off for flat/emissive content — a large speedup.")
+        gi_lay.addWidget(self.rs_gi_cb)
+        self.rs_gi_bounces_edit = QLineEdit("3")
+        self.rs_ray_depth_edit = QLineEdit("6")
+        self.rs_ray_depth_edit.setToolTip("Max ray trace depth — fewer bounces render faster.")
+        gi_lay.addLayout(two_col(
+            labeled("GI Bounces", self.rs_gi_bounces_edit),
+            labeled("Max Ray Depth", self.rs_ray_depth_edit),
+        ))
+        adv.addWidget(self.gi_box)
 
         # ── Color management (Blender only) ──────────────────────────────
         self.color_box = QWidget()
@@ -1988,42 +2038,14 @@ class RenderPanel(QWidget):
         ))
         adv.addWidget(self.color_box)
 
-        # ── Redshift optimization (C4D only) ─────────────────────────────
-        self.rs_box = QWidget()
-        rs_lay = QVBoxLayout(self.rs_box)
-        rs_lay.setContentsMargins(0, 0, 0, 0)
-        rs_lay.setSpacing(10)
-        rs_lay.addWidget(section("REDSHIFT OPTIMIZATION"))
-        self.rs_preset_combo = QComboBox()
-        self.rs_preset_combo.addItems(["Custom", "Draft (fastest)", "Balanced", "High", "Final (best)"])
-        self.rs_preset_combo.setToolTip("One-click speed/quality tradeoff. Fills the fields below.")
-        rs_lay.addLayout(labeled("Speed preset", self.rs_preset_combo))
-        self.rs_min_samples_edit = QLineEdit("4")
-        self.rs_threshold_edit = QLineEdit("0.01")
-        self.rs_threshold_edit.setToolTip("Adaptive noise threshold — higher renders faster (noisier).")
-        rs_lay.addLayout(two_col(
-            labeled("Min Samples", self.rs_min_samples_edit),
-            labeled("Noise Threshold", self.rs_threshold_edit),
-        ))
-        self.rs_gi_bounces_edit = QLineEdit("3")
-        self.rs_ray_depth_edit = QLineEdit("6")
-        self.rs_ray_depth_edit.setToolTip("Max ray trace depth — fewer bounces render faster.")
-        rs_lay.addLayout(two_col(
-            labeled("GI Bounces", self.rs_gi_bounces_edit),
-            labeled("Max Ray Depth", self.rs_ray_depth_edit),
-        ))
-        self.rs_gi_cb = QCheckBox("Global illumination")
-        self.rs_gi_cb.setChecked(True)
-        self.rs_gi_cb.setToolTip("Turn off for flat/emissive content — a large speedup.")
-        rs_lay.addWidget(self.rs_gi_cb)
-        adv.addWidget(self.rs_box)
-        self.rs_box.setVisible(False)
+        # Preset wiring + initial renderer state (Blender layout by default).
         self._rs_applying = False
         self.rs_preset_combo.currentTextChanged.connect(self._apply_rs_preset)
         for w in (self.samples_edit, self.rs_min_samples_edit, self.rs_threshold_edit,
                   self.rs_gi_bounces_edit, self.rs_ray_depth_edit):
             w.textEdited.connect(self._rs_custom)
         self.rs_gi_cb.toggled.connect(lambda _v: self._rs_custom())
+        self.set_renderer(False)
 
         self.adv_box.setVisible(False)
         root.addWidget(self.adv_box)
@@ -2072,11 +2094,14 @@ class RenderPanel(QWidget):
         real. Redshift: relabel samples, hide Blender-only Device + Color
         Management, show the Redshift optimization controls, and offer only
         output profiles the C4D path can produce."""
-        self.samples_label.setText("Redshift Samples" if is_c4d else "Cycles Samples")
+        self.samples_label.setText("Max Samples" if is_c4d else "Cycles Samples")
+        # Redshift-only sampling/GI controls.
+        for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row, self.gi_box):
+            w.setVisible(is_c4d)
+        # Blender-only controls.
         self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
         self.color_box.setVisible(not is_c4d)        # Blender color management
         self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
-        self.rs_box.setVisible(is_c4d)               # Redshift speed levers
         items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
         existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
         if existing != items:
