@@ -31,6 +31,12 @@ class RenderOptions:
     film_transparent: bool = False       # transparent background (alpha)
     video_quality: str = "HIGH"          # FFMPEG constant_rate_factor
     video_codec: str = ""                # optional codec override (e.g. H265); blank = profile default
+    # Redshift optimisation (render-speed levers; honoured only on the C4D path)
+    rs_min_samples: int = 4              # unified min samples
+    rs_threshold: float = 0.01           # adaptive error threshold — higher = faster/noisier
+    rs_gi_enabled: bool = True           # global illumination on/off (off is much faster)
+    rs_gi_bounces: int = 3               # GI bounce count — fewer = faster
+    rs_ray_depth: int = 6                # combined max trace depth — fewer = faster
 
 
 @dataclass

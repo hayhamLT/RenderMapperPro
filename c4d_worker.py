@@ -100,19 +100,41 @@ def _set_still(graph, path_port, image_path) -> None:
         transaction.Commit()
 
 
-def _apply_redshift_quality(rd, samples: int, denoise: bool) -> None:
-    """Drive the Redshift video-post sampling/denoise from the app's render
-    settings, so the panel controls are real (not cosmetic)."""
+def _set_vp(vp, const_name: str, value) -> None:
+    """Set a Redshift video-post parameter by constant name, if present."""
+    if hasattr(c4d, const_name):
+        try:
+            vp[getattr(c4d, const_name)] = value
+        except Exception:
+            pass
+
+
+def _apply_redshift_quality(rd, render: dict) -> None:
+    """Drive the Redshift video-post render-speed levers from the app's render
+    settings, so the panel controls are real (not cosmetic). Every value here
+    trades render time against quality."""
+    samples = int(render.get("samples", 0) or 0)
     vp = rd.GetFirstVideoPost()
     while vp:
         if vp.GetType() == 1036219:  # Redshift
             try:
                 if samples > 0:
-                    vp[c4d.REDSHIFT_RENDERER_UNIFIED_MAX_SAMPLES] = int(samples)
-                    cur_min = int(vp[c4d.REDSHIFT_RENDERER_UNIFIED_MIN_SAMPLES] or 1)
-                    vp[c4d.REDSHIFT_RENDERER_UNIFIED_MIN_SAMPLES] = min(cur_min, int(samples))
-                vp[c4d.REDSHIFT_RENDERER_DENOISE_ENABLED] = 1 if denoise else 0
-                log(f"Redshift: max samples={samples}, denoise={'on' if denoise else 'off'}")
+                    _set_vp(vp, "REDSHIFT_RENDERER_UNIFIED_MAX_SAMPLES", int(samples))
+                rs_min = int(render.get("rs_min_samples", 4) or 1)
+                _set_vp(vp, "REDSHIFT_RENDERER_UNIFIED_MIN_SAMPLES",
+                        min(rs_min, samples) if samples > 0 else rs_min)
+                _set_vp(vp, "REDSHIFT_RENDERER_UNIFIED_ADAPTIVE_ERROR_THRESHOLD",
+                        float(render.get("rs_threshold", 0.01)))
+                _set_vp(vp, "REDSHIFT_RENDERER_DENOISE_ENABLED",
+                        1 if render.get("use_denoise", True) else 0)
+                gi_on = bool(render.get("rs_gi_enabled", True))
+                _set_vp(vp, "REDSHIFT_RENDERER_GI_ENABLED", 1 if gi_on else 0)
+                if gi_on:
+                    _set_vp(vp, "REDSHIFT_RENDERER_NUM_GI_BOUNCES", int(render.get("rs_gi_bounces", 3)))
+                _set_vp(vp, "REDSHIFT_RENDERER_MAX_TRACE_DEPTH_COMBINED", int(render.get("rs_ray_depth", 6)))
+                log(f"Redshift: samples={samples}/{rs_min}, threshold={render.get('rs_threshold', 0.01)}, "
+                    f"denoise={'on' if render.get('use_denoise', True) else 'off'}, "
+                    f"GI={'on' if gi_on else 'off'}({render.get('rs_gi_bounces', 3)}), depth={render.get('rs_ray_depth', 6)}")
             except Exception as exc:
                 log(f"  redshift quality warning: {exc}")
             break
@@ -214,8 +236,7 @@ def main() -> None:
     rd[c4d.RDATA_XRES] = float(xr)
     rd[c4d.RDATA_YRES] = float(yr)
 
-    _apply_redshift_quality(rd, int(render.get("samples", 0) or 0),
-                            bool(render.get("use_denoise", True)))
+    _apply_redshift_quality(rd, render)
 
     fstart = int(render.get("frame_start", 1))
     fend = int(render.get("frame_end", 1))

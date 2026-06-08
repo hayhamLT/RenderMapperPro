@@ -1988,6 +1988,43 @@ class RenderPanel(QWidget):
         ))
         adv.addWidget(self.color_box)
 
+        # ── Redshift optimization (C4D only) ─────────────────────────────
+        self.rs_box = QWidget()
+        rs_lay = QVBoxLayout(self.rs_box)
+        rs_lay.setContentsMargins(0, 0, 0, 0)
+        rs_lay.setSpacing(10)
+        rs_lay.addWidget(section("REDSHIFT OPTIMIZATION"))
+        self.rs_preset_combo = QComboBox()
+        self.rs_preset_combo.addItems(["Custom", "Draft (fastest)", "Balanced", "High", "Final (best)"])
+        self.rs_preset_combo.setToolTip("One-click speed/quality tradeoff. Fills the fields below.")
+        rs_lay.addLayout(labeled("Speed preset", self.rs_preset_combo))
+        self.rs_min_samples_edit = QLineEdit("4")
+        self.rs_threshold_edit = QLineEdit("0.01")
+        self.rs_threshold_edit.setToolTip("Adaptive noise threshold — higher renders faster (noisier).")
+        rs_lay.addLayout(two_col(
+            labeled("Min Samples", self.rs_min_samples_edit),
+            labeled("Noise Threshold", self.rs_threshold_edit),
+        ))
+        self.rs_gi_bounces_edit = QLineEdit("3")
+        self.rs_ray_depth_edit = QLineEdit("6")
+        self.rs_ray_depth_edit.setToolTip("Max ray trace depth — fewer bounces render faster.")
+        rs_lay.addLayout(two_col(
+            labeled("GI Bounces", self.rs_gi_bounces_edit),
+            labeled("Max Ray Depth", self.rs_ray_depth_edit),
+        ))
+        self.rs_gi_cb = QCheckBox("Global illumination")
+        self.rs_gi_cb.setChecked(True)
+        self.rs_gi_cb.setToolTip("Turn off for flat/emissive content — a large speedup.")
+        rs_lay.addWidget(self.rs_gi_cb)
+        adv.addWidget(self.rs_box)
+        self.rs_box.setVisible(False)
+        self._rs_applying = False
+        self.rs_preset_combo.currentTextChanged.connect(self._apply_rs_preset)
+        for w in (self.samples_edit, self.rs_min_samples_edit, self.rs_threshold_edit,
+                  self.rs_gi_bounces_edit, self.rs_ray_depth_edit):
+            w.textEdited.connect(self._rs_custom)
+        self.rs_gi_cb.toggled.connect(lambda _v: self._rs_custom())
+
         self.adv_box.setVisible(False)
         root.addWidget(self.adv_box)
 
@@ -1999,14 +2036,47 @@ class RenderPanel(QWidget):
         arrow = "▾" if checked else "▸"
         self.adv_toggle.setText(f"{arrow}  Advanced quality settings")
 
+    # Redshift speed/quality presets — each fills the optimization fields.
+    _RS_PRESETS = {
+        "Draft (fastest)": dict(mx="16", mn="1", thr="0.3", gib="1", depth="3", gi=False),
+        "Balanced":        dict(mx="64", mn="4", thr="0.02", gib="3", depth="6", gi=True),
+        "High":            dict(mx="128", mn="8", thr="0.01", gib="3", depth="8", gi=True),
+        "Final (best)":    dict(mx="256", mn="16", thr="0.005", gib="4", depth="12", gi=True),
+    }
+
+    def _apply_rs_preset(self, name: str) -> None:
+        p = self._RS_PRESETS.get(name)
+        if not p:
+            return
+        self._rs_applying = True
+        try:
+            self.samples_edit.setText(p["mx"])
+            self.rs_min_samples_edit.setText(p["mn"])
+            self.rs_threshold_edit.setText(p["thr"])
+            self.rs_gi_bounces_edit.setText(p["gib"])
+            self.rs_ray_depth_edit.setText(p["depth"])
+            self.rs_gi_cb.setChecked(p["gi"])
+        finally:
+            self._rs_applying = False
+
+    def _rs_custom(self) -> None:
+        """A manual edit to any optimization field flips the preset to Custom."""
+        if self._rs_applying or self.rs_preset_combo.currentText() == "Custom":
+            return
+        self.rs_preset_combo.blockSignals(True)
+        self.rs_preset_combo.setCurrentText("Custom")
+        self.rs_preset_combo.blockSignals(False)
+
     def set_renderer(self, is_c4d: bool) -> None:
         """Adapt the settings to the active renderer so every visible control is
         real. Redshift: relabel samples, hide Blender-only Device + Color
-        Management, and offer only output profiles the C4D path can produce."""
+        Management, show the Redshift optimization controls, and offer only
+        output profiles the C4D path can produce."""
         self.samples_label.setText("Redshift Samples" if is_c4d else "Cycles Samples")
         self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
         self.color_box.setVisible(not is_c4d)        # Blender color management
         self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
+        self.rs_box.setVisible(is_c4d)               # Redshift speed levers
         items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
         existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
         if existing != items:
@@ -2097,6 +2167,17 @@ class RenderPanel(QWidget):
             self.denoise_cb.setChecked(bool(s["use_denoise"]))
         if "film_transparent" in s:
             self.transparent_cb.setChecked(bool(s["film_transparent"]))
+        # Adopt the scene's Redshift optimization settings.
+        if "rs_min_samples" in s:
+            self.rs_min_samples_edit.setText(str(int(s["rs_min_samples"])))
+        if "rs_threshold" in s:
+            self.rs_threshold_edit.setText(f"{float(s['rs_threshold']):g}")
+        if "rs_gi_bounces" in s:
+            self.rs_gi_bounces_edit.setText(str(int(s["rs_gi_bounces"])))
+        if "rs_ray_depth" in s:
+            self.rs_ray_depth_edit.setText(str(int(s["rs_ray_depth"])))
+        if "rs_gi_enabled" in s:
+            self.rs_gi_cb.setChecked(bool(s["rs_gi_enabled"]))
         # Engine: map any EEVEE variant (EEVEE / EEVEE_NEXT) to the combo entry.
         eng = str(s.get("engine", "")).upper()
         if eng:
@@ -2155,6 +2236,11 @@ class RenderPanel(QWidget):
             film_transparent=self.transparent_cb.isChecked(),
             video_quality=quality_map.get(self.quality_combo.currentText(), "HIGH"),
             video_codec=codec_map.get(self.codec_combo.currentText(), ""),
+            rs_min_samples=to_int(self.rs_min_samples_edit.text(), 4),
+            rs_threshold=to_float(self.rs_threshold_edit.text(), 0.01),
+            rs_gi_enabled=self.rs_gi_cb.isChecked(),
+            rs_gi_bounces=to_int(self.rs_gi_bounces_edit.text(), 3),
+            rs_ray_depth=to_int(self.rs_ray_depth_edit.text(), 6),
         )
 
     def settings_dict(self) -> dict:
@@ -2210,6 +2296,12 @@ class RenderPanel(QWidget):
             self.quality_combo.setCurrentText({"LOSSLESS": "Lossless", "HIGH": "High", "MEDIUM": "Medium", "LOW": "Low", "LOWEST": "Lowest"}.get(str(d["video_quality"]).upper(), "High"))
         if "video_codec" in d:
             self.codec_combo.setCurrentText({"": "Default", "H264": "H.264", "H265": "H.265"}.get(str(d["video_codec"]).upper(), "Default"))
+        setnum(self.rs_min_samples_edit, "rs_min_samples")
+        setnum(self.rs_threshold_edit, "rs_threshold")
+        setnum(self.rs_gi_bounces_edit, "rs_gi_bounces")
+        setnum(self.rs_ray_depth_edit, "rs_ray_depth")
+        if "rs_gi_enabled" in d:
+            self.rs_gi_cb.setChecked(bool(d["rs_gi_enabled"]))
 
 
 class DeadlinePanel(QWidget):
@@ -3775,6 +3867,12 @@ class BlenderVideoMapperQt(QMainWindow):
         self.render_panel.quality_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.codec_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.transparent_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_preset_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_min_samples_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_threshold_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_gi_bounces_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_ray_depth_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_gi_cb.toggled.connect(lambda _v: self._on_settings_changed())
 
         self.deadline_panel.settings_changed.connect(lambda: self._on_settings_changed())
         self.deadline_panel.test_connection_requested.connect(self._test_deadline_connection)
