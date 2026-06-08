@@ -72,7 +72,14 @@ def _inject_emission_texture(mat):
         path_port = _find_path_port(tex)
         tex.GetOutputs().FindChild(TEX + ".outcolor").Connect(
             std.GetInputs().FindChild(STD + ".emission_color"))
-        std.GetInputs().FindChild(STD + ".emission_weight").SetDefaultValue(maxon.Float64(1.0))
+        # Full-bright screen: emission only. Kill diffuse + reflection so the
+        # screen shows *exactly* the clip (a black video frame → black screen),
+        # unaffected by scene lighting — matching Blender's EMISSION_FULL_BRIGHT.
+        for leaf, val in (("emission_weight", 1.0), ("base_color_weight", 0.0),
+                          ("refl_weight", 0.0), ("coat_weight", 0.0), ("sheen_weight", 0.0)):
+            port = std.GetInputs().FindChild(STD + "." + leaf)
+            if port:
+                port.SetDefaultValue(maxon.Float64(val))
         transaction.Commit()
         return graph, path_port
     except Exception as exc:
