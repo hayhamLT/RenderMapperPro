@@ -242,6 +242,10 @@ def main() -> None:
     fend = int(render.get("frame_end", 1))
     step = max(1, int(render.get("frame_step", 1)))
     preview_frame = int(cfg.get("preview_frame", 0) or 0)
+    # Deadline passes this task's frame range as extra argv (config, start, end).
+    if len(sys.argv) >= 4 and sys.argv[2].lstrip("-").isdigit() and sys.argv[3].lstrip("-").isdigit():
+        fstart, fend, step, preview_frame = int(sys.argv[2]), int(sys.argv[3]), 1, 0
+        log(f"Frame range override from farm: {fstart}-{fend}")
     frames = [preview_frame] if preview_frame > 0 else list(range(fstart, fend + 1, step))
 
     # Output: a movie profile assembles a film; a sequence profile writes frames

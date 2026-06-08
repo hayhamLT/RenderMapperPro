@@ -675,18 +675,14 @@ class RenderThread(QThread):
                     self.job_update.emit(_j, "running", pct)
 
             try:
-                _is_c4d = str(cfg.scene_path).lower().endswith(".c4d")
-                if getattr(cfg, "use_deadline", False) and _is_c4d:
-                    # The Deadline path is Blender-specific; submitting a .c4d
-                    # would produce a broken command. Render locally instead.
-                    on_log("[app] Cinema 4D farm submission via Deadline isn't supported yet "
-                           "— rendering this job locally.")
-                if getattr(cfg, "use_deadline", False) and not _is_c4d:
+                if getattr(cfg, "use_deadline", False):
                     rc = submit_deadline_job(
                         blender_executable=self.blender,
                         worker_script_path=self.worker,
                         job=cfg,
                         on_log=on_log,
+                        c4dpy_executable=self.c4dpy,
+                        c4d_worker_script=self.c4d_worker,
                     )
                 else:
                     rc = run_blender_job(
@@ -5769,7 +5765,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _export_prepared_blend(self) -> None:
         """Bake the current video mapping + render settings into a standalone
-        .blend that any render farm (Flamenco, BlendFarm, cloud, plain Blender)
+        .blend that any render farm (Deadline, BlendFarm, cloud, plain Blender)
         can render — no Deadline required."""
         if self._is_rendering:
             QMessageBox.information(self, "Busy", "Finish the current render first.")

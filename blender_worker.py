@@ -601,7 +601,7 @@ def main() -> None:
 
     # Prepared-.blend export: the scene now has the video mapping and render
     # settings baked in, so save it as a standalone .blend that any render farm
-    # (Flamenco, BlendFarm, cloud, or plain Blender) can render — then stop.
+    # (Deadline, BlendFarm, cloud, or plain Blender) can render — then stop.
     prepared = str(config.get("prepared_blend_path", "")).strip()
     if prepared:
         Path(prepared).expanduser().parent.mkdir(parents=True, exist_ok=True)

@@ -33,17 +33,23 @@ def submit_deadline_job(
     worker_script_path: str,
     job: JobConfig,
     on_log: LogCallback | None = None,
+    c4dpy_executable: str = "",
+    c4d_worker_script: str = "",
 ) -> int:
     import uuid
 
+    is_c4d = is_c4d_scene(job.scene_path)
     scene_path = Path(job.scene_path).expanduser().resolve()
     blender_path = os.path.expanduser(blender_executable)
-    worker_path = Path(worker_script_path).expanduser().resolve()
+    c4dpy_path = os.path.expanduser(c4dpy_executable) if c4dpy_executable else ""
+    worker_path = Path(c4d_worker_script if is_c4d else worker_script_path).expanduser().resolve()
 
     if not scene_path.exists():
         raise FileNotFoundError(f"Scene file not found: {scene_path}")
     if not worker_path.exists():
         raise FileNotFoundError(f"Worker script not found: {worker_path}")
+    if is_c4d and not c4dpy_path:
+        raise RuntimeError("c4dpy path is required to submit a Cinema 4D job to Deadline.")
 
     submit_scene = getattr(job, 'submit_scene', True)
     repo_path = getattr(job, 'deadline_repo_path', '').strip()
@@ -122,6 +128,20 @@ def submit_deadline_job(
     else:
         scene_arg = str(scene_path)  # absolute path; workers must share the drive
 
+    # The Cinema 4D worker shells out to ffmpeg to extract video frames; stage
+    # the bundled binary so farm nodes don't depend on a local install.
+    if is_c4d:
+        ff = str(cfg_dict.get("ffmpeg_path", "") or "")
+        ffp = Path(ff).expanduser() if ff else None
+        if ffp and ffp.exists():
+            staged_ff = staging_dir / ffp.name
+            _safe_copy(ffp, staged_ff)
+            try:
+                os.chmod(staged_ff, 0o755)
+            except OSError:
+                pass
+            cfg_dict["ffmpeg_path"] = str(staged_ff)
+
     # Write the config JSON into the staging dir with a fixed name
     staged_config = staging_dir / "blender_job_config.json"
     staged_config.write_text(json.dumps(cfg_dict))
@@ -198,15 +218,40 @@ def submit_deadline_job(
     # ── Plugin info file ─────────────────────────────────────────────────────
     # All paths are fully-qualified absolutes — no CWD ambiguity.
     with open(plugin_info_path, "w") as f:
-        f.write(f"Executable={blender_path}\n")
-        # Pass the scene via -b only when we have a guaranteed absolute path.
-        # The worker script also opens the scene, but Blender's -b is needed
-        # to pre-load scene data before the Python script runs.
-        f.write(
-            f'Arguments=-b "{scene_arg}"'
-            f' --python "{staged_worker}"'
-            f' -- "{staged_config}"\n'
-        )
+        if is_c4d:
+            # c4dpy prompts for a license method on stdin and can't take a scene
+            # via flags, so a tiny staged launcher feeds the prompt and runs our
+            # worker. Deadline substitutes the per-task frame range into the
+            # launcher's args, which the worker honours.
+            win = c4dpy_path.lower().endswith(".exe") or "\\" in c4dpy_path
+            if win:
+                launcher = staging_dir / "c4d_launch.bat"
+                launcher.write_text(
+                    "@echo off\r\n"
+                    f'echo 1| "{c4dpy_path}" "{staged_worker}" "{staged_config}" %1 %2\r\n'
+                )
+            else:
+                launcher = staging_dir / "c4d_launch.sh"
+                launcher.write_text(
+                    "#!/bin/sh\n"
+                    f"printf '1\\n' | \"{c4dpy_path}\" \"{staged_worker}\" \"{staged_config}\" \"$1\" \"$2\"\n"
+                )
+                try:
+                    os.chmod(launcher, 0o755)
+                except OSError:
+                    pass
+            f.write(f"Executable={launcher}\n")
+            f.write("Arguments=<STARTFRAME> <ENDFRAME>\n")
+        else:
+            f.write(f"Executable={blender_path}\n")
+            # Pass the scene via -b only when we have a guaranteed absolute path.
+            # The worker script also opens the scene, but Blender's -b is needed
+            # to pre-load scene data before the Python script runs.
+            f.write(
+                f'Arguments=-b "{scene_arg}"'
+                f' --python "{staged_worker}"'
+                f' -- "{staged_config}"\n'
+            )
 
     # ── Submit ───────────────────────────────────────────────────────────────
     from .utils import find_deadlinecommand
