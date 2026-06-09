@@ -1167,7 +1167,7 @@ class RenderPanel(QWidget):
         self.burn_in_cb = QCheckBox("Burn-in overlay (clip · frame · date)")
         self.burn_in_cb.setToolTip("Stamps the clip name/version, frame number, camera and date "
                                    "onto every frame — so reviews always know which version "
-                                   "they're looking at. Blender renders only.")
+                                   "they're looking at. (Farm C4D renders: not yet.)")
         self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
         cb_row = QHBoxLayout()
         cb_row.setSpacing(18)
@@ -1332,7 +1332,6 @@ class RenderPanel(QWidget):
         self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
         self.color_box.setVisible(not is_c4d)        # Blender color management
         self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
-        self.burn_in_cb.setVisible(not is_c4d)      # stamping is a Blender feature
         items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
         existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
         if existing != items:

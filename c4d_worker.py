@@ -174,6 +174,9 @@ def prepare_scene(cfg) -> None:
     fstart = int(render.get("frame_start", 1))
     fend = int(render.get("frame_end", 1))
 
+    if render.get("burn_in"):
+        log("Note: burn-in overlay isn't applied on farm renders yet (local renders only).")
+
     mats = {m.GetName(): m for m in doc.GetMaterials()}
     for i, a in enumerate(cfg.get("material_assignments", [])):
         name, vid = a.get("material_name"), a.get("video_path")
@@ -255,6 +258,67 @@ def _apply_redshift_quality(rd, render: dict) -> None:
                 log(f"  redshift quality warning: {exc}")
             break
         vp = vp.GetNext()
+
+
+def _find_font() -> str:
+    """A monospace system font for the burn-in overlay (per platform)."""
+    candidates = [
+        "/System/Library/Fonts/Menlo.ttc",            # macOS
+        "/System/Library/Fonts/Monaco.ttf",
+        r"C:\Windows\Fonts\consola.ttf",            # Windows
+        r"C:\Windows\Fonts\arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",   # linux
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return ""
+
+
+def _dt_escape(s: str) -> str:
+    """Escape text for ffmpeg drawtext (colons/commas/quotes are syntax)."""
+    return (s.replace("\\", "\\\\").replace(":", "\\:").replace("'", "")
+             .replace(",", "\\,").replace("%", "\\%"))
+
+
+def _burnin_filters(cfg, render, yr: int, frame_text: str) -> str:
+    """Two drawtext filters matching the Blender stamp: date + clip names on
+    top, frame + camera at the bottom. ``frame_text`` is either a literal
+    ('Frame 12') for per-PNG stamping or an ffmpeg expression for the mux."""
+    import time as _time
+    font = _find_font()
+    if not font:
+        return ""
+    fontfile = font.replace(":", "\\:")
+    size = max(12, int(yr) // 40)
+    clips = ", ".join(os.path.splitext(os.path.basename(a.get("video_path", "")))[0]
+                      for a in cfg.get("material_assignments", []) if a.get("video_path"))
+    top = _dt_escape(f"{_time.strftime('%Y/%m/%d %H.%M')}  {clips}"[:140])
+    cam = _dt_escape(str(cfg.get("target_camera", "")).strip())
+    common = (f"fontfile='{fontfile}':fontsize={size}:fontcolor=white@0.9:"
+              f"box=1:boxcolor=black@0.45:boxborderw=6")
+    return (f"drawtext={common}:text='{top}':x=10:y=10,"
+            f"drawtext={common}:text='{frame_text} Camera {cam}':x=10:y=h-th-10")
+
+
+def _stamp_png(ffmpeg: str, png: str, cfg, render, yr: int, frame: int) -> None:
+    """Burn the overlay into one rendered PNG (sequence outputs)."""
+    filters = _burnin_filters(cfg, render, yr, f"Frame {frame}")
+    if not filters:
+        return
+    tmp = png + ".stamp.png"
+    try:
+        r = subprocess.run([ffmpeg, "-y", "-i", png, "-vf", filters, tmp],
+                           capture_output=True, text=True, timeout=120,
+                           creationflags=_NO_WINDOW)
+        if r.returncode == 0 and os.path.getsize(tmp) > 0:
+            os.replace(tmp, png)
+        else:
+            log(f"  burn-in skipped on frame {frame}: {r.stderr.strip()[-160:]}")
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    except Exception as exc:
+        log(f"  burn-in error on frame {frame}: {exc}")
 
 
 def _mux_movie(ffmpeg: str, frames_dir: str, fps: int, out_file: str,
@@ -399,6 +463,8 @@ def main() -> None:
         res = documents.RenderDocument(doc, rd.GetDataInstance(), bmp, c4d.RENDERFLAGS_EXTERNAL)
         frame_path = os.path.join(frame_dir, f"{idx:06d}.png" if is_movie else f"{f:04d}.png")
         bmp.Save(frame_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
+        if render.get("burn_in"):
+            _stamp_png(ffmpeg, frame_path, cfg, render, yr, f)
         log(f"Frame {f} -> {frame_path} (ok={res == c4d.RENDERRESULT_OK})")
 
     if is_movie:
