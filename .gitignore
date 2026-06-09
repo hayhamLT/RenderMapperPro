@@ -22,3 +22,6 @@ dist/
 
 # Vendored static ffmpeg/ffprobe binaries (fetched by build_standalone.sh)
 vendor/ffmpeg/
+
+# Auto-update token baked in by CI — never commit
+assets/update_token.txt

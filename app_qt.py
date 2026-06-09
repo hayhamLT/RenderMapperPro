@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.8"
+APP_VERSION = "1.4.9"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -205,6 +205,37 @@ def _runtime_download_spec() -> Optional[tuple[str, str]]:
         name = f"blender-{v}-linux-{arch}.tar.xz"
         return f"{base}-linux-{arch}.tar.xz", name
     return None
+
+
+GITHUB_REPO = "hayhamLT/RenderMapperPro"   # for the auto-updater
+
+
+def _bundled_asset(name: str) -> Optional[Path]:
+    """Find a file under assets/ in the source tree or a frozen bundle."""
+    roots = [Path(__file__).resolve().parent]
+    if getattr(sys, "frozen", False):
+        roots.insert(0, Path(getattr(sys, "_MEIPASS", "")))
+    for root in roots:
+        p = root / "assets" / name
+        if p.exists():
+            return p
+    return None
+
+
+def _update_token() -> str:
+    """Read-only GitHub token for the auto-updater. Comes from the RMP_UPDATE_TOKEN
+    env var (dev) or assets/update_token.txt baked into the build by CI (never in
+    source). Empty → auto-update is simply off for this build."""
+    t = os.environ.get("RMP_UPDATE_TOKEN", "").strip()
+    if t:
+        return t
+    f = _bundled_asset("update_token.txt")
+    if f is not None:
+        try:
+            return f.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def _find_c4dpy() -> str:
@@ -3860,7 +3891,6 @@ class BlenderVideoMapperQt(QMainWindow):
         self._last_report_path = ""
         self._job_durations: dict[int, float] = {}
         self._preview_thread: Optional[PreviewFrameThread] = None
-        self._update_share = ""          # network folder holding latest.json + zips
         self._update_checked.connect(self._on_update_checked)
         self._undo_stack: list = []      # (description, restore_callable) for destructive actions
 
@@ -4996,26 +5026,19 @@ class BlenderVideoMapperQt(QMainWindow):
         # ── Updates ──────────────────────────────────────────────────────
         lay = _tab("Updates")
         lay.addWidget(section_title("SOFTWARE UPDATES"))
-        lay.addWidget(hint("Point at a shared folder and the app checks it on launch for newer builds, "
-                           "then fetches the right one for your platform in a click."))
+        lay.addWidget(hint("Updates are automatic — the app checks for a newer release on launch "
+                           "and offers a one-click download. Nothing to configure."))
+        upd_status = QLabel(f"This build is v{APP_VERSION}.")
+        upd_status.setStyleSheet(f"color:{self._palette.text_muted}; font-size:12px;")
+        lay.addWidget(upd_status)
+        upd_check_btn = QPushButton("Check for Updates Now")
+        upd_check_btn.clicked.connect(lambda: self._check_for_updates(manual=True))
         upd_row = QHBoxLayout()
-        upd_edit = QLineEdit(self._update_share)
-        upd_edit.setPlaceholderText("Shared folder holding latest.json + build zips (blank = off)")
-        upd_browse = QPushButton("Browse")
-        def _pick_upd() -> None:
-            d = QFileDialog.getExistingDirectory(dlg, "Update folder (shared)", upd_edit.text() or str(Path.home()))
-            if d:
-                upd_edit.setText(d)
-        upd_browse.clicked.connect(_pick_upd)
-        upd_check_btn = QPushButton("Check Now")
-        upd_check_btn.clicked.connect(lambda: (setattr(self, "_update_share", upd_edit.text().strip()),
-                                               self._check_for_updates(manual=True)))
-        upd_row.addWidget(QLabel("Folder:"))
-        upd_row.addWidget(upd_edit, 1)
-        upd_row.addWidget(upd_browse)
         upd_row.addWidget(upd_check_btn)
+        upd_row.addStretch()
         lay.addLayout(upd_row)
-        lay.addWidget(hint(f"This build is v{APP_VERSION}."))
+        if not _update_token():
+            lay.addWidget(hint("This build has no update token baked in, so automatic checks are off."))
         lay.addStretch()
 
         # ── Deadline ─────────────────────────────────────────────────────
@@ -5192,7 +5215,6 @@ class BlenderVideoMapperQt(QMainWindow):
             self._autorender_start = ar_start_cb.isChecked()
             self._autorender_output = ar_out_edit.text().strip()
             self._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
-            self._update_share = upd_edit.text().strip()
 
             self._schedule_save()
             dlg.accept()
@@ -5401,21 +5423,35 @@ class BlenderVideoMapperQt(QMainWindow):
             self._undo_action.setEnabled(bool(self._undo_stack))
             self._undo_action.setText(f"Undo {nxt}" if nxt else "Undo")
 
-    # ── Updates (private-repo: a network share holds latest.json + zips) ──
+    # ── Updates (automatic: checks GitHub Releases with a baked-in read-only
+    #    token, so a private repo updates with zero per-machine config) ────────
+    _ASSET_FOR_PLATFORM = {
+        "macos-arm64": "RenderMapperPro-macOS-arm64.zip",
+        "macos-intel": "RenderMapperPro-macOS-intel.zip",
+        "windows-x64": "RenderMapperPro-Windows-x64.zip",
+    }
+
     def _check_for_updates(self, manual: bool = False) -> None:
-        share = (self._update_share or "").strip()
-        if not share:
+        token = _update_token()
+        if not token:
             if manual:
                 QMessageBox.information(self, "Updates",
-                    "Set an update folder first in Properties → General → Updates.")
+                    "Automatic updates aren't configured in this build "
+                    "(no update token was baked in).")
             return
 
         def work():
             info = None
             try:
-                mf = Path(share).expanduser() / "latest.json"
-                if mf.is_file():
-                    info = json.loads(mf.read_text(encoding="utf-8"))
+                import urllib.request
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                    headers={"Authorization": f"Bearer {token}",
+                             "Accept": "application/vnd.github+json",
+                             "X-GitHub-Api-Version": "2022-11-28",
+                             "User-Agent": APP_NAME})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    info = json.loads(r.read().decode("utf-8"))
             except Exception:
                 info = None
             self._update_checked.emit(info, manual)
@@ -5425,52 +5461,54 @@ class BlenderVideoMapperQt(QMainWindow):
     def _on_update_checked(self, info, manual: bool) -> None:
         if not info:
             if manual:
-                QMessageBox.information(self, "Updates", "Couldn't read the update folder.")
+                QMessageBox.information(self, "Updates", "Couldn't reach GitHub to check for updates.")
             return
-        latest = str(info.get("version", "")).strip()
-        if not latest or _version_tuple(latest) <= _version_tuple(APP_VERSION):
+        tag = str(info.get("tag_name", "")).strip()
+        if not tag or _version_tuple(tag) <= _version_tuple(APP_VERSION):
             self._sb_update.setText("")
             if manual:
                 QMessageBox.information(self, "Updates", f"You're up to date (v{APP_VERSION}).")
             return
-        self._sb_update.setText(f"● Update v{latest} available")
-        self._pending_update = info
-        self._offer_update(info, latest)
+        self._sb_update.setText(f"● Update {tag} available")
+        self._offer_update(info, tag)
 
-    def _offer_update(self, info, latest: str) -> None:
+    def _offer_update(self, info, tag: str) -> None:
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("Update Available")
-        box.setText(f"{APP_NAME} {latest} is available — you have {APP_VERSION}.")
-        if info.get("notes"):
-            box.setInformativeText(str(info["notes"]))
-        get = box.addButton("Get Update", QMessageBox.AcceptRole)
+        box.setText(f"{APP_NAME} {tag} is available — you have v{APP_VERSION}.")
+        notes = str(info.get("body") or "").strip()
+        if notes:
+            box.setInformativeText(notes[:600] + ("…" if len(notes) > 600 else ""))
+        get = box.addButton("Download Update", QMessageBox.AcceptRole)
         box.addButton("Later", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() is get:
             self._fetch_update(info)
 
     def _fetch_update(self, info) -> None:
-        key = _update_platform_key()
-        asset = (info.get("assets") or {}).get(key)
+        want = self._ASSET_FOR_PLATFORM.get(_update_platform_key())
+        asset = next((a for a in info.get("assets", []) if a.get("name") == want), None)
         if not asset:
-            QMessageBox.warning(self, "Update", f"No build for this platform ({key}) in the update folder.")
+            QMessageBox.warning(self, "Update",
+                f"This release has no build for your platform ({_update_platform_key()}).")
             return
-        src = Path(self._update_share).expanduser() / asset
-        if not src.is_file():
-            QMessageBox.warning(self, "Update", f"Update file not found on the share:\n{src}")
-            return
-        downloads = Path.home() / "Downloads"
-        dest = downloads / asset
+        token = _update_token()
+        dest = Path.home() / "Downloads" / want
         try:
-            downloads.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
+            import urllib.request
+            req = urllib.request.Request(asset["url"], headers={
+                "Authorization": f"Bearer {token}", "Accept": "application/octet-stream",
+                "User-Agent": APP_NAME})
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f)
             import zipfile
             with zipfile.ZipFile(dest) as z:
-                z.extractall(downloads)
+                z.extractall(dest.parent)
             reveal_in_file_manager(dest)
             QMessageBox.information(self, "Update Downloaded",
-                f"{asset} was copied to your Downloads and unzipped.\n\n"
+                f"{want} was downloaded to your Downloads and unzipped.\n\n"
                 f"Quit {APP_NAME} and replace it with the new build, then reopen.")
         except Exception as exc:
             QMessageBox.warning(self, "Update Failed", str(exc))
@@ -7443,7 +7481,6 @@ class BlenderVideoMapperQt(QMainWindow):
             "autorender_start": self._autorender_start,
             "autorender_output": self._autorender_output,
             "autorender_pattern": self._autorender_pattern,
-            "update_share": self._update_share,
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
@@ -7678,7 +7715,6 @@ class BlenderVideoMapperQt(QMainWindow):
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
-        self._update_share = str(d.get("update_share", "") or "")
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
