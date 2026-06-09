@@ -18,23 +18,20 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import (
+    QByteArray,
+    QEasingCurve,
+    QEvent,
+    QPropertyAnimation,
+    QSize,
     Qt,
     QThread,
     QTimer,
-    Signal,
-    QEvent,
     QUrl,
-    QByteArray,
-    QSize,
-    QPoint,
-    QRect,
-    QPropertyAnimation,
-    QEasingCurve,
+    Signal,
 )
-from PySide6.QtGui import QAction, QActionGroup, QFont, QIcon, QPixmap, QColor, QPainter, QPen, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -46,7 +43,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -69,36 +65,56 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QTextEdit,
     QToolBar,
-    QStyle,
-    QStyledItemDelegate,
-    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
 
-import theme as T
 import icons
+import theme as T
 
 try:
-    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
     from PySide6.QtMultimediaWidgets import QVideoWidget
     from PySide6.QtWidgets import QStackedWidget
     _HAS_MULTIMEDIA = True
 except Exception:
     _HAS_MULTIMEDIA = False
 
-from core.discovery import discover_scene_elements
 from core.models import (
+    VIDEO_MAPPING_MODE_EMISSION,
     JobConfig,
     MaterialVideoAssignment,
     RenderOptions,
-    VIDEO_MAPPING_MODE_EMISSION,
 )
-from core.runner import run_blender_job, submit_deadline_job
-from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand, auto_match_media_to_materials, reconcile_versions
-from core.utils import version_tuple as _version_tuple, update_platform_key as _update_platform_key
-from core.utils import subprocess_creation_flags
-
+from core.utils import (
+    IMAGE_MEDIA_EXTENSIONS,
+    OUTPUT_TOKENS,
+    VIDEO_EXTENSIONS,
+    auto_match_media_to_materials,
+    ext_for_format,
+    file_exists,
+    find_deadlinecommand,
+    reconcile_versions,
+    resolve_output_path,
+    subprocess_creation_flags,
+)
+from core.utils import update_platform_key as _update_platform_key
+from core.utils import version_tuple as _version_tuple
+from theme import LINK_COLORS, active_palette, set_active_palette
+from ui_widgets import (
+    ROLE_HAS_AUDIO,
+    ROLE_MAP_COLOR,
+    ROLE_MUTED,
+    ROLE_TARGET,
+    ROLE_VIDEO_PATH,
+    AudioBadgeDelegate,
+    MaterialListWidget,
+    ScenePathLineEdit,
+    TargetStripeDelegate,
+    VideoListWidget,
+    _ImageView,
+)
+from workers import DiscoveryThread, ExportBlendThread, PreviewFrameThread, RenderThread
 
 OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
     "H264 MP4": ("MPEG4", "H264"),
@@ -106,15 +122,6 @@ OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
     "PNG Sequence": ("PNG", "NONE"),
     "OpenEXR Sequence": ("OPEN_EXR", "NONE"),
 }
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
-IMAGE_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr", ".bmp", ".webp", ".tga", ".hdr"}
-SCENE_EXTENSIONS = {".blend", ".c4d", ".fbx", ".obj", ".glb", ".gltf", ".usd", ".usda", ".usdc", ".abc", ".stl", ".ply"}
-LINK_COLORS = [
-    "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
-    "#3498db", "#9b59b6", "#e91e63", "#00bcd4", "#8bc34a",
-]
-FRAME_RE = [re.compile(r"Fra:(\d+)"), re.compile(r"Frame\s+(\d+)", re.I)]
-DISCOVERY_TIMEOUT = 600
 PROFILE_PATH = Path.home() / ".blender_video_mapper" / "profile.json"
 PRESETS_DIR = Path.home() / ".blender_video_mapper" / "presets"
 HISTORY_PATH = Path.home() / ".blender_video_mapper" / "history.json"
@@ -124,32 +131,17 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.19"
+APP_VERSION = "1.4.20"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
 LOG_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 
-# Active palette shared across the module so panels can tint their icons at
-# build time and re-tint when the user switches theme/accent. The main window
-# overwrites this in _apply_theme before any panel is constructed.
-_ACTIVE_PALETTE: T.Palette = T.build_palette("dark", T.ACCENT_ORANGE)
-
-
-def active_palette() -> T.Palette:
-    return _ACTIVE_PALETTE
-
-
-def set_active_palette(pal: T.Palette) -> None:
-    global _ACTIVE_PALETTE
-    _ACTIVE_PALETTE = pal
-
-
 def _make_app_icon() -> QIcon:
     return icons.app_icon()
 
 
-def _norm_blender(candidate: str) -> Optional[str]:
+def _norm_blender(candidate: str) -> str | None:
     candidate = candidate.strip()
     if not candidate:
         return None
@@ -163,7 +155,7 @@ def _norm_blender(candidate: str) -> Optional[str]:
     return shutil.which(candidate)
 
 
-def _managed_blender_executable() -> Optional[str]:
+def _managed_blender_executable() -> str | None:
     current = RUNTIME_ROOT / "current"
     if not current.exists():
         return None
@@ -187,7 +179,7 @@ def _managed_blender_executable() -> Optional[str]:
     return None
 
 
-def _runtime_download_spec() -> Optional[tuple[str, str]]:
+def _runtime_download_spec() -> tuple[str, str] | None:
     v = BLENDER_RUNTIME_VERSION
     parts = v.split(".")
     release_train = ".".join(parts[:2]) if len(parts) >= 2 else v
@@ -211,7 +203,7 @@ def _runtime_download_spec() -> Optional[tuple[str, str]]:
 GITHUB_REPO = "hayhamLT/RenderMapperPro"   # for the auto-updater
 
 
-def _bundled_asset(name: str) -> Optional[Path]:
+def _bundled_asset(name: str) -> Path | None:
     """Find a file under assets/ in the source tree or a frozen bundle."""
     roots = [Path(__file__).resolve().parent]
     if getattr(sys, "frozen", False):
@@ -251,11 +243,11 @@ def _find_c4dpy() -> str:
     return sorted(cands, reverse=True)[0] if cands else ""
 
 
-def _find_blender(preferred: str = "") -> Optional[str]:
+def _find_blender(preferred: str = "") -> str | None:
     candidates: list[str] = []
     seen: set[str] = set()
 
-    def add(v: Optional[str]) -> None:
+    def add(v: str | None) -> None:
         x = (v or "").strip()
         if x and x not in seen:
             seen.add(x)
@@ -339,10 +331,10 @@ _FFMPEG_SYS_DIRS = [
     r"C:\ffmpeg\bin",
 ]
 
-_ffmpeg_tool_cache: dict[str, Optional[str]] = {}
+_ffmpeg_tool_cache: dict[str, str | None] = {}
 
 
-def find_ffmpeg_tool(name: str) -> Optional[str]:
+def find_ffmpeg_tool(name: str) -> str | None:
     """Locate an ffmpeg-family binary ('ffmpeg' or 'ffprobe').
 
     Resolution order, so the copy that ships with the app always wins:
@@ -365,7 +357,7 @@ def find_ffmpeg_tool(name: str) -> Optional[str]:
     vroot = here / "vendor" / "ffmpeg"
     candidates += [vroot / _ffmpeg_platform_dir() / exe, vroot / exe]
 
-    resolved: Optional[str] = None
+    resolved: str | None = None
     for c in candidates:
         if c.is_file():
             try:
@@ -388,7 +380,7 @@ def find_ffmpeg_tool(name: str) -> Optional[str]:
     return resolved
 
 
-def _find_ffprobe() -> Optional[str]:
+def _find_ffprobe() -> str | None:
     return find_ffmpeg_tool("ffprobe")
 
 
@@ -463,7 +455,7 @@ def video_has_audio(path: str) -> bool:
     return result
 
 
-def _parse_mp4_info(path: str) -> Optional[tuple[int, float]]:
+def _parse_mp4_info(path: str) -> tuple[int, float] | None:
     """Return (total_frames, fps) for a video file.
     Tries ffprobe first (handles all containers), falls back to hand-rolled MP4 parser.
     """
@@ -566,7 +558,7 @@ def _parse_mp4_info(path: str) -> Optional[tuple[int, float]]:
 _STANDARD_FPS = [23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0, 23.98, 24000 / 1001]
 
 
-def _normalize_fps(raw: Optional[float], default: int = 30) -> int:
+def _normalize_fps(raw: float | None, default: int = 30) -> int:
     """Return a trustworthy integer fps for the UI: snap a detected value to the
     nearest standard rate when it's close, otherwise fall back to ``default``.
 
@@ -581,17 +573,6 @@ def _normalize_fps(raw: Optional[float], default: int = 30) -> int:
     if 1 <= raw <= 120 and abs(raw - round(raw)) <= 0.05:
         return int(round(raw))
     return default
-
-
-def _extract_frame(line: str) -> Optional[int]:
-    for p in FRAME_RE:
-        m = p.search(line)
-        if m:
-            try:
-                return int(m.group(1))
-            except ValueError:
-                return None
-    return None
 
 
 def _resolve_runtime_script(name: str) -> str:
@@ -616,7 +597,7 @@ class RenderJob:
     scene_path: str = ""
     target_camera: str = ""
     output_profile: str = "H264 MP4"
-    render_options: Optional[RenderOptions] = None
+    render_options: RenderOptions | None = None
     safe_mode: bool = True
     status: str = "idle"
     error: str = ""
@@ -640,187 +621,6 @@ class RenderJob:
     deadline_whitelist: str = ""
     deadline_submit_scene: bool = True
     material_assignments: list[MaterialVideoAssignment] = field(default_factory=list)
-
-
-class DiscoveryThread(QThread):
-    discovered = Signal(list, list, dict)
-    error = Signal(str)
-    log = Signal(str)
-
-    def __init__(self, blender: str, script: str, scene: str,
-                 c4dpy: str = "", c4d_script: str = "") -> None:
-        super().__init__()
-        self.blender = blender
-        self.script = script
-        self.scene = scene
-        self.c4dpy = c4dpy
-        self.c4d_script = c4d_script
-
-    def run(self) -> None:
-        try:
-            mats, cams, settings = discover_scene_elements(
-                blender_executable=self.blender,
-                discovery_script_path=self.script,
-                scene_path=self.scene,
-                on_log=self.log.emit,
-                hard_timeout_seconds=DISCOVERY_TIMEOUT,
-                c4dpy_executable=self.c4dpy,
-                c4d_discover_script=self.c4d_script,
-            )
-            self.discovered.emit(mats, cams, settings)
-        except Exception as exc:
-            self.error.emit(str(exc))
-
-
-class RenderThread(QThread):
-    log = Signal(str)
-    job_update = Signal(int, str, float)
-    job_error = Signal(int, str)
-    all_done = Signal()
-
-    def __init__(self, blender: str, worker: str, entries: list[dict],
-                 c4dpy: str = "", c4d_worker: str = "") -> None:
-        super().__init__()
-        self.blender = blender
-        self.worker = worker
-        self.entries = entries
-        self.c4dpy = c4dpy
-        self.c4d_worker = c4d_worker
-        self._cancel = False
-        self._skip_current = False
-
-    def request_cancel(self) -> None:
-        self._cancel = True
-        self._skip_current = True
-
-    def request_skip(self) -> None:
-        """Skip only the currently running job; continue with remaining."""
-        self._skip_current = True
-
-    def run(self) -> None:
-        for entry in self.entries:
-            jid: int = entry["id"]
-            cfg: JobConfig = entry["cfg"]
-
-            if self._cancel:
-                self.job_update.emit(jid, "cancelled", 0.0)
-                continue
-
-            self.job_update.emit(jid, "running", 0.0)
-            self.log.emit(f"[app] Job {jid}: {entry.get('label', '')}")
-
-            fs, fe = cfg.render.frame_start, cfg.render.frame_end
-            span = max(1, fe - fs + 1)
-            last_error: list[str] = []
-
-            def on_log(line: str, _j: int = jid, _fs: int = fs, _span: int = span, _err: list = last_error) -> None:
-                self.log.emit(line)
-                low = line.lower()
-                if "error" in low or "traceback" in low or "not found" in low:
-                    _err.append(line.strip())
-                frame = _extract_frame(line)
-                if frame is not None:
-                    pct = max(0.0, min(100.0, ((frame - _fs) / _span) * 100.0))
-                    self.job_update.emit(_j, "running", pct)
-
-            try:
-                if getattr(cfg, "use_deadline", False):
-                    rc = submit_deadline_job(
-                        blender_executable=self.blender,
-                        worker_script_path=self.worker,
-                        job=cfg,
-                        on_log=on_log,
-                        c4dpy_executable=self.c4dpy,
-                        c4d_worker_script=self.c4d_worker,
-                    )
-                else:
-                    rc = run_blender_job(
-                        blender_executable=self.blender,
-                        worker_script_path=self.worker,
-                        job=cfg,
-                        on_log=on_log,
-                        should_cancel=lambda: self._skip_current,
-                        c4dpy_executable=self.c4dpy,
-                        c4d_worker_script=self.c4d_worker,
-                    )
-            except Exception as exc:
-                self.log.emit(f"[app] ERROR job {jid}: {exc}")
-                self.job_error.emit(jid, str(exc))
-                self.job_update.emit(jid, "failed", 0.0)
-                self._skip_current = False
-                continue
-
-            if self._cancel or self._skip_current:
-                self.job_update.emit(jid, "cancelled", 0.0)
-            elif rc == 0:
-                self.job_update.emit(jid, "success", 100.0)
-            else:
-                reason = last_error[-1] if last_error else f"Blender exited with code {rc}"
-                self.job_error.emit(jid, reason)
-                self.job_update.emit(jid, "failed", 0.0)
-            self._skip_current = self._cancel  # reset per-job flag unless full cancel
-
-        self.all_done.emit()
-
-
-class PreviewFrameThread(QThread):
-    """Renders a single frame with the current mappings to a temp PNG."""
-
-    log = Signal(str)
-    done = Signal(str, str)  # image_path, error
-
-    def __init__(self, blender: str, worker: str, job: JobConfig, out_dir: str,
-                 c4dpy: str = "", c4d_worker: str = "") -> None:
-        super().__init__()
-        self.blender = blender
-        self.worker = worker
-        self.job = job
-        self.out_dir = out_dir
-        self.c4dpy = c4dpy
-        self.c4d_worker = c4d_worker
-        self._cancel = False
-
-    def request_cancel(self) -> None:
-        self._cancel = True
-
-    def run(self) -> None:
-        try:
-            rc = run_blender_job(self.blender, self.worker, self.job, on_log=self.log.emit,
-                                 c4dpy_executable=self.c4dpy, c4d_worker_script=self.c4d_worker,
-                                 should_cancel=lambda: self._cancel)
-            import glob
-            pngs = sorted(glob.glob(os.path.join(self.out_dir, "*.png")))
-            if rc == 0 and pngs:
-                self.done.emit(pngs[-1], "")
-            else:
-                self.done.emit("", f"Preview render failed (exit {rc})")
-        except Exception as exc:
-            self.done.emit("", str(exc))
-
-
-class ExportBlendThread(QThread):
-    """Runs the worker in prepare mode to bake a standalone .blend (video mapping
-    + render settings) for a render farm, instead of rendering."""
-
-    log = Signal(str)
-    done = Signal(bool, str)  # ok, path-or-error
-
-    def __init__(self, blender: str, worker: str, job: JobConfig, out_path: str) -> None:
-        super().__init__()
-        self.blender = blender
-        self.worker = worker
-        self.job = job
-        self.out_path = out_path
-
-    def run(self) -> None:
-        try:
-            rc = run_blender_job(self.blender, self.worker, self.job, on_log=self.log.emit)
-            if rc == 0 and os.path.exists(self.out_path):
-                self.done.emit(True, self.out_path)
-            else:
-                self.done.emit(False, f"Export failed (exit {rc})")
-        except Exception as exc:
-            self.done.emit(False, str(exc))
 
 
 class RuntimeInstallThread(QThread):
@@ -959,413 +759,6 @@ class RuntimeInstallThread(QThread):
             self.finished_install.emit("", str(exc))
 
 
-# Item-data roles for the material / video lists.
-ROLE_VIDEO_PATH = Qt.UserRole          # absolute video path (existing)
-ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
-ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
-ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
-ROLE_TARGET = Qt.UserRole + 5          # bool: material is a render target
-
-_AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
-_AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
-_AUDIO_TEXT_INDENT = 17               # fixed slot reserved on every row so text always aligns
-
-
-class MappingStripeDelegate(QStyledItemDelegate):
-    """Base list delegate that draws a thin colour stripe at the left edge for
-    a mapped row (ROLE_MAP_COLOR) — it sits in the row's left margin so the
-    text never shifts and stays aligned with unmapped rows. Also washes the row
-    in accent when ``panel`` reports it as cross-highlighted (the partner of the
-    hovered/selected row in the other list)."""
-
-    _STRIPE_W = 3
-
-    def __init__(self, panel, kind: str, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._panel = panel
-        self._kind = kind  # "material" | "video"
-
-    def _item_key(self, index):
-        if self._kind == "video":
-            return index.data(ROLE_VIDEO_PATH)
-        return index.data(Qt.DisplayRole)
-
-    def _paint_cross_highlight(self, painter, option, index) -> None:
-        panel = self._panel
-        if panel is not None and panel._is_cross_highlighted(self._kind, self._item_key(index)):
-            c = QColor(active_palette().accent)
-            c.setAlpha(46)
-            painter.save()
-            painter.fillRect(option.rect, c)
-            painter.restore()
-
-    def _paint_stripe(self, painter, option, index) -> None:
-        color = index.data(ROLE_MAP_COLOR)
-        if not color:
-            return
-        r = option.rect
-        bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(color))
-        painter.drawRoundedRect(bar, 1.5, 1.5)
-        painter.restore()
-
-    def paint(self, painter, option, index) -> None:  # type: ignore[override]
-        self._paint_cross_highlight(painter, option, index)
-        super().paint(painter, option, index)
-        self._paint_stripe(painter, option, index)
-
-
-class TargetStripeDelegate(MappingStripeDelegate):
-    """Material-list delegate. The left stripe IS the render-target indicator:
-      • colourful  → a clip is linked (and the material is a render target)
-      • outline    → marked as a target, waiting for a clip
-      • ghost      → shown on hover, so clicking the stripe marks it a target
-    Clicking the left stripe zone toggles the target; right-click does too."""
-
-    _HIT_W = 16   # clickable zone on the left edge
-
-    def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
-        super().__init__(panel, "material", parent)
-        self._toggle = toggle_cb
-
-    def _paint_stripe(self, painter, option, index) -> None:
-        color = index.data(ROLE_MAP_COLOR)
-        targeted = bool(index.data(ROLE_TARGET))
-        hovered = bool(option.state & QStyle.State_MouseOver)
-        if not (color or targeted or hovered):
-            return
-        r = option.rect
-        bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
-        pal = active_palette()
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        if color:                                   # clip linked → solid colour
-            painter.setBrush(QColor(color))
-        elif targeted:                              # target, no clip yet → dim accent
-            c = QColor(pal.accent)
-            c.setAlpha(120)
-            painter.setBrush(c)
-        else:                                       # hover affordance → faint ghost
-            c = QColor(pal.text_faint)
-            c.setAlpha(80)
-            painter.setBrush(c)
-        painter.drawRoundedRect(bar, 1.5, 1.5)
-        painter.restore()
-
-    def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
-        if (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
-                and (event.position().toPoint().x() - option.rect.left()) <= self._HIT_W):
-            mat = index.data(Qt.DisplayRole)
-            if mat and self._toggle:
-                self._toggle(mat)
-            return True                             # swallow so the row isn't toggled-selected
-        return super().editorEvent(event, model, option, index)
-
-
-class AudioBadgeDelegate(MappingStripeDelegate):
-    """Video-list delegate: the mapping stripe plus a clickable speaker badge on
-    the left of any row whose clip has audio. Clicking the badge toggles that
-    clip's mute state; a muted clip shows a struck-through speaker."""
-
-    def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
-        super().__init__(panel, "video", parent)
-        self._toggle = toggle_cb
-        # Path of the row whose badge the cursor is currently over, set by the
-        # owning VideoListWidget so paint() can give it a hover affordance.
-        self._hover_badge: Optional[str] = None
-
-    @staticmethod
-    def _badge_rect(item_rect: QRect) -> QRect:
-        size = _AUDIO_BADGE_PX
-        x = item_rect.left() + _AUDIO_BADGE_MARGIN
-        y = item_rect.center().y() - size // 2 + 1
-        return QRect(x, y, size, size)
-
-    def _paint_row_background(self, painter, option) -> None:
-        """Fill the full row width with the hover / selection colour so the band
-        sits *behind* the badge slot too — the default delegate would only paint
-        from the indented text edge, leaving the badge floating outside it."""
-        st = option.state
-        pal = active_palette()
-        if st & QStyle.State_Selected:
-            color = QColor(pal.selection)
-        elif st & QStyle.State_MouseOver:
-            color = QColor(pal.surface_hover)
-        else:
-            return
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(color)
-        painter.drawRoundedRect(option.rect, T.RADIUS_SM, T.RADIUS_SM)
-        painter.restore()
-
-    def paint(self, painter, option, index) -> None:  # type: ignore[override]
-        self._paint_cross_highlight(painter, option, index)
-        # Paint the hover/selection band across the whole row first so it reads
-        # as one interactive strip (badge included), then draw the label in the
-        # indented text slot. All rows share the same indent so text aligns
-        # whether or not a badge is present.
-        self._paint_row_background(painter, option)
-        has_audio = bool(index.data(ROLE_HAS_AUDIO))
-        opt = QStyleOptionViewItem(option)
-        opt.rect = QRect(option.rect)
-        opt.rect.setLeft(opt.rect.left() + _AUDIO_TEXT_INDENT)
-        QStyledItemDelegate.paint(self, painter, opt, index)
-        self._paint_stripe(painter, option, index)
-        if has_audio:
-            muted = bool(index.data(ROLE_MUTED))
-            pal = active_palette()
-            badge_r = self._badge_rect(option.rect)
-            hovered = self._hover_badge is not None and self._hover_badge == index.data(ROLE_VIDEO_PATH)
-            if hovered:
-                # Accent-tinted chip behind the speaker so it clearly reads as a
-                # clickable toggle on hover.
-                chip = QColor(pal.accent)
-                chip.setAlpha(60)
-                painter.save()
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(chip)
-                painter.drawRoundedRect(badge_r.adjusted(-3, -2, 3, 2), 5, 5)
-                painter.restore()
-            if muted:
-                color = pal.text_muted if hovered else pal.text_faint
-            else:
-                color = pal.accent
-            pm = icons.pixmap("volume_x" if muted else "volume", color, _AUDIO_BADGE_PX)
-            painter.drawPixmap(badge_r.topLeft(), pm)
-
-    def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
-        # Intercept press/release/double-click on the badge so the click toggles
-        # mute without the list treating it as a (de)selection of the row.
-        badge_events = (
-            QEvent.MouseButtonPress,
-            QEvent.MouseButtonRelease,
-            QEvent.MouseButtonDblClick,
-        )
-        if (
-            bool(index.data(ROLE_HAS_AUDIO))
-            and event.type() in badge_events
-            and event.button() == Qt.LeftButton
-            and self._badge_rect(option.rect).contains(event.position().toPoint())
-        ):
-            if event.type() == QEvent.MouseButtonRelease:
-                path = index.data(ROLE_VIDEO_PATH)
-                if path and self._toggle:
-                    self._toggle(path)
-            return True  # swallow press/dblclick too → selection is untouched
-        return super().editorEvent(event, model, option, index)
-
-
-class _ImageView(QWidget):
-    """Paints a pixmap directly in paintEvent over an opaque background — bypasses
-    a Qt quirk where a QLabel's pixmap (or a translucent widget) can fail to
-    composite while a global stylesheet is active."""
-
-    def __init__(self, pixmap: QPixmap, bg: Optional[str] = None,
-                 parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._pm = pixmap
-        self._bg = QColor(bg) if bg else None
-        # Size to the device-independent (logical) size so a Retina/2x pixmap
-        # isn't drawn into an oversized box (which would push it off-centre).
-        self.setFixedSize(pixmap.deviceIndependentSize().toSize())
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        painter = QPainter(self)
-        if self._bg is not None:
-            painter.fillRect(self.rect(), self._bg)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        painter.drawPixmap(0, 0, self._pm)
-
-
-class VideoListWidget(QListWidget):
-    files_dropped = Signal(list)
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        # Disable Qt's own drag-drop handling so external Finder drops
-        # reach our custom event filter on the viewport instead.
-        self.setDragDropMode(QAbstractItemView.NoDragDrop)
-        self.setAcceptDrops(False)
-        self.setMouseTracking(True)
-        vp = self.viewport()
-        vp.setMouseTracking(True)
-        vp.setAcceptDrops(True)
-        vp.installEventFilter(self)
-
-    def _update_badge_hover(self, pos) -> None:
-        """Track whether the cursor is over an audio badge and tell the delegate
-        so it can paint the hover affordance; also swap to a pointing cursor."""
-        deleg = self.itemDelegate()
-        if not isinstance(deleg, AudioBadgeDelegate):
-            return
-        new_path = None
-        idx = self.indexAt(pos)
-        if idx.isValid() and bool(idx.data(ROLE_HAS_AUDIO)):
-            if AudioBadgeDelegate._badge_rect(self.visualRect(idx)).contains(pos):
-                new_path = idx.data(ROLE_VIDEO_PATH)
-        if new_path != deleg._hover_badge:
-            deleg._hover_badge = new_path
-            self.viewport().setCursor(Qt.PointingHandCursor if new_path else Qt.ArrowCursor)
-            self.viewport().update()
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        super().paintEvent(event)
-        if self.count() == 0:
-            painter = QPainter(self.viewport())
-            painter.setPen(QColor(active_palette().text_faint))
-            painter.drawText(
-                self.viewport().rect().adjusted(12, 0, -12, 0),
-                Qt.AlignCenter | Qt.TextWordWrap,
-                "Drag & drop videos or images here\n(or click Add)",
-            )
-            painter.end()
-
-    @staticmethod
-    def _paths_from_event(event) -> list[str]:
-        md = event.mimeData() if hasattr(event, "mimeData") else None
-        if not md:
-            return []
-        paths: list[str] = []
-        if md.hasUrls():
-            for u in md.urls():
-                if u.isLocalFile():
-                    p = u.toLocalFile()
-                    if p:
-                        paths.append(p)
-        if not paths and md.hasText():
-            for raw in md.text().splitlines():
-                s = raw.strip().lstrip("file://").replace("%20", " ")
-                if os.path.isabs(s):
-                    paths.append(s)
-        return paths
-
-    def eventFilter(self, watched, event):  # type: ignore[override]
-        try:
-            vp = super().viewport()
-        except Exception:
-            return super().eventFilter(watched, event)
-        if watched is vp:
-            t = event.type()
-            if t in (QEvent.DragEnter, QEvent.DragMove):
-                if self._paths_from_event(event):
-                    event.acceptProposedAction()
-                    return True
-            elif t == QEvent.Drop:
-                paths = self._paths_from_event(event)
-                if paths:
-                    self.files_dropped.emit(paths)
-                    event.acceptProposedAction()
-                    return True
-            elif t == QEvent.MouseMove:
-                self._update_badge_hover(event.position().toPoint())
-            elif t == QEvent.Leave:
-                self._update_badge_hover(QPoint(-1, -1))
-        return super().eventFilter(watched, event)
-
-
-class ScenePathLineEdit(QLineEdit):
-    file_dropped = Signal(str)
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-
-    @staticmethod
-    def _extract_scene_file_path(event) -> str:
-        md = event.mimeData()
-        if not md or not md.hasUrls():
-            return ""
-        for u in md.urls():
-            if not u.isLocalFile():
-                continue
-            p = Path(u.toLocalFile()).expanduser()
-            if p.suffix.lower() in SCENE_EXTENSIONS:
-                return str(p)
-        return ""
-
-    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        if self._extract_scene_file_path(event):
-            event.acceptProposedAction()
-            return
-        super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
-        if self._extract_scene_file_path(event):
-            event.acceptProposedAction()
-            return
-        super().dragMoveEvent(event)
-
-    def dropEvent(self, event) -> None:  # type: ignore[override]
-        path = self._extract_scene_file_path(event)
-        if path:
-            self.file_dropped.emit(path)
-            event.acceptProposedAction()
-            return
-        super().dropEvent(event)
-
-
-class MaterialListWidget(QListWidget):
-    """Materials list that also accepts a dropped scene file and shows a
-    drag-drop hint while empty."""
-
-    scene_dropped = Signal(str)
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-
-    @staticmethod
-    def _scene_path(event) -> str:
-        md = event.mimeData()
-        if not md or not md.hasUrls():
-            return ""
-        for u in md.urls():
-            if u.isLocalFile():
-                p = Path(u.toLocalFile())
-                if p.suffix.lower() in SCENE_EXTENSIONS:
-                    return str(p)
-        return ""
-
-    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        if self._scene_path(event):
-            event.acceptProposedAction()
-            return
-        super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
-        if self._scene_path(event):
-            event.acceptProposedAction()
-            return
-        super().dragMoveEvent(event)
-
-    def dropEvent(self, event) -> None:  # type: ignore[override]
-        path = self._scene_path(event)
-        if path:
-            self.scene_dropped.emit(path)
-            event.acceptProposedAction()
-            return
-        super().dropEvent(event)
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        super().paintEvent(event)
-        if self.count() == 0:
-            painter = QPainter(self.viewport())
-            painter.setPen(QColor(active_palette().text_faint))
-            painter.drawText(
-                self.viewport().rect().adjusted(12, 0, -12, 0),
-                Qt.AlignCenter | Qt.TextWordWrap,
-                "Drag & drop your scene here\n(.glb, .blend, .fbx…)",
-            )
-            painter.end()
-
-
 class ScenePanel(QWidget):
     scan_requested = Signal()
     videos_changed = Signal(list)
@@ -1381,7 +774,7 @@ class ScenePanel(QWidget):
     targets_changed = Signal(list)   # render-target materials changed (persist)
     assignments_cleared = Signal(list)  # mappings about to be cleared (for undo)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._materials: list[str] = []
         self._videos: list[str] = []
@@ -1391,8 +784,8 @@ class ScenePanel(QWidget):
         # Cross-highlight: partner rows lit up for the hovered/selected row.
         self._hl_materials: set[str] = set()
         self._hl_videos: set[str] = set()
-        self._hover_material: Optional[str] = None
-        self._hover_video: Optional[str] = None
+        self._hover_material: str | None = None
+        self._hover_video: str | None = None
         self._watch_folder: str = ""
         self._watch_seen: dict[str, float] = {}
         self._watch_sizes: dict[str, int] = {}   # last-seen size, for write-in-progress detection
@@ -2222,7 +1615,7 @@ class RenderPanel(QWidget):
     output_changed = Signal(str)
     tokens_requested = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._build_ui()
 
@@ -2283,9 +1676,9 @@ class RenderPanel(QWidget):
         for w, lbl in ((self.frame_start_edit, "Start"), (self.frame_end_edit, "End"), (self.frame_step_edit, "Step")):
             col = QVBoxLayout()
             col.setSpacing(2)
-            l = QLabel(lbl)
-            l.setObjectName("FieldLabel")
-            col.addWidget(l)
+            lab = QLabel(lbl)
+            lab.setObjectName("FieldLabel")
+            col.addWidget(lab)
             col.addWidget(w)
             fr_row.addLayout(col)
         root.addLayout(fr_row)
@@ -2365,7 +1758,7 @@ class RenderPanel(QWidget):
             col.addWidget(w)
             return col
 
-        def two_col(left: QVBoxLayout, right: Optional[QVBoxLayout] = None) -> QHBoxLayout:
+        def two_col(left: QVBoxLayout, right: QVBoxLayout | None = None) -> QHBoxLayout:
             """Two equal-width field columns; a missing right column leaves the
             left field at half width so stacked rows stay aligned."""
             row = QHBoxLayout()
@@ -2786,7 +2179,7 @@ class DeadlinePanel(QWidget):
     test_connection_requested = Signal()
     export_requested = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._build_ui()
 
@@ -2881,7 +2274,7 @@ class DeadlinePanel(QWidget):
         self.clear_all_machines_btn.setFixedSize(34, 26)
         self.clear_all_machines_btn.setIcon(icons.icon("x", _c))
         self.clear_all_machines_btn.clicked.connect(self._clear_all_machines)
-        
+
         mach_btns_layout.addWidget(self.select_all_machines_btn)
         mach_btns_layout.addWidget(self.clear_all_machines_btn)
         mach_btns_layout.addStretch()
@@ -2891,7 +2284,7 @@ class DeadlinePanel(QWidget):
         container_layout.addWidget(section("JOB CONTROLS"))
         ctrl_layout = QFormLayout()
         ctrl_layout.setSpacing(6)
-        
+
         self.dl_prio_spin = QSpinBox()
         self.dl_prio_spin.setRange(0, 100)
         self.dl_prio_spin.setValue(50)
@@ -2913,13 +2306,13 @@ class DeadlinePanel(QWidget):
         self.dl_suspended_cb.setToolTip("Submit in a suspended state for review before rendering starts")
         self.dl_suspended_cb.stateChanged.connect(self._on_changed)
         status_layout.addWidget(self.dl_suspended_cb)
-        
+
         self.dl_submit_scene_cb = QCheckBox("Submit Scene File")
         self.dl_submit_scene_cb.setChecked(True)
         self.dl_submit_scene_cb.setToolTip("Upload and submit the Blender scene (.blend) file as an auxiliary file")
         self.dl_submit_scene_cb.stateChanged.connect(self._on_changed)
         status_layout.addWidget(self.dl_submit_scene_cb)
-        
+
         container_layout.addLayout(status_layout)
 
         # (Repository Path and Diagnostics are now in Properties dialog)
@@ -2969,13 +2362,13 @@ class DeadlinePanel(QWidget):
     def set_selected_machines(self, whitelist: str) -> None:
         self.dl_machines_list.blockSignals(True)
         allowed = [x.strip() for x in whitelist.split(",") if x.strip() and x.strip().lower() not in ("true", "false")]
-        
+
         # Collect existing items
         existing = {}
         for i in range(self.dl_machines_list.count()):
             item = self.dl_machines_list.item(i)
             existing[item.text().strip()] = item
-            
+
         # If there are allowed items not in the list, add them!
         for name in allowed:
             if name not in existing:
@@ -2983,14 +2376,14 @@ class DeadlinePanel(QWidget):
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 self.dl_machines_list.addItem(item)
                 existing[name] = item
-                
+
         # Set check states
         for name, item in existing.items():
             if name in allowed:
                 item.setCheckState(Qt.Checked)
             else:
                 item.setCheckState(Qt.Unchecked)
-                
+
         self.dl_machines_list.blockSignals(False)
 
 
@@ -3011,7 +2404,7 @@ class QueuePanel(QWidget):
     open_output_requested = Signal(int)
     move_job_requested = Signal(int, int)  # job_id, delta (-1 up / +1 down)
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -3108,7 +2501,6 @@ class QueuePanel(QWidget):
         self.progress_caption.setText(caption)
 
     def set_jobs(self, jobs: list[RenderJob]) -> None:
-        from PySide6.QtGui import QColor
         pal = active_palette()
         faint = QColor(pal.text_faint)
         self.table.blockSignals(True)
@@ -3302,7 +2694,7 @@ class PresetBrowserPanel(QWidget):
     refresh_requested = Signal()
     open_folder_requested = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -3347,7 +2739,7 @@ class PresetBrowserPanel(QWidget):
             item.setData(Qt.UserRole, {"path": str(p), "name": p.stem})
             self.list.addItem(item)
 
-    def _load_current(self, _item: Optional[QListWidgetItem] = None) -> None:
+    def _load_current(self, _item: QListWidgetItem | None = None) -> None:
         entry = self._current_entry()
         if entry:
             self.load_requested.emit(entry)
@@ -3400,7 +2792,7 @@ class PresetBrowserPanel(QWidget):
         elif chosen == folder_action:
             self.open_folder_requested.emit()
 
-    def _current_entry(self) -> Optional[object]:
+    def _current_entry(self) -> object | None:
         item = self.list.currentItem()
         if not item:
             return None
@@ -3410,7 +2802,7 @@ class PresetBrowserPanel(QWidget):
 class LogsPanel(QWidget):
     copy_diag = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -3540,10 +2932,10 @@ class _PreviewImage(QLabel):
     toggles between the two; at 100% it can be grabbed and panned. Falls back to
     placeholder text when there is no image."""
 
-    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
-        self._src: Optional[QPixmap] = None
-        self._scroll: Optional[QScrollArea] = None   # set by the panel
+        self._src: QPixmap | None = None
+        self._scroll: QScrollArea | None = None   # set by the panel
         self._on_toggle = None                       # callback(QPointF) on dbl-click
         self._pannable = False
         self._panning = False
@@ -3625,7 +3017,7 @@ class PreviewPanel(QWidget):
 
     preview_frame_requested = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -3716,7 +3108,7 @@ class PreviewPanel(QWidget):
         self.frame_row_widget.setLayout(scrub)
         lay.addWidget(self.frame_row_widget)
 
-        self._pixmap: Optional[QPixmap] = None
+        self._pixmap: QPixmap | None = None
         self.image_label = _PreviewImage("No preview yet.\nStart a render with Live Preview enabled.")
         self.image_label.setObjectName("HintLabel")
         self.image_label.setToolTip("Double-click to toggle Fit ⇄ 100% · drag to pan at 100%")
@@ -3971,24 +3363,24 @@ class BlenderVideoMapperQt(QMainWindow):
         self._scan_in_progress = False
         self._known_videos: set[str] = set()
         self._ffmpeg_hint_shown = False
-        self._active_job_id: Optional[int] = None
+        self._active_job_id: int | None = None
         self._loading_job_into_ui = False
 
-        self._render_thread: Optional[RenderThread] = None
-        self._discovery_thread: Optional[DiscoveryThread] = None
-        self._runtime_install_thread: Optional[RuntimeInstallThread] = None
+        self._render_thread: RenderThread | None = None
+        self._discovery_thread: DiscoveryThread | None = None
+        self._runtime_install_thread: RuntimeInstallThread | None = None
         self._runtime_prompted = False
-        self._save_timer: Optional[QTimer] = None
+        self._save_timer: QTimer | None = None
 
         self._theme_mode = "dark"
         self._accent = T.ACCENT_ORANGE
         self._palette: T.Palette = T.build_palette(self._theme_mode, self._accent)
-        self._toast: Optional[QWidget] = None
-        self._toast_anim: Optional[QPropertyAnimation] = None
+        self._toast: QWidget | None = None
+        self._toast_anim: QPropertyAnimation | None = None
 
         self._preview_enabled = True
         self._preview_path = ""
-        self._preview_timer: Optional[QTimer] = None
+        self._preview_timer: QTimer | None = None
         self._job_started: dict[int, float] = {}
         self._render_t0 = 0.0
         self._custom_layout_state = ""
@@ -4004,7 +3396,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._autorender_start = False        # auto-start vs queue-only
         self._last_report_path = ""
         self._job_durations: dict[int, float] = {}
-        self._preview_thread: Optional[PreviewFrameThread] = None
+        self._preview_thread: PreviewFrameThread | None = None
         self._update_checked.connect(self._on_update_checked)
         self._undo_stack: list = []      # (description, restore_callable) for destructive actions
 
@@ -4265,7 +3657,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._show_help_dialog("Keyboard Shortcuts", html)
 
     @staticmethod
-    def _logo_path() -> Optional[Path]:
+    def _logo_path() -> Path | None:
         roots = [Path(__file__).resolve().parent]
         if getattr(sys, "frozen", False):
             roots.insert(0, Path(getattr(sys, "_MEIPASS", "")))
@@ -4683,7 +4075,8 @@ class BlenderVideoMapperQt(QMainWindow):
             self.tabifyDockWidget(rd, dl)
             self.tabifyDockWidget(rd, pr)
             self.tabifyDockWidget(q, pv)
-            rd.raise_(); pv.raise_()
+            rd.raise_()
+            pv.raise_()
             self.resizeDocks([sc, q], [430, 870], Qt.Horizontal)
             self.resizeDocks([q, lg], [640, 220], Qt.Vertical)
         elif preset == "setup":
@@ -4695,7 +4088,8 @@ class BlenderVideoMapperQt(QMainWindow):
             self.tabifyDockWidget(q, pr)
             self.tabifyDockWidget(q, lg)
             self.tabifyDockWidget(q, pv)
-            sc.raise_(); q.raise_()
+            sc.raise_()
+            q.raise_()
             self.resizeDocks([sc, rd], [620, 620], Qt.Horizontal)
             self.resizeDocks([sc, q], [560, 240], Qt.Vertical)
         elif preset == "tabbed":
@@ -4718,7 +4112,8 @@ class BlenderVideoMapperQt(QMainWindow):
             self.splitDockWidget(q, lg, Qt.Vertical)
             self.tabifyDockWidget(rd, dl)
             self.tabifyDockWidget(q, pv)
-            rd.raise_(); q.raise_()
+            rd.raise_()
+            q.raise_()
             self.resizeDocks([sc, rd, q], [380, 480, 620], Qt.Horizontal)
             self.resizeDocks([rd, pr], [520, 240], Qt.Vertical)
             self.resizeDocks([q, lg], [640, 200], Qt.Vertical)
@@ -4853,7 +4248,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 ".blend / FBX / USD scene instead.")
         return ""
 
-    def _ensure_blender(self, interactive: bool = False) -> Optional[str]:
+    def _ensure_blender(self, interactive: bool = False) -> str | None:
         b = _find_blender(self._blender_path)
         if b:
             self._blender_path = b
@@ -4951,7 +4346,7 @@ class BlenderVideoMapperQt(QMainWindow):
         else:
             self._append_log("[app] Deadline connection OK.")
 
-    def _show_properties_dialog(self, initial_tab: Optional[str] = None) -> None:
+    def _show_properties_dialog(self, initial_tab: str | None = None) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Properties & Settings")
         dlg.setMinimumWidth(720)
@@ -5312,7 +4707,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._deadline_command_path = cmd_edit.text().strip()
             self._deadline_job_name_template = template_edit.text().strip()
             self._deadline_comment = comment_edit.text().strip()
-            
+
             # Sync hidden widgets in panel if needed
             self.deadline_panel.dl_cmd_edit.setText(self._deadline_command_path)
             self.deadline_panel.dl_repo_edit.setText(self._deadline_repo_path)
@@ -5356,7 +4751,7 @@ class BlenderVideoMapperQt(QMainWindow):
             cmd = cmd_edit.text().strip()
             if not cmd:
                 cmd = find_deadlinecommand() or "deadlinecommand"
-            
+
             status_lbl.setText("Connection status: Testing...")
             status_lbl.setStyleSheet(f"color: {self._palette.warning}; font-size: 11px; font-weight: bold;")
             QApplication.processEvents()
@@ -6279,7 +5674,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._refresh_queue_view()
         self._schedule_save()
 
-    def _job_output_target(self, job_id: int) -> Optional[Path]:
+    def _job_output_target(self, job_id: int) -> Path | None:
         job = next((j for j in self._jobs if j.id == job_id), None)
         if not job or not (job.output_path or "").strip():
             return None
@@ -6336,7 +5731,7 @@ class BlenderVideoMapperQt(QMainWindow):
         ids = [j for j in (job_ids or []) if isinstance(j, int)]
         if not ids:
             return
-        last_new_id: Optional[int] = None
+        last_new_id: int | None = None
         # Walk a copy of the current order; insert each clone right after its source.
         for source_id in ids:
             idx = next((i for i, j in enumerate(self._jobs) if j.id == source_id), -1)
@@ -6558,7 +5953,7 @@ class BlenderVideoMapperQt(QMainWindow):
             return True
         return False
 
-    def _start_render(self, render_all: bool = False, only_job_ids: Optional[set] = None) -> None:
+    def _start_render(self, render_all: bool = False, only_job_ids: set | None = None) -> None:
         if self._is_rendering:
             return
 
@@ -7263,7 +6658,7 @@ class BlenderVideoMapperQt(QMainWindow):
             g_res = subprocess.run(g_args, capture_output=True, text=True, timeout=8)
             # Query machines
             m_res = subprocess.run(m_args, capture_output=True, text=True, timeout=8)
-            
+
             if p_res.returncode == 0:
                 pools = [line.strip() for line in p_res.stdout.splitlines() if line.strip()]
                 current_pool = self.deadline_panel.dl_pool_combo.currentText()
@@ -7277,7 +6672,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 if current_sec_pool:
                     self.deadline_panel.dl_sec_pool_combo.setCurrentText(current_sec_pool)
                 self._append_log(f"[deadline] Successfully queried {len(pools)} pools from repository.")
-            
+
             if g_res.returncode == 0:
                 groups = [line.strip() for line in g_res.stdout.splitlines() if line.strip()]
                 current_group = self.deadline_panel.dl_group_combo.currentText()
@@ -7295,7 +6690,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     item = self.deadline_panel.dl_machines_list.item(i)
                     if item.checkState() == Qt.Checked:
                         currently_checked.add(item.text().strip())
-                
+
                 self.deadline_panel.dl_machines_list.clear()
                 for m in machines:
                     item = QListWidgetItem(m)
@@ -7309,7 +6704,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     self.deadline_panel.dl_machines_list.addItem(item)
                 self.deadline_panel.dl_machines_list.blockSignals(False)
                 self._append_log(f"[deadline] Successfully queried {len(machines)} machines from repository.")
-            
+
             if p_res.returncode == 0:
                 self.deadline_panel.connection_status_lbl.setText("Connection status: Connected")
                 self.deadline_panel.connection_status_lbl.setStyleSheet(f"color: {self._palette.success}; font-size: 10px;")
@@ -7338,7 +6733,7 @@ class BlenderVideoMapperQt(QMainWindow):
         dest_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory")
         if not dest_dir:
             return
-        
+
         dest_path = Path(dest_dir)
         job_info_path = dest_path / f"deadline_job_{job.id}.job"
         plugin_info_path = dest_path / f"deadline_plugin_{job.id}.job"
@@ -7408,12 +6803,12 @@ class BlenderVideoMapperQt(QMainWindow):
                 from core.utils import ext_for_format
                 ext = ext_for_format(cfg.render.output_format)
                 is_video = ext != ""
-                
+
                 chunk_size = cfg.deadline_chunk_size
                 if is_video:
                     total_frames = max(1, cfg.render.frame_end - cfg.render.frame_start + 1)
                     chunk_size = total_frames
-                    
+
                 if chunk_size > 1:
                     f.write(f"ChunkSize={chunk_size}\n")
                 if cfg.deadline_suspended:
@@ -7518,7 +6913,7 @@ class BlenderVideoMapperQt(QMainWindow):
         p = str(entry.get("path", "")).strip()
         if not p:
             return
-        preset_dict: Optional[dict] = None
+        preset_dict: dict | None = None
         try:
             preset_dict = json.loads(Path(p).read_text())
         except Exception as exc:
@@ -7596,7 +6991,7 @@ class BlenderVideoMapperQt(QMainWindow):
         layout_state = bytes(self.saveState().toBase64()).decode("ascii")
         layout_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
 
-        def _opts_dict(opts: Optional[RenderOptions]) -> Optional[dict]:
+        def _opts_dict(opts: RenderOptions | None) -> dict | None:
             if opts is None:
                 return None
             return dataclasses.asdict(opts)
@@ -7678,7 +7073,6 @@ class BlenderVideoMapperQt(QMainWindow):
             "output_path": self.render_panel.output_edit.text().strip(),
             "engine": self.render_panel.engine_combo.currentText(),
             "output_profile": self.render_panel.profile_combo.currentText(),
-            "safe_mode": True,
             "layout_state": layout_state,
             "layout_geometry": layout_geometry,
             "queue_jobs": jobs_data,
@@ -7923,7 +7317,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     continue
                 try:
                     ro_dict = jd.get("render_options")
-                    ro: Optional[RenderOptions] = None
+                    ro: RenderOptions | None = None
                     if isinstance(ro_dict, dict):
                         ro = RenderOptions(**{k: v for k, v in ro_dict.items() if k in RenderOptions.__dataclass_fields__})
                     masn: list[MaterialVideoAssignment] = []

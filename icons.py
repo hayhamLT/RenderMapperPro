@@ -11,10 +11,9 @@ used as button labels.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QRectF, Qt, QSize
+from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-
 
 # Inner SVG body for each icon. Stroke-based unless listed in _FILLED.
 # Coordinate space is the Lucide standard 24x24 viewBox.

@@ -5,9 +5,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-# app_qt.py is the large legacy view pending an incremental split — lint the
-# UI-agnostic core, the Blender scripts, and the tests for now.
-extend-exclude = ["app_qt.py", "patch.py", "vendor", "dist", "build", ".venv"]
+# deadline/ is excluded deliberately: the plugin runs inside Deadline's own
+# (old) Python host on the farm, so py312 modernisation could break it there.
+extend-exclude = ["patch.py", "vendor", "dist", "build", ".venv", "deadline"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

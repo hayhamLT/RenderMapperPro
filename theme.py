@@ -11,8 +11,7 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-
+from dataclasses import dataclass
 
 # ── Design scales ────────────────────────────────────────────────────────────
 SP_XS = 2
@@ -170,9 +169,30 @@ def _light(accent: str) -> Palette:
 
 
 def build_palette(mode: str = "dark", accent: str | None = None) -> Palette:
-    accent = accent or ACCENTS["Blue"]
+    accent = accent or ACCENT_ORANGE
     base = _dark(accent) if mode != "light" else _light(accent)
     return base
+
+
+# ── Active palette (process-wide) ────────────────────────────────────────────
+# Widgets/delegates read the current palette via active_palette(); the main
+# window overwrites it in _apply_theme before any panel is constructed.
+_ACTIVE_PALETTE: Palette = build_palette("dark", ACCENT_ORANGE)
+
+# Distinct mapping colours for video→material links (stripes in both lists).
+LINK_COLORS = [
+    "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
+    "#3498db", "#9b59b6", "#e91e63", "#00bcd4", "#8bc34a",
+]
+
+
+def active_palette() -> Palette:
+    return _ACTIVE_PALETTE
+
+
+def set_active_palette(pal: Palette) -> None:
+    global _ACTIVE_PALETTE
+    _ACTIVE_PALETTE = pal
 
 
 # ── Stylesheet builder ───────────────────────────────────────────────────────

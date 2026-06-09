@@ -31,6 +31,12 @@ def update_platform_key() -> str:
     return "linux-x64"
 
 
+# Media / scene types the app accepts (shared by UI, watch folder, workers).
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+IMAGE_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".exr", ".bmp", ".webp", ".tga", ".hdr"}
+SCENE_EXTENSIONS = {".blend", ".c4d", ".fbx", ".obj", ".glb", ".gltf", ".usd", ".usda", ".usdc", ".abc", ".stl", ".ply"}
+
+
 def subprocess_creation_flags() -> int:
     """CREATE_NO_WINDOW on Windows so headless Blender / c4dpy / deadlinecommand
     subprocesses don't flash a console window when launched from the GUI app.
@@ -438,6 +444,5 @@ def reconcile_versions(
         if f not in videos_after:
             videos_after.append(f)
     # de-dup preserving order
-    seen: set[str] = set()
-    videos_after = [v for v in videos_after if not (v in seen or seen.add(v))]
+    videos_after = list(dict.fromkeys(videos_after))
     return videos_after, replacements, added
