@@ -254,9 +254,9 @@ def submit_deadline_job(
                     video_name=Path(job.video_path).name if job.video_path else "",
                 )
             except Exception:
-                name = f"BlenderRender Job - {scene_path.name}"
+                name = f"Render Mapper Pro Job - {scene_path.name}"
         else:
-            name = f"BlenderRender Job - {scene_path.name}"
+            name = f"Render Mapper Pro Job - {scene_path.name}"
 
         f.write(f"Name={name}\n")
         f.write("Plugin=CommandLine\n")

@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.12"
+APP_VERSION = "1.4.13"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -631,7 +631,7 @@ class RenderJob:
     deadline_department: str = ""
     deadline_chunk_size: int = 1
     deadline_suspended: bool = False
-    deadline_job_name_template: str = "BlenderRender Job - {scene_name}"
+    deadline_job_name_template: str = "Render Mapper Pro Job - {scene_name}"
     deadline_machine_limit: int = 0
     deadline_limits: str = ""
     deadline_command_path: str = ""
@@ -3954,7 +3954,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._c4dpy_path = _find_c4dpy()   # Cinema 4D headless Python, if installed
         self._deadline_repo_path = ""
         self._deadline_command_path = ""
-        self._deadline_job_name_template = "BlenderRender Job - {scene_name}"
+        self._deadline_job_name_template = "Render Mapper Pro Job - {scene_name}"
         self._deadline_comment = ""
         self._discovered_materials: list[str] = []
         self._discovered_cameras: list[str] = []
@@ -5191,7 +5191,7 @@ class BlenderVideoMapperQt(QMainWindow):
         # Name Template
         template_row = QHBoxLayout()
         template_edit = QLineEdit(self._deadline_job_name_template)
-        template_edit.setPlaceholderText("e.g. BlenderRender Job - {scene_name}")
+        template_edit.setPlaceholderText("e.g. Render Mapper Pro Job - {scene_name}")
         template_row.addWidget(QLabel("Name Template:  "))
         template_row.addWidget(template_edit, 1)
         lay.addLayout(template_row)
@@ -7288,9 +7288,9 @@ class BlenderVideoMapperQt(QMainWindow):
                     try:
                         name = name_template.format(scene_name=scene_path.name, video_name=Path(cfg.video_path).name if cfg.video_path else "")
                     except Exception:
-                        name = f"BlenderRender Job - {scene_path.name}"
+                        name = f"Render Mapper Pro Job - {scene_path.name}"
                 else:
-                    name = f"BlenderRender Job - {scene_path.name}"
+                    name = f"Render Mapper Pro Job - {scene_path.name}"
                 f.write(f"Name={name}\n")
                 f.write("Plugin=CommandLine\n")
                 f.write(f"Frames={cfg.render.frame_start}-{cfg.render.frame_end}\n")
@@ -7681,7 +7681,9 @@ class BlenderVideoMapperQt(QMainWindow):
         self.deadline_panel.dl_chunk_spin.setValue(int(d.get("deadline_chunk_size", 1)))
         self.deadline_panel.dl_suspended_cb.setChecked(bool(d.get("deadline_suspended", False)))
         self.deadline_panel.dl_submit_scene_cb.setChecked(bool(d.get("deadline_submit_scene", True)))
-        self._deadline_job_name_template = str(d.get("deadline_job_name_template", "BlenderRender Job - {scene_name}"))
+        self._deadline_job_name_template = str(d.get("deadline_job_name_template", "Render Mapper Pro Job - {scene_name}"))
+        if self._deadline_job_name_template == "BlenderRender Job - {scene_name}":   # migrate old app name
+            self._deadline_job_name_template = "Render Mapper Pro Job - {scene_name}"
         self.deadline_panel.dl_name_template_edit.setText(self._deadline_job_name_template)
         self.deadline_panel.dl_machine_limit_spin.setValue(int(d.get("deadline_machine_limit", 0)))
         self.deadline_panel.dl_limits_edit.setText(str(d.get("deadline_limits", "")))
@@ -7857,7 +7859,7 @@ class BlenderVideoMapperQt(QMainWindow):
                         deadline_chunk_size=int(jd.get("deadline_chunk_size", 1)),
                         deadline_suspended=bool(jd.get("deadline_suspended", False)),
                         deadline_submit_scene=bool(jd.get("deadline_submit_scene", True)),
-                        deadline_job_name_template=str(jd.get("deadline_job_name_template", "BlenderRender Job - {scene_name}")),
+                        deadline_job_name_template=str(jd.get("deadline_job_name_template", "Render Mapper Pro Job - {scene_name}")),
                         deadline_machine_limit=int(jd.get("deadline_machine_limit", 0)),
                         deadline_limits=str(jd.get("deadline_limits", "")),
                         deadline_command_path=str(jd.get("deadline_command_path", "")),
