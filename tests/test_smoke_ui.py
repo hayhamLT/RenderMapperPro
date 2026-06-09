@@ -21,11 +21,10 @@ def test_window_builds_and_core_wiring(tmp_path, monkeypatch):
     # Renderer-aware settings swap both ways.
     w.render_panel.set_renderer(True)
     w.render_panel.set_renderer(False)
-    # Auto-map + targets wiring.
+    # Auto-map wiring (mapping a clip implicitly targets the material).
     w.scene_panel.set_materials(["Screen", "Wall"])
     w.scene_panel.set_videos(["/x/Screen_v1.mp4"])
     assert w.scene_panel._auto_map_by_name(announce=False) == 1
-    w.scene_panel.set_targets(["Screen"])
     # Status bar + undo stack exist and update.
     w._update_status_bar()
     assert "Screen" not in w._sb_scene.text()  # no scene loaded

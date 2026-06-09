@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -927,9 +927,6 @@ ROLE_VIDEO_PATH = Qt.UserRole          # absolute video path (existing)
 ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
 ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
 ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
-ROLE_TARGET = Qt.UserRole + 5          # int: 0 none, 1 render target, 2 primary target
-_TARGET_BADGE_PX = 14
-_TARGET_SLOT = 24                      # right padding reserved for the target dot
 
 _AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
 _AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
@@ -1076,62 +1073,6 @@ class AudioBadgeDelegate(MappingStripeDelegate):
                 if path and self._toggle:
                     self._toggle(path)
             return True  # swallow press/dblclick too → selection is untouched
-        return super().editorEvent(event, model, option, index)
-
-
-class TargetBadgeDelegate(MappingStripeDelegate):
-    """Material-list delegate: the mapping stripe plus a clickable target dot at
-    the right of each row. Click toggles whether the material is a render target;
-    the primary target (drives output naming) shows an extra ring."""
-
-    def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
-        super().__init__(panel, "material", parent)
-        self._toggle = toggle_cb
-
-    @staticmethod
-    def _badge_rect(item_rect: QRect) -> QRect:
-        size = _TARGET_BADGE_PX
-        x = item_rect.right() - size - 8
-        y = item_rect.center().y() - size // 2
-        return QRect(x, y, size, size)
-
-    def paint(self, painter, option, index) -> None:  # type: ignore[override]
-        self._paint_cross_highlight(painter, option, index)
-        opt = QStyleOptionViewItem(option)
-        opt.rect = QRect(option.rect)
-        opt.rect.setRight(opt.rect.right() - _TARGET_SLOT)   # reserve room for the dot
-        QStyledItemDelegate.paint(self, painter, opt, index)
-        self._paint_stripe(painter, option, index)
-
-        state = int(index.data(ROLE_TARGET) or 0)
-        pal = active_palette()
-        r = self._badge_rect(option.rect)
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        inner = r.adjusted(2, 2, -2, -2)
-        if state == 0:
-            painter.setPen(QPen(QColor(pal.text_faint), 1.3))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(inner)
-        else:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(pal.accent))
-            painter.drawEllipse(inner)
-            if state == 2:                       # primary → outer ring
-                painter.setPen(QPen(QColor(pal.accent), 1.4))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawEllipse(r)
-        painter.restore()
-
-    def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
-        badge_events = (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick)
-        if (event.type() in badge_events and event.button() == Qt.LeftButton
-                and self._badge_rect(option.rect).contains(event.position().toPoint())):
-            if event.type() == QEvent.MouseButtonRelease:
-                mat = index.data(Qt.DisplayRole)
-                if mat and self._toggle:
-                    self._toggle(mat)
-            return True                          # swallow so the row isn't (de)selected
         return super().editorEvent(event, model, option, index)
 
 
@@ -1328,8 +1269,7 @@ class ScenePanel(QWidget):
     watch_status = Signal(str)       # log message from the watch folder
     watch_changed = Signal(str, bool)  # (folder, enabled) — for persistence
     _watch_scanned = Signal(list)    # internal: background scan results → UI thread
-    targets_changed = Signal(list)   # render-target materials changed (persist)
-    target_set_ready = Signal(list)  # all targets mapped + the set changed → auto-render
+    target_set_ready = Signal(list)  # mapped set changed + settled → auto-render
     assignments_cleared = Signal(list)  # mappings about to be cleared (for undo)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -1351,8 +1291,7 @@ class ScenePanel(QWidget):
         self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
         self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
         self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
-        self._targets: list[str] = []            # materials marked as render targets
-        self._autorender_last = None             # last complete target version-set emitted
+        self._autorender_last = None             # last mapped version-set emitted
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
@@ -1364,6 +1303,9 @@ class ScenePanel(QWidget):
         self._autorender_timer.setSingleShot(True)
         self._autorender_timer.setInterval(max(4000, 2 * self._watch_interval_ms))
         self._autorender_timer.timeout.connect(self._fire_target_set)
+        # Any mapping change (manual link, auto-map, unmap, watch ingest) re-checks
+        # the auto-render set — mapping a clip is what targets a material now.
+        self.assignments_changed.connect(lambda *_: self._check_target_set())
 
     # ── Cross-highlight between the material and video lists ──────────────
     def _is_cross_highlighted(self, kind: str, key) -> bool:
@@ -1507,8 +1449,9 @@ class ScenePanel(QWidget):
         self.mat_search.setPlaceholderText("Filter materials")
         self.mat_search.textChanged.connect(self._refresh_lists)
         self.mat_list = MaterialListWidget()
-        self.mat_list.setItemDelegate(TargetBadgeDelegate(self._toggle_target, self, self.mat_list))
-        self.mat_list.setMouseTracking(True)
+        # A mapped material shows a colour stripe — that stripe IS the "targeted"
+        # indicator (mapping a clip targets the material); unmapped rows are empty.
+        self.mat_list.setItemDelegate(MappingStripeDelegate(self, "material", self.mat_list))
         self.mat_list.setMouseTracking(True)
         self.mat_list.viewport().setMouseTracking(True)
         self.mat_list.currentItemChanged.connect(lambda *_: self._update_maplink_btn())
@@ -1516,8 +1459,6 @@ class ScenePanel(QWidget):
         self.mat_list.itemEntered.connect(self._on_mat_entered)
         self.mat_list.viewport().installEventFilter(self)
         self.mat_list.scene_dropped.connect(self._on_scene_file_dropped)
-        self.mat_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.mat_list.customContextMenuRequested.connect(self._show_material_context_menu)
         left.addWidget(self.mat_search)
         left.addWidget(self.mat_list)
 
@@ -1799,79 +1740,28 @@ class ScenePanel(QWidget):
         return len(matches)
 
     # ── Render targets (for auto-render) ─────────────────────────────────
-    def _show_material_context_menu(self, pos) -> None:
-        item = self.mat_list.itemAt(pos)
-        if item is None:
-            return
-        mat = item.text()
-        menu = QMenu(self)
-        is_target = mat in self._targets
-        act = menu.addAction("Unmark Render Target" if is_target else "Mark as Render Target")
-        act.triggered.connect(lambda: self._toggle_target(mat))
-        if is_target and len(self._targets) > 1 and self._targets[0] != mat:
-            pri = menu.addAction("Set as Primary Target")
-            pri.triggered.connect(lambda: self._set_primary_target(mat))
-        menu.exec(self.mat_list.mapToGlobal(pos))
-
-    def _set_primary_target(self, mat: str) -> None:
-        if mat in self._targets:
-            self._targets.remove(mat)
-            self._targets.insert(0, mat)        # primary = first → drives output naming
-            self._autorender_last = None
-            self._refresh_lists()
-            self.targets_changed.emit(list(self._targets))
-            self._check_target_set()
-
-    def _toggle_target(self, mat: str) -> None:
-        if mat in self._targets:
-            self._targets.remove(mat)
-        else:
-            self._targets.append(mat)
-        self._autorender_last = None     # re-evaluate against the new target set
-        self._refresh_lists()
-        self.targets_changed.emit(list(self._targets))
-        self._check_target_set()
-
-    def set_targets(self, targets: list) -> None:
-        self._targets = [str(t) for t in targets if str(t)]
-        self._autorender_last = None
-        self._refresh_lists()
-
-    def get_targets(self) -> list:
-        return list(self._targets)
-
-    def _target_version_set(self):
-        """The current (target → clip) set if every target is mapped, else None."""
-        if not self._targets:
-            return None
-        mapped = {a.material_name: a for a in self._assignments}
-        if not all(t in mapped for t in self._targets):
-            return None
-        return mapped
-
     def _check_target_set(self) -> None:
-        """When every target material is mapped, (re)start a short debounce; the
-        render is queued only once the set stops changing — so a batch of new
-        versions becomes a single render, not one per file."""
-        mapped = self._target_version_set()
-        if mapped is None:
-            self._autorender_timer.stop()       # set no longer complete
+        """Mapping a clip *is* targeting the material, so auto-render covers every
+        mapped material. When that set changes, (re)start a short debounce so a
+        batch of new clips/versions becomes a single render, not one per file."""
+        if not self._assignments:
+            self._autorender_timer.stop()       # nothing mapped → nothing to render
             return
-        version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
+        version_set = frozenset((a.material_name, a.video_path) for a in self._assignments)
         if version_set == self._autorender_last:
             return                              # already rendered this exact set
         self._autorender_timer.start()          # wait for the set to settle, then fire
 
     def _fire_target_set(self) -> None:
-        mapped = self._target_version_set()
-        if mapped is None:
+        if not self._assignments:
             return
-        version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
+        version_set = frozenset((a.material_name, a.video_path) for a in self._assignments)
         if version_set == self._autorender_last:
             return
         self._autorender_last = version_set
-        snapshot = [MaterialVideoAssignment(t, mapped[t].video_path, mapped[t].mapping_mode)
-                    for t in self._targets]
+        # Primary (first mapping) drives the output name.
+        snapshot = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode)
+                    for a in self._assignments]
         self.target_set_ready.emit(snapshot)
 
     # ── Watch folder ─────────────────────────────────────────────────────
@@ -2044,15 +1934,7 @@ class ScenePanel(QWidget):
             item = QListWidgetItem(m)
             if m in mat_to_idx:
                 item.setData(ROLE_MAP_COLOR, LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)])
-            if m in self._targets:
-                primary = self._targets and self._targets[0] == m
-                item.setData(ROLE_TARGET, 2 if primary else 1)
-                f = item.font()
-                f.setBold(True)
-                item.setFont(f)
-                item.setToolTip(f"{m}\n◉ {'Primary render target' if primary else 'Render target'}")
-            else:
-                item.setData(ROLE_TARGET, 0)
+                item.setToolTip(f"{m}\nMapped — included in renders")
             self.mat_list.addItem(item)
         if current_mat:
             for i in range(self.mat_list.count()):
@@ -4335,7 +4217,6 @@ class BlenderVideoMapperQt(QMainWindow):
                 + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
         self.scene_panel.watch_changed.connect(lambda *_: (self._save_profile(), self._update_status_bar()))
-        self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
@@ -4865,8 +4746,8 @@ class BlenderVideoMapperQt(QMainWindow):
     def _show_properties_dialog(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Properties & Settings")
-        dlg.setMinimumWidth(580)
-        dlg.setMinimumHeight(440)
+        dlg.setMinimumWidth(720)
+        dlg.setMinimumHeight(460)
         root = QVBoxLayout(dlg)
         tabs = QTabWidget()
         root.addWidget(tabs)
@@ -4896,15 +4777,45 @@ class BlenderVideoMapperQt(QMainWindow):
             except Exception:
                 pass
 
+        def hint(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+            return lbl
+
         # ── General ──────────────────────────────────────────────────────
         lay = _tab("General")
-        lay.addWidget(section_title("BLENDER"))
+        lay.addWidget(section_title("WHEN A RENDER FINISHES"))
+        behave_row = QHBoxLayout()
+        behave_row.addWidget(QLabel("Then:"))
+        when_combo = QComboBox()
+        _when_opts = [("Do nothing", "nothing"), ("Quit the app", "quit"), ("Sleep the computer", "sleep")]
+        when_combo.addItems([lbl for lbl, _ in _when_opts])
+        _vals = [v for _, v in _when_opts]
+        when_combo.setCurrentIndex(_vals.index(self._when_done) if self._when_done in _vals else 0)
+        behave_row.addWidget(when_combo)
+        behave_row.addStretch()
+        lay.addLayout(behave_row)
 
+        lay.addWidget(section_title("PREVIEW"))
+        preview_cb = QCheckBox("Show a live frame preview while rendering")
+        preview_cb.setChecked(self._preview_enabled)
+        lay.addWidget(preview_cb)
+        lay.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
+                           "Turn off for a small speed-up on heavy scenes."))
+        lay.addStretch()
+
+        # ── Render Engines ───────────────────────────────────────────────
+        lay = _tab("Render Engines")
+        lay.addWidget(hint("Scenes route to a renderer automatically by type — Blender for "
+                           ".blend / .fbx / .usd / .obj…, and Cinema 4D + Redshift for .c4d."))
+
+        lay.addWidget(section_title("BLENDER"))
         blender_row = QHBoxLayout()
         blender_edit = QLineEdit(self._blender_path)
-        blender_edit.setPlaceholderText("Blender executable path")
+        blender_edit.setPlaceholderText("Path to the Blender executable")
         blender_locate = QPushButton("Locate")
-        blender_row.addWidget(QLabel("Blender Path:   "))
+        blender_row.addWidget(QLabel("Executable:"))
         blender_row.addWidget(blender_edit, 1)
         blender_row.addWidget(blender_locate)
         lay.addLayout(blender_row)
@@ -4919,21 +4830,19 @@ class BlenderVideoMapperQt(QMainWindow):
                 if resolved:
                     blender_edit.setText(resolved)
                 else:
-                    QMessageBox.warning(dlg, "Invalid", "Could not find Blender executable there.")
+                    QMessageBox.warning(dlg, "Invalid", "Could not find a Blender executable there.")
         blender_locate.clicked.connect(do_locate_blender)
 
         detect_row = QHBoxLayout()
         detect_btn = QPushButton("Auto-detect")
-        detect_btn.setToolTip("Search common install locations for Blender")
+        detect_btn.setToolTip("Search the usual install locations for Blender")
         install_btn = QPushButton("Install Managed Blender…")
         install_btn.setToolTip(f"Download a self-contained Blender {BLENDER_RUNTIME_VERSION} runtime")
         detect_row.addWidget(detect_btn)
         detect_row.addWidget(install_btn)
         detect_row.addStretch()
         lay.addLayout(detect_row)
-        blender_ver_lbl = QLabel("")
-        blender_ver_lbl.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
-        blender_ver_lbl.setWordWrap(True)
+        blender_ver_lbl = hint("")
         lay.addWidget(blender_ver_lbl)
 
         def do_check_version() -> None:
@@ -4962,22 +4871,54 @@ class BlenderVideoMapperQt(QMainWindow):
         blender_edit.editingFinished.connect(do_check_version)
         do_check_version()
 
-        lay.addWidget(section_title("BEHAVIOUR"))
-        behave_row = QHBoxLayout()
-        behave_row.addWidget(QLabel("When render finishes:"))
-        when_combo = QComboBox()
-        _when_opts = [("Do nothing", "nothing"), ("Quit app", "quit"), ("Sleep computer", "sleep")]
-        when_combo.addItems([lbl for lbl, _ in _when_opts])
-        _vals = [v for _, v in _when_opts]
-        when_combo.setCurrentIndex(_vals.index(self._when_done) if self._when_done in _vals else 0)
-        behave_row.addWidget(when_combo)
-        behave_row.addStretch()
-        lay.addLayout(behave_row)
-        preview_cb = QCheckBox("Show a live frame preview while rendering")
-        preview_cb.setChecked(self._preview_enabled)
-        lay.addWidget(preview_cb)
+        lay.addWidget(section_title("CINEMA 4D + REDSHIFT"))
+        c4d_row = QHBoxLayout()
+        c4dpy_edit = QLineEdit(self._c4dpy_path)
+        c4dpy_edit.setPlaceholderText("Path to c4dpy (Cinema 4D's headless Python)")
+        c4d_locate = QPushButton("Locate")
+        c4d_row.addWidget(QLabel("c4dpy:"))
+        c4d_row.addWidget(c4dpy_edit, 1)
+        c4d_row.addWidget(c4d_locate)
+        lay.addLayout(c4d_row)
+        c4d_detect_row = QHBoxLayout()
+        c4d_detect_btn = QPushButton("Auto-detect")
+        c4d_detect_btn.setToolTip("Search the usual install locations for Cinema 4D's c4dpy")
+        c4d_detect_row.addWidget(c4d_detect_btn)
+        c4d_detect_row.addStretch()
+        lay.addLayout(c4d_detect_row)
+        c4d_status_lbl = hint("")
 
-        lay.addWidget(section_title("WATCH / INGEST"))
+        def _c4d_refresh() -> None:
+            p = c4dpy_edit.text().strip()
+            if p and Path(p).exists():
+                c4d_status_lbl.setText(f"✓ Cinema 4D detected — {Path(p).name}")
+            else:
+                c4d_status_lbl.setText("Not set — only needed for Cinema 4D (.c4d) scenes. Redshift renders use this.")
+
+        def do_locate_c4d() -> None:
+            chosen, _ = QFileDialog.getOpenFileName(dlg, "Select c4dpy executable", c4dpy_edit.text() or "")
+            if chosen:
+                c4dpy_edit.setText(chosen)
+                _c4d_refresh()
+
+        def do_detect_c4d() -> None:
+            found = _find_c4dpy()
+            if found:
+                c4dpy_edit.setText(found)
+            _c4d_refresh()
+
+        c4d_locate.clicked.connect(do_locate_c4d)
+        c4d_detect_btn.clicked.connect(do_detect_c4d)
+        c4dpy_edit.editingFinished.connect(_c4d_refresh)
+        lay.addWidget(c4d_status_lbl)
+        _c4d_refresh()
+        lay.addStretch()
+
+        # ── Watch & Auto-render ──────────────────────────────────────────
+        lay = _tab("Watch && Auto-render")
+        lay.addWidget(section_title("WATCH FOLDER"))
+        lay.addWidget(hint("Drop clips into a watch folder and they import + map by name "
+                           "automatically (latest version wins)."))
         _wi, _ws = self.scene_panel.get_watch_options()
         watch_row = QHBoxLayout()
         watch_interval_edit = QLineEdit(f"{_wi / 1000:g}")
@@ -4995,14 +4936,16 @@ class BlenderVideoMapperQt(QMainWindow):
         watch_row.addStretch()
         lay.addLayout(watch_row)
 
-        lay.addWidget(section_title("AUTO-RENDER (TARGETS)"))
-        ar_enable_cb = QCheckBox("Queue a multi-screen render once all target screens have clips")
+        lay.addWidget(section_title("AUTO-RENDER"))
+        ar_enable_cb = QCheckBox("Auto-render the mapped screens when their clips change")
         ar_enable_cb.setChecked(self._autorender_enabled)
-        ar_enable_cb.setToolTip("Mark materials as targets (right-click a material → Mark as Render Target). "
-                                "When the watch folder fills every target — or a newer version arrives — "
-                                "a single render covering all of them is queued.")
+        ar_enable_cb.setToolTip("Mapping a clip to a material targets it. When the mapped set is complete "
+                                "— or newer versions arrive — a single render covering every mapped screen "
+                                "is queued automatically (debounced, so a batch becomes one render).")
         lay.addWidget(ar_enable_cb)
-        ar_start_cb = QCheckBox("Start the render automatically (otherwise just queue it)")
+        lay.addWidget(hint("Mapping a clip to a material includes it — there's nothing else to mark. "
+                           "Newer versions of any mapped clip re-trigger the render."))
+        ar_start_cb = QCheckBox("Start it automatically (otherwise just add it to the queue)")
         ar_start_cb.setChecked(self._autorender_start)
         lay.addWidget(ar_start_cb)
         ar_out_row = QHBoxLayout()
@@ -5020,15 +4963,20 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.addLayout(ar_out_row)
         ar_pat_row = QHBoxLayout()
         ar_pat_edit = QLineEdit(self._autorender_pattern)
-        ar_pat_edit.setToolTip("Output filename. Tokens: {clip} (primary target's clip), {scene}, {date}.")
+        ar_pat_edit.setToolTip("Output filename. Tokens: {clip} (first mapped clip), {scene}, {date}.")
         ar_pat_row.addWidget(QLabel("Name:"))
         ar_pat_row.addWidget(ar_pat_edit, 1)
         ar_pat_hint = QLabel("tokens: {clip} {scene} {date}")
         ar_pat_hint.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
         ar_pat_row.addWidget(ar_pat_hint)
         lay.addLayout(ar_pat_row)
+        lay.addStretch()
 
-        lay.addWidget(section_title("UPDATES"))
+        # ── Updates ──────────────────────────────────────────────────────
+        lay = _tab("Updates")
+        lay.addWidget(section_title("SOFTWARE UPDATES"))
+        lay.addWidget(hint("Point at a shared folder and the app checks it on launch for newer builds, "
+                           "then fetches the right one for your platform in a click."))
         upd_row = QHBoxLayout()
         upd_edit = QLineEdit(self._update_share)
         upd_edit.setPlaceholderText("Shared folder holding latest.json + build zips (blank = off)")
@@ -5046,11 +4994,14 @@ class BlenderVideoMapperQt(QMainWindow):
         upd_row.addWidget(upd_browse)
         upd_row.addWidget(upd_check_btn)
         lay.addLayout(upd_row)
+        lay.addWidget(hint(f"This build is v{APP_VERSION}."))
         lay.addStretch()
 
         # ── Deadline ─────────────────────────────────────────────────────
         lay = _tab("Deadline")
-        lay.addWidget(section_title("DEADLINE CONFIGURATION"))
+        lay.addWidget(hint("Submit Blender and Cinema 4D jobs to a Thinkbox Deadline farm. "
+                           "Leave blank to render locally."))
+        lay.addWidget(section_title("CONFIGURATION"))
 
         # Repo Path
         repo_row = QHBoxLayout()
@@ -5116,10 +5067,17 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.addLayout(diag_btn_layout)
         lay.addStretch()
 
-        # ── Diagnostics ──────────────────────────────────────────────────
-        lay = _tab("Diagnostics")
-        lay.addWidget(section_title("ABOUT"))
-        lay.addWidget(QLabel(f"{APP_NAME}  ·  v{APP_VERSION}  ·  {platform.system()} {platform.machine()}"))
+        # ── About ────────────────────────────────────────────────────────
+        lay = _tab("About")
+        title = QLabel(APP_NAME)
+        title.setStyleSheet(f"color:{self._palette.text}; font-size:18px; font-weight:700;")
+        lay.addWidget(title)
+        lay.addWidget(hint("Map videos onto a 3D scene's screens and render them headlessly — "
+                           "Blender or Cinema 4D + Redshift, locally or on a Deadline farm."))
+        meta = QLabel(f"Version {APP_VERSION}   ·   {platform.system()} {platform.machine()}   ·   "
+                      f"Python {platform.python_version()}")
+        meta.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        lay.addWidget(meta)
 
         lay.addWidget(section_title("BUNDLED TOOLS"))
         ff_lbl = QLabel(f"ffmpeg:   {find_ffmpeg_tool('ffmpeg') or 'not found'}\n"
@@ -5157,6 +5115,7 @@ class BlenderVideoMapperQt(QMainWindow):
         # Handle Ok/Cancel
         def on_accept() -> None:
             self._blender_path = blender_edit.text().strip()
+            self._c4dpy_path = c4dpy_edit.text().strip()
             self._deadline_repo_path = repo_edit.text().strip()
             self._deadline_command_path = cmd_edit.text().strip()
             self._deadline_job_name_template = template_edit.text().strip()
@@ -7440,7 +7399,6 @@ class BlenderVideoMapperQt(QMainWindow):
             "watch_enabled": watch_enabled,
             "watch_interval_ms": watch_interval_ms,
             "watch_settle": watch_settle,
-            "render_targets": self.scene_panel.get_targets(),
             "autorender_enabled": self._autorender_enabled,
             "autorender_start": self._autorender_start,
             "autorender_output": self._autorender_output,
@@ -7450,6 +7408,7 @@ class BlenderVideoMapperQt(QMainWindow):
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
             "blender_path": self._blender_path,
+            "c4dpy_path": self._c4dpy_path,
             "scene_path": self.scene_panel.scene_edit.text().strip(),
             "camera": self.scene_panel.camera_combo.currentText(),
             "width": self.render_panel.width_edit.text().strip(),
@@ -7527,6 +7486,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 self._when_actions[label].setChecked(True)
 
         self._blender_path = d.get("blender_path", "")
+        self._c4dpy_path = d.get("c4dpy_path", "") or self._c4dpy_path   # keep auto-detected if unset
         self.scene_panel.scene_edit.setText(d.get("scene_path", ""))
 
         pools = d.get("deadline_available_pools", [])
@@ -7679,9 +7639,6 @@ class BlenderVideoMapperQt(QMainWindow):
         self._autorender_output = str(d.get("autorender_output", "") or "")
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
         self._update_share = str(d.get("update_share", "") or "")
-        tg = d.get("render_targets", [])
-        if isinstance(tg, list):
-            self.scene_panel.set_targets(tg)
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))

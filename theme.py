@@ -461,18 +461,21 @@ def stylesheet(p: Palette) -> str:
     /* ── Tabs ─────────────────────────────────────────────────────────── */
     /* The tab strip (incl. empty space beside the tabs) is the panel colour, so
        a solo tab and a multi-tab group share the same backdrop. */
-    QTabBar {{ background: {p.window}; }}
+    QTabBar {{ background: {p.window}; qproperty-drawBase: 0; }}
+    /* Always start the tabs flush at the left edge (macOS centres them natively). */
+    QTabWidget::tab-bar {{ alignment: left; left: 0px; top: 0px; }}
     /* Inactive tabs are flat and recede into the strip (panel colour). */
     QTabBar::tab {{
         background: {p.window};
         color: {p.text_muted};
-        padding: 5px 14px;
+        padding: 7px 16px;
+        min-height: 18px;
         border: 1px solid {p.border};
         border-top: 2px solid transparent;
         border-bottom: none;
         border-top-left-radius: {RADIUS}px;
         border-top-right-radius: {RADIUS}px;
-        margin-right: 2px;
+        margin: 0px 2px 0px 0px;
     }}
     /* Active tab is a raised, brighter chip marked by an accent top edge. */
     QTabBar::tab:selected {{
