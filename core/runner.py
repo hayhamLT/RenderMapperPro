@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .models import JobConfig
+from .utils import iter_process_output
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -473,49 +473,25 @@ def run_blender_job(
         )
 
         if process.stdout is not None:
-            started = time.time()
-            last_output = time.time()
-
-            while True:
-                if should_cancel and should_cancel():
-                    if on_log:
-                        on_log("[app] Cancel requested, stopping Blender process...")
-                    process.terminate()
-                    break
-
-                now = time.time()
-                if hard_timeout > 0 and (now - started) > hard_timeout:
-                    if on_log:
-                        on_log(f"[app] Hard timeout reached ({hard_timeout}s), terminating Blender process...")
-                    process.terminate()
-                    break
-
-                if idle_timeout > 0 and (now - last_output) > idle_timeout:
-                    if on_log:
-                        on_log(f"[app] Idle timeout reached ({idle_timeout}s without output), terminating Blender process...")
-                    process.terminate()
-                    break
-
-                if process.poll() is not None:
-                    break
-
-                ready, _, _ = select.select([process.stdout], [], [], 0.5)
-                if not ready:
-                    continue
-
-                line = process.stdout.readline()
-                if not line:
-                    continue
-
-                last_output = time.time()
+            def _on_timeout(kind: str, secs: float) -> None:
                 if on_log:
-                    on_log(line.rstrip())
+                    which = "Hard" if kind == "hard" else "Idle (no output)"
+                    on_log(f"[app] {which} timeout reached ({secs:g}s), terminating Blender process...")
 
-            # Drain any remaining buffered output after process exit so final
-            # Blender/worker errors are not dropped.
-            for line in process.stdout:
+            def _on_cancel() -> None:
                 if on_log:
-                    on_log(line.rstrip())
+                    on_log("[app] Cancel requested, stopping Blender process...")
+
+            for line in iter_process_output(
+                process,
+                hard_timeout=hard_timeout,
+                idle_timeout=idle_timeout,
+                should_cancel=should_cancel,
+                on_timeout=_on_timeout,
+                on_cancel=_on_cancel,
+            ):
+                if on_log:
+                    on_log(line)
 
         return process.wait()
     finally:

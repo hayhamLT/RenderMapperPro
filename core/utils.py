@@ -1,9 +1,70 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
+import threading
+import time
+from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
+
+
+def iter_process_output(
+    process,
+    *,
+    hard_timeout: float = 0,
+    idle_timeout: float = 0,
+    should_cancel: Callable[[], bool] | None = None,
+    on_timeout: Callable[[str, float], None] | None = None,
+    on_cancel: Callable[[], None] | None = None,
+) -> Iterator[str]:
+    """Yield rstrip'd stdout lines from a running subprocess, cross-platform.
+
+    Uses a background reader thread + queue instead of ``select`` — ``select``
+    only works on sockets on Windows (a pipe raises WinError 10038), so the old
+    select-based loops failed there. Honours optional hard/idle timeouts and a
+    cancel check, terminating the process when triggered, and drains buffered
+    output after the process exits so final errors are never dropped.
+    """
+    q: queue.Queue = queue.Queue()
+
+    def _reader() -> None:
+        try:
+            for line in process.stdout:
+                q.put(line)
+        except Exception:
+            pass
+        finally:
+            q.put(None)   # sentinel: stream closed
+
+    threading.Thread(target=_reader, daemon=True).start()
+    started = last = time.time()
+    while True:
+        if should_cancel and should_cancel():
+            if on_cancel:
+                on_cancel()
+            process.terminate()
+            return
+        now = time.time()
+        if hard_timeout > 0 and (now - started) > hard_timeout:
+            if on_timeout:
+                on_timeout("hard", hard_timeout)
+            process.terminate()
+            return
+        if idle_timeout > 0 and (now - last) > idle_timeout:
+            if on_timeout:
+                on_timeout("idle", idle_timeout)
+            process.terminate()
+            return
+        try:
+            item = q.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if item is None:
+            return        # process ended and its output is fully drained
+        last = time.time()
+        yield item.rstrip()
 
 # Maps Blender output_format value → file extension (empty = image sequence folder)
 OUTPUT_FORMAT_EXT: dict[str, str] = {

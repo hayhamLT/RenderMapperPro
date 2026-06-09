@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import subprocess
-import time
 from collections.abc import Callable
 from pathlib import Path
+
+from .utils import iter_process_output
 
 DISCOVERY_PREFIX = "DISCOVERY_JSON:"
 DiscoveryLogCallback = Callable[[str], None]
@@ -104,46 +104,17 @@ def discover_scene_elements(
 
     try:
         if process.stdout is not None:
-            started = time.time()
-            last_output = started
+            def _on_timeout(kind: str, secs: float) -> None:
+                if on_log:
+                    which = "hard" if kind == "hard" else "idle (no output)"
+                    on_log(f"[app] Discovery {which} timeout reached ({secs:g}s), terminating Blender process...")
 
-            while True:
-                now = time.time()
-                if hard_timeout_seconds > 0 and (now - started) > hard_timeout_seconds:
-                    if on_log:
-                        on_log(
-                            f"[app] Discovery hard timeout reached ({hard_timeout_seconds}s), terminating Blender process..."
-                        )
-                    process.terminate()
-                    break
-
-                if idle_timeout_seconds > 0 and (now - last_output) > idle_timeout_seconds:
-                    if on_log:
-                        on_log(
-                            f"[app] Discovery idle timeout reached ({idle_timeout_seconds}s without output), terminating Blender process..."
-                        )
-                    process.terminate()
-                    break
-
-                if process.poll() is not None:
-                    break
-
-                ready, _, _ = select.select([process.stdout], [], [], 0.5)
-                if not ready:
-                    continue
-
-                line = process.stdout.readline()
-                if not line:
-                    continue
-
-                stripped = line.rstrip()
-                last_output = time.time()
-                output_lines.append(stripped)
-                if on_log and not stripped.startswith(DISCOVERY_PREFIX):
-                    on_log(stripped)
-
-            for line in process.stdout:
-                stripped = line.rstrip()
+            for stripped in iter_process_output(
+                process,
+                hard_timeout=hard_timeout_seconds,
+                idle_timeout=idle_timeout_seconds,
+                on_timeout=_on_timeout,
+            ):
                 output_lines.append(stripped)
                 if on_log and not stripped.startswith(DISCOVERY_PREFIX):
                     on_log(stripped)
