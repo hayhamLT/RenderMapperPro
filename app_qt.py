@@ -122,7 +122,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -1348,6 +1348,7 @@ class ScenePanel(QWidget):
     _watch_scanned = Signal(list)    # internal: background scan results → UI thread
     targets_changed = Signal(list)   # render-target materials changed (persist)
     target_set_ready = Signal(list)  # all targets mapped + the set changed → auto-render
+    assignments_cleared = Signal(list)  # mappings about to be cleared (for undo)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1788,6 +1789,8 @@ class ScenePanel(QWidget):
     def _clear_assignments(self) -> None:
         if not self._assignments:
             return
+        self.assignments_cleared.emit(
+            [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in self._assignments])
         self._assignments = []
         self._refresh_lists()
         self.assignments_changed.emit([])
@@ -3973,6 +3976,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._preview_thread: Optional[PreviewFrameThread] = None
         self._update_share = ""          # network folder holding latest.json + zips
         self._update_checked.connect(self._on_update_checked)
+        self._undo_stack: list = []      # (description, restore_callable) for destructive actions
 
         self._apply_theme()
         self._build_menu()
@@ -3983,6 +3987,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._update_status_bar()
         # Quietly check the update share a few seconds after launch.
         QTimer.singleShot(3000, lambda: self._check_for_updates(manual=False))
+        QTimer.singleShot(300, self._maybe_first_run)   # one-time welcome on first launch
         # Size/position the window once it's shown: restore the user's last
         # adjustment if it's reasonable, otherwise default to 70% of the screen
         # centered.
@@ -4017,6 +4022,13 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
+
+        edit = mb.addMenu("Edit")
+        self._undo_action = QAction("Undo", self)
+        self._undo_action.setShortcut(QKeySequence.Undo)   # ⌘Z / Ctrl+Z
+        self._undo_action.setEnabled(False)
+        self._undo_action.triggered.connect(self._undo)
+        edit.addAction(self._undo_action)
 
         profile = mb.addMenu("Profile")
         profile.addAction("Properties…", self._show_properties_dialog)
@@ -4343,6 +4355,9 @@ class BlenderVideoMapperQt(QMainWindow):
         self.scene_panel.watch_changed.connect(lambda *_: (self._save_profile(), self._update_status_bar()))
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
+        self.scene_panel.assignments_cleared.connect(
+            lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
+                                         lambda: self.scene_panel.set_assignments(snap)))
         self.scene_panel.mute_changed.connect(self._schedule_save)
         self.scene_panel.render_requested.connect(self._start_render)
 
@@ -5383,6 +5398,28 @@ class BlenderVideoMapperQt(QMainWindow):
             watching = False
         self._sb_watch.setText("Watch: on" if watching else "")
 
+    # ── Undo for destructive actions ─────────────────────────────────────
+    def _push_undo(self, desc: str, restore) -> None:
+        self._undo_stack.append((desc, restore))
+        del self._undo_stack[:-15]   # keep the last 15
+        if hasattr(self, "_undo_action"):
+            self._undo_action.setEnabled(True)
+            self._undo_action.setText(f"Undo {desc}")
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            return
+        desc, restore = self._undo_stack.pop()
+        try:
+            restore()
+            self._append_log(f"[app] Undid: {desc}")
+        except Exception as exc:
+            self._append_log(f"[app] Undo failed: {exc}")
+        if hasattr(self, "_undo_action"):
+            nxt = self._undo_stack[-1][0] if self._undo_stack else ""
+            self._undo_action.setEnabled(bool(self._undo_stack))
+            self._undo_action.setText(f"Undo {nxt}" if nxt else "Undo")
+
     # ── Updates (private-repo: a network share holds latest.json + zips) ──
     def _check_for_updates(self, manual: bool = False) -> None:
         share = (self._update_share or "").strip()
@@ -6031,6 +6068,18 @@ class BlenderVideoMapperQt(QMainWindow):
         if not ids:
             return
 
+        import copy
+        removed = [(i, copy.deepcopy(j)) for i, j in enumerate(self._jobs) if j.id in ids]
+        prev_active = self._active_job_id
+
+        def _restore():
+            for i, j in removed:
+                self._jobs.insert(min(i, len(self._jobs)), j)
+            self._active_job_id = prev_active
+            self._refresh_queue_view()
+            self._schedule_save()
+        self._push_undo(f"Delete {len(removed)} job(s)", _restore)
+
         self._jobs = [j for j in self._jobs if j.id not in ids]
 
         if self._active_job_id in ids:
@@ -6055,6 +6104,15 @@ class BlenderVideoMapperQt(QMainWindow):
         )
         if resp != QMessageBox.Yes:
             return
+        import copy
+        snap_jobs, snap_active = copy.deepcopy(self._jobs), self._active_job_id
+
+        def _restore():
+            self._jobs = snap_jobs
+            self._active_job_id = snap_active
+            self._refresh_queue_view()
+            self._schedule_save()
+        self._push_undo(f"Clear Queue ({len(self._jobs)} jobs)", _restore)
         self._jobs = []
         self._active_job_id = None
         self._refresh_queue_view()
@@ -7757,12 +7815,39 @@ class BlenderVideoMapperQt(QMainWindow):
             self.queue_panel.select_job(self._active_job_id)
 
     def _load_profile(self) -> None:
+        self._is_first_run = not PROFILE_PATH.exists()
         if not PROFILE_PATH.exists():
             return
         try:
             self._apply_profile_data(json.loads(PROFILE_PATH.read_text()))
         except Exception:
             pass
+
+    def _maybe_first_run(self) -> None:
+        """A one-time welcome on the very first launch: show what's detected and
+        point new users at setup + Quick Start."""
+        if not getattr(self, "_is_first_run", False):
+            return
+        blender = _find_blender(self._blender_path)
+        lines = [
+            f"Blender:  {'✓ ' + Path(blender).name if blender else '✗ not found — set it in Properties'}",
+            f"Cinema 4D:  {'✓ detected' if self._c4dpy_path else '— not detected (optional)'}",
+        ]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle(f"Welcome to {APP_NAME}")
+        box.setText("You're set up to map videos onto a 3D scene and render headlessly.")
+        box.setInformativeText("\n".join(lines) + "\n\nDrop in a scene, add clips, map them, and hit render.")
+        qs = box.addButton("Open Quick Start", QMessageBox.ActionRole)
+        loc = box.addButton("Locate Blender…", QMessageBox.ActionRole) if not blender else None
+        box.addButton("Get Started", QMessageBox.AcceptRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is qs:
+            self._show_quick_start()
+        elif loc is not None and clicked is loc:
+            self._show_properties_dialog()
+        self._save_profile()   # ensure a profile exists so this won't show again
 
     def _save_profile(self) -> None:
         try:
