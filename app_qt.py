@@ -97,6 +97,7 @@ from core.models import (
 from core.runner import run_blender_job, submit_deadline_job
 from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand, auto_match_media_to_materials, reconcile_versions
 from core.utils import version_tuple as _version_tuple, update_platform_key as _update_platform_key
+from core.utils import subprocess_creation_flags
 
 
 OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
@@ -123,7 +124,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.14"
+APP_VERSION = "1.4.15"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -4914,15 +4915,35 @@ class BlenderVideoMapperQt(QMainWindow):
             return "deadlinecommand was not found."
         return ""
 
+    def _deadline_connection_ok(self, timeout: float = 8.0) -> bool:
+        """Quick farm reachability check: ask the repository for its pools."""
+        cmd = self._deadline_command_path.strip() or find_deadlinecommand() or "deadlinecommand"
+        repo = self._deadline_repo_path.strip()
+        args = ([cmd, "RunCommandForRepository", "Direct", repo, "-pools"] if repo
+                else [cmd, "-pools"])
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=timeout,
+                               creationflags=subprocess_creation_flags())
+            return r.returncode == 0
+        except Exception:
+            return False
+
     def _on_deadline_enabled_clicked(self, checked: bool) -> None:
-        """User ticked 'Enable Deadline Submission' — if it isn't configured,
-        open Properties → Deadline so they can fix it."""
+        """User ticked 'Enable Deadline Submission' — verify it's configured AND the
+        farm responds; if not, open Properties → Deadline so they can fix it."""
         if not checked:
             return
         reason = self._deadline_config_missing()
+        if not reason:
+            self._append_log("[app] Testing Deadline connection…")
+            QApplication.processEvents()
+            if not self._deadline_connection_ok():
+                reason = "Couldn't reach the Deadline repository."
         if reason:
             self._append_log(f"[app] Deadline not ready: {reason} Opening Deadline settings.")
             self._show_properties_dialog(initial_tab="Deadline")
+        else:
+            self._append_log("[app] Deadline connection OK.")
 
     def _show_properties_dialog(self, initial_tab: Optional[str] = None) -> None:
         dlg = QDialog(self)
