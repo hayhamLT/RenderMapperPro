@@ -60,6 +60,20 @@ def parse_config_path() -> Path:
     return config_path
 
 
+def _parse_task_frames():
+    """Optional 'STARTFRAME ENDFRAME' trailing args after the config path —
+    Deadline substitutes a task's chunk there. Returns (start, end) or None.
+    If the tokens weren't substituted (non-Deadline run), returns None so the
+    full configured range is used."""
+    if "--" not in sys.argv:
+        return None
+    extra = sys.argv[sys.argv.index("--") + 1:][1:]   # everything after the config path
+    nums = [a for a in extra if a.lstrip("-").isdigit()]
+    if len(nums) >= 2:
+        return int(nums[0]), int(nums[1])
+    return None
+
+
 def load_scene(scene_path: str) -> None:
     path = Path(_resolve_path(scene_path))
     ext = path.suffix.lower()
@@ -598,6 +612,16 @@ def main() -> None:
             mapping_mode=assignment.get("mapping_mode", VIDEO_MAPPING_MODE_EMISSION),
         )
     configure_render(config)
+
+    # On a Deadline farm node, Deadline substitutes the task's frame range as two
+    # trailing args (<STARTFRAME> <ENDFRAME>). The video mapping above already used
+    # the FULL range (so the clip plays over the whole timeline); here we narrow the
+    # RENDERED range to this task's chunk so nodes split the work instead of each
+    # re-rendering everything. Absent (local render / single task) → full range.
+    _chunk = _parse_task_frames()
+    if _chunk:
+        bpy.context.scene.frame_start, bpy.context.scene.frame_end = _chunk
+        log(f"Deadline task frame range: {_chunk[0]}-{_chunk[1]}")
 
     # Prepared-.blend export: the scene now has the video mapping and render
     # settings baked in, so save it as a standalone .blend that any render farm

@@ -58,4 +58,7 @@ def test_blender_deadline_still_uses_commandline(tmp_path):
     assert rc == 0
     staged = next((repo / "custom" / "blender_jobs").iterdir())
     assert "Plugin=CommandLine" in (staged / "job_info.job").read_text()
-    assert "Executable=/b/blender" in (staged / "plugin_info.job").read_text()
+    plugin_info = (staged / "plugin_info.job").read_text()
+    assert "Executable=/b/blender" in plugin_info
+    # Per-task frame range so Deadline can chunk instead of every task rendering all.
+    assert "<STARTFRAME> <ENDFRAME>" in plugin_info

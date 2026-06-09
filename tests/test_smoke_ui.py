@@ -70,7 +70,7 @@ def test_batch_output_dedup_and_autorender_defer(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
     from core.models import MaterialVideoAssignment
-    app = QApplication.instance() or QApplication([])
+    QApplication.instance() or QApplication([])
     import app_qt
     monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
     monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")

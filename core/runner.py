@@ -162,6 +162,12 @@ def submit_deadline_job(
         proc.wait()
         if not prepared.exists():
             raise RuntimeError("Cinema 4D scene bake failed — prepared .c4d was not produced.")
+        # A bake that produced no clip frames means ffmpeg extraction failed — refuse
+        # to submit a blank/unmapped render that would "succeed" on the farm.
+        seq_dir = staging_dir / "seq"
+        if job.material_assignments and not (seq_dir.is_dir() and any(seq_dir.glob("*.png"))):
+            raise RuntimeError("Cinema 4D bake produced no clip frames (ffmpeg extraction "
+                               "likely failed) — refusing to submit a blank render.")
 
         out_p = Path(job.output_path)
         if out_p.suffix:           # a movie/file path → frames next to it
@@ -317,10 +323,15 @@ def submit_deadline_job(
         # Pass the scene via -b only when we have a guaranteed absolute path.
         # The worker script also opens the scene, but Blender's -b is needed
         # to pre-load scene data before the Python script runs.
+        # Trailing <STARTFRAME>/<ENDFRAME> let Deadline give each task only its
+        # chunk; the worker narrows the rendered range to that (the clip mapping
+        # still uses the full range). For a single task they equal the full range,
+        # so non-chunked jobs render exactly as before. If a node's plugin doesn't
+        # substitute them, the worker ignores the literal tokens and renders full.
         f.write(
             f'Arguments=-b "{scene_arg}"'
             f' --python "{staged_worker}"'
-            f' -- "{staged_config}"\n'
+            f' -- "{staged_config}" <STARTFRAME> <ENDFRAME>\n'
         )
 
     # ── Submit ───────────────────────────────────────────────────────────────
