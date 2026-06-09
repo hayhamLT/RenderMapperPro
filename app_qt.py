@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.11"
+APP_VERSION = "1.4.12"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -5220,18 +5220,8 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.addLayout(diag_btn_layout)
         lay.addStretch()
 
-        # ── About ────────────────────────────────────────────────────────
-        lay = _tab("About")
-        title = QLabel(APP_NAME)
-        title.setStyleSheet(f"color:{self._palette.text}; font-size:18px; font-weight:700;")
-        lay.addWidget(title)
-        lay.addWidget(hint("Map videos onto a 3D scene's screens and render them headlessly — "
-                           "Blender or Cinema 4D + Redshift, locally or on a Deadline farm."))
-        meta = QLabel(f"Version {APP_VERSION}   ·   {platform.system()} {platform.machine()}   ·   "
-                      f"Python {platform.python_version()}")
-        meta.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
-        lay.addWidget(meta)
-
+        # ── Diagnostics ──────────────────────────────────────────────────
+        lay = _tab("Diagnostics")
         lay.addWidget(section_title("BUNDLED TOOLS"))
         ff_lbl = QLabel(f"ffmpeg:   {find_ffmpeg_tool('ffmpeg') or 'not found'}\n"
                         f"ffprobe:  {_find_ffprobe() or 'not found'}")
@@ -5260,25 +5250,6 @@ class BlenderVideoMapperQt(QMainWindow):
         diag_tools.addStretch()
         lay.addLayout(diag_tools)
         lay.addStretch()
-
-        # Powered-by branding (logo image if present in assets/, else styled text).
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet(f"color:{self._palette.border};")
-        lay.addWidget(sep)
-        powered_lbl = QLabel("Powered by")
-        powered_lbl.setStyleSheet(f"color:{self._palette.text_faint}; font-size:11px;")
-        lay.addWidget(powered_lbl)
-        _logo = self._logo_path()
-        _logo_pm = QPixmap(str(_logo)) if _logo is not None else None
-        if _logo_pm is not None and not _logo_pm.isNull():
-            scaled = _logo_pm.scaledToWidth(240, Qt.SmoothTransformation)  # 2× of 120 for Retina
-            scaled.setDevicePixelRatio(2.0)
-            lay.addWidget(_ImageView(scaled, self._palette.window), 0, Qt.AlignLeft)
-        else:
-            brand_lbl = QLabel("Toy Robot Media")
-            brand_lbl.setStyleSheet(f"color:{self._palette.text}; font-size:14px; font-weight:700;")
-            lay.addWidget(brand_lbl)
 
         # Dialog buttons live below the tabs.
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
