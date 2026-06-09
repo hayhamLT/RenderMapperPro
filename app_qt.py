@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.13"
+APP_VERSION = "1.4.14"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -4414,6 +4414,9 @@ class BlenderVideoMapperQt(QMainWindow):
 
         self.deadline_panel.settings_changed.connect(lambda: self._on_settings_changed())
         self.deadline_panel.test_connection_requested.connect(self._test_deadline_connection)
+        # When the user ticks "Enable Deadline Submission" but it isn't configured,
+        # jump them straight to the Deadline settings to fix it (clicked = user only).
+        self.deadline_panel.use_dl_cb.clicked.connect(self._on_deadline_enabled_clicked)
         self.deadline_panel.export_requested.connect(self._export_deadline_files)
 
         self.render_panel.profile_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
@@ -4902,7 +4905,26 @@ class BlenderVideoMapperQt(QMainWindow):
         self._update_health()
         self._show_toast("Managed Blender runtime is ready", "success")
 
-    def _show_properties_dialog(self) -> None:
+    def _deadline_config_missing(self) -> str:
+        """Return a short reason the Deadline config is unusable, or '' if it's fine."""
+        if not self._deadline_repo_path.strip():
+            return "No Deadline repository path is set."
+        cmd = self._deadline_command_path.strip() or find_deadlinecommand()
+        if not cmd or not (Path(cmd).exists() or shutil.which(cmd)):
+            return "deadlinecommand was not found."
+        return ""
+
+    def _on_deadline_enabled_clicked(self, checked: bool) -> None:
+        """User ticked 'Enable Deadline Submission' — if it isn't configured,
+        open Properties → Deadline so they can fix it."""
+        if not checked:
+            return
+        reason = self._deadline_config_missing()
+        if reason:
+            self._append_log(f"[app] Deadline not ready: {reason} Opening Deadline settings.")
+            self._show_properties_dialog(initial_tab="Deadline")
+
+    def _show_properties_dialog(self, initial_tab: Optional[str] = None) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Properties & Settings")
         dlg.setMinimumWidth(720)
@@ -5296,7 +5318,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._autorender_output = ar_out_edit.text().strip()
             self._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
 
-            self._schedule_save()
+            self._save_profile()    # persist immediately so settings survive a quick quit
             dlg.accept()
 
         btns.accepted.connect(on_accept)
@@ -5389,6 +5411,12 @@ class BlenderVideoMapperQt(QMainWindow):
 
         test_conn_btn.clicked.connect(run_test_connection)
         export_files_btn.clicked.connect(self._export_deadline_files)
+
+        if initial_tab:
+            for i in range(tabs.count()):
+                if tabs.tabText(i) == initial_tab:
+                    tabs.setCurrentIndex(i)
+                    break
 
         dlg.exec()
 
