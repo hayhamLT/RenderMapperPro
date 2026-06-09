@@ -122,7 +122,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -3954,8 +3954,10 @@ class BlenderVideoMapperQt(QMainWindow):
         self._apply_theme()
         self._build_menu()
         self._build_layout()
+        self._build_status_bar()
         self._load_profile()
         self._update_health()
+        self._update_status_bar()
         # Size/position the window once it's shown: restore the user's last
         # adjustment if it's reasonable, otherwise default to 70% of the screen
         # centered.
@@ -4312,7 +4314,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 f"[app] Auto-mapped {n} of {total} materials by name"
                 + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
-        self.scene_panel.watch_changed.connect(lambda *_: self._save_profile())
+        self.scene_panel.watch_changed.connect(lambda *_: (self._save_profile(), self._update_status_bar()))
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
         self.scene_panel.mute_changed.connect(self._schedule_save)
@@ -5296,6 +5298,42 @@ class BlenderVideoMapperQt(QMainWindow):
         self._discovery_thread.finished.connect(self._on_discovery_done)
         self._discovery_thread.start()
 
+    def _build_status_bar(self) -> None:
+        """A bottom status bar summarising scene / renderer / mappings / queue /
+        watch state at a glance, plus the version."""
+        from PySide6.QtWidgets import QStatusBar
+        sb = QStatusBar()
+        sb.setSizeGripEnabled(False)
+        self.setStatusBar(sb)
+        self._sb_scene = QLabel("")
+        self._sb_renderer = QLabel("")
+        self._sb_map = QLabel("")
+        self._sb_queue = QLabel("")
+        self._sb_watch = QLabel("")
+        muted = self._palette.text_muted
+        for w in (self._sb_scene, self._sb_renderer, self._sb_map, self._sb_queue, self._sb_watch):
+            w.setStyleSheet(f"color:{muted}; padding:0 10px;")
+            sb.addWidget(w)
+        spacer = QLabel("")
+        sb.addWidget(spacer, 1)
+        ver = QLabel(f"v{APP_VERSION}")
+        ver.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 10px;")
+        sb.addPermanentWidget(ver)
+
+    def _update_status_bar(self) -> None:
+        if not hasattr(self, "_sb_scene"):
+            return
+        scene = self.scene_panel.scene_edit.text().strip()
+        self._sb_scene.setText(f"Scene: {Path(scene).name if scene else '—'}")
+        self._sb_renderer.setText(f"Renderer: {self.render_panel.engine_combo.currentText() or '—'}")
+        self._sb_map.setText(f"Mapped: {len(self.scene_panel.get_assignments())}")
+        self._sb_queue.setText(f"Queue: {len(self._jobs)}")
+        try:
+            _f, watching = self.scene_panel.get_watch_folder()
+        except Exception:
+            watching = False
+        self._sb_watch.setText("Watch: on" if watching else "")
+
     def _set_renderer_options(self, is_c4d: bool, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
         loaded scene: Cinema 4D renderers for a .c4d, Blender engines otherwise."""
@@ -5718,6 +5756,7 @@ class BlenderVideoMapperQt(QMainWindow):
         if self._active_job_id is not None:
             self.queue_panel.select_job(self._active_job_id)
         self._update_health()
+        self._update_status_bar()
 
     def _unsaved_floating_changes(self) -> bool:
         """True when the UI holds a mapped setup that isn't backed by any queued
@@ -5818,6 +5857,7 @@ class BlenderVideoMapperQt(QMainWindow):
         # Auto-preview works off the live UI, so trigger it regardless of whether
         # there's an active queue job (a camera/resolution change should refresh
         # the preview even before anything is queued).
+        self._update_status_bar()
         self._request_auto_preview()
         if self._loading_job_into_ui or self._active_job_id is None:
             return
@@ -7660,6 +7700,55 @@ def _set_macos_app_name(name: str) -> None:
         pass
 
 
+def _install_crash_handler(window) -> None:
+    """Catch unhandled exceptions on the UI thread: log the traceback and show a
+    friendly, copyable dialog instead of a silent failure or a hard crash."""
+    import traceback as _tb
+    default_hook = sys.excepthook
+    showing = {"active": False}   # guard against recursive dialogs
+
+    def _hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            default_hook(exc_type, exc, tb)
+            return
+        text = "".join(_tb.format_exception(exc_type, exc, tb))
+        try:
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with LOG_PATH.open("a", encoding="utf-8") as f:
+                f.write(f"\n[{datetime.now().isoformat()}] UNHANDLED EXCEPTION\n{text}\n")
+        except Exception:
+            pass
+        if showing["active"]:
+            return
+        showing["active"] = True
+        try:
+            box = QMessageBox(window)
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle(f"{APP_NAME} — Unexpected Error")
+            box.setText("Something went wrong. The app will keep running, but the last "
+                        "action may not have completed.")
+            box.setInformativeText(f"{exc_type.__name__}: {exc}")
+            box.setDetailedText(text)
+            copy_btn = box.addButton("Copy Details", QMessageBox.ActionRole)
+            log_btn = box.addButton("Open Log", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Close)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is copy_btn:
+                QApplication.clipboard().setText(text)
+            elif clicked is log_btn:
+                try:
+                    reveal_in_file_manager(LOG_PATH)
+                except Exception:
+                    pass
+        except Exception:
+            default_hook(exc_type, exc, tb)
+        finally:
+            showing["active"] = False
+
+    sys.excepthook = _hook
+
+
 def run_qt_app() -> None:
     _set_macos_app_name(APP_NAME)
     app = QApplication.instance()
@@ -7693,6 +7782,7 @@ def run_qt_app() -> None:
 
     win = BlenderVideoMapperQt()
     win._single_instance_server = server  # keep a reference alive
+    _install_crash_handler(win)  # friendly dialog + log on any unhandled UI-thread error
     win._init_window_geometry()  # place/size before first show to avoid an off-screen flash
 
     def _on_second_launch() -> None:
