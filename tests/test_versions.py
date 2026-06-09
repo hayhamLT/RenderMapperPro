@@ -41,3 +41,16 @@ def test_reconcile_no_change_when_already_latest():
     assert replacements == {}
     assert added == []
     assert videos == ["/v/Screen_v2.mp4"]
+
+
+def test_version_tuple_numeric_compare():
+    from core.utils import version_tuple
+    assert version_tuple("1.4.10") > version_tuple("1.4.3")   # not a string compare
+    assert version_tuple("v2.0.0") > version_tuple("1.9.9")
+    assert version_tuple("1.4.5") == version_tuple("1.4.5")
+    assert version_tuple("1.4") < version_tuple("1.4.1")
+
+
+def test_update_platform_key_is_known():
+    from core.utils import update_platform_key
+    assert update_platform_key() in {"macos-arm64", "macos-intel", "windows-x64", "linux-x64"}

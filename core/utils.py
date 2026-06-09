@@ -1,13 +1,34 @@
 from __future__ import annotations
 
 import os
+import platform
 import queue
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
+
+
+def version_tuple(v: str) -> tuple:
+    """Parse '1.4.10' → (1, 4, 10) for numeric comparison; non-numeric parts → 0."""
+    out = []
+    for part in str(v).strip().lstrip("v").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out) or (0,)
+
+
+def update_platform_key() -> str:
+    """Key identifying this build's platform in the update manifest (latest.json)."""
+    if sys.platform == "darwin":
+        m = platform.machine().lower()
+        return "macos-arm64" if ("arm" in m or "aarch64" in m) else "macos-intel"
+    if os.name == "nt":
+        return "windows-x64"
+    return "linux-x64"
 
 
 def subprocess_creation_flags() -> int:

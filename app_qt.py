@@ -96,6 +96,7 @@ from core.models import (
 )
 from core.runner import run_blender_job, submit_deadline_job
 from core.utils import file_exists, resolve_output_path, ext_for_format, OUTPUT_TOKENS, find_deadlinecommand, auto_match_media_to_materials, reconcile_versions
+from core.utils import version_tuple as _version_tuple, update_platform_key as _update_platform_key
 
 
 OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
@@ -204,25 +205,6 @@ def _runtime_download_spec() -> Optional[tuple[str, str]]:
         name = f"blender-{v}-linux-{arch}.tar.xz"
         return f"{base}-linux-{arch}.tar.xz", name
     return None
-
-
-def _version_tuple(v: str) -> tuple:
-    """Parse '1.4.10' → (1, 4, 10) for comparison; non-numeric parts → 0."""
-    out = []
-    for part in str(v).strip().lstrip("v").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        out.append(int(digits) if digits else 0)
-    return tuple(out) or (0,)
-
-
-def _update_platform_key() -> str:
-    """Key identifying this build's platform in the update manifest (latest.json)."""
-    if sys.platform == "darwin":
-        m = platform.machine().lower()
-        return "macos-arm64" if ("arm" in m or "aarch64" in m) else "macos-intel"
-    if os.name == "nt":
-        return "windows-x64"
-    return "linux-x64"
 
 
 def _find_c4dpy() -> str:
