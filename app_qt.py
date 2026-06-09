@@ -122,7 +122,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -233,11 +233,26 @@ def _find_blender(preferred: str = "") -> Optional[str]:
     add(os.environ.get("BLENDER_PATH"))
     add(shutil.which("blender"))
     add("blender")
-    for root in (Path("/Applications"), Path.home() / "Applications"):
-        if root.exists():
-            for bundle in sorted(root.glob("Blender*.app"), reverse=True):
-                add(str(bundle))
-                add(str(bundle / "Contents/MacOS/Blender"))
+    if sys.platform == "darwin":
+        for root in (Path("/Applications"), Path.home() / "Applications"):
+            if root.exists():
+                for bundle in sorted(root.glob("Blender*.app"), reverse=True):
+                    add(str(bundle))
+                    add(str(bundle / "Contents/MacOS/Blender"))
+    elif os.name == "nt":
+        import glob as _glob
+        for pat in (r"C:\Program Files\Blender Foundation\Blender *\blender.exe",
+                    r"C:\Program Files\Blender Foundation\*\blender.exe",
+                    r"C:\Program Files\Blender Foundation\blender.exe",
+                    r"C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe"):
+            for hit in sorted(_glob.glob(pat), reverse=True):
+                add(hit)
+    else:  # linux
+        import glob as _glob
+        for p in ("/usr/bin/blender", "/usr/local/bin/blender", "/snap/bin/blender"):
+            add(p)
+        for hit in sorted(_glob.glob("/opt/blender*/blender"), reverse=True):
+            add(hit)
 
     for c in candidates:
         r = _norm_blender(c)
@@ -3385,7 +3400,11 @@ class LogsPanel(QWidget):
 
         self.text = QTextEdit()
         self.text.setReadOnly(True)
-        self.text.setFont(QFont("Menlo", 10))
+        _mono = QFont()
+        _mono.setFamilies(["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New"])
+        _mono.setStyleHint(QFont.Monospace)   # guaranteed monospace fallback on any OS
+        _mono.setPointSize(10)
+        self.text.setFont(_mono)
         lay.addWidget(self.text)
 
         self.restyle(active_palette())

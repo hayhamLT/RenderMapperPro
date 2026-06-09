@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from .utils import iter_process_output
+from .utils import iter_process_output, subprocess_creation_flags
 
 DISCOVERY_PREFIX = "DISCOVERY_JSON:"
 DiscoveryLogCallback = Callable[[str], None]
@@ -40,6 +40,7 @@ def _run_c4d_discovery(c4dpy_executable, discover_script, scene, on_log):
     process = subprocess.Popen(
         [c4dpy, str(script), str(scene)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, bufsize=1,
+        creationflags=subprocess_creation_flags(),
     )
     output_lines: list[str] = []
     if process.stdin:
@@ -100,6 +101,7 @@ def discover_scene_elements(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        creationflags=subprocess_creation_flags(),
     )
 
     try:

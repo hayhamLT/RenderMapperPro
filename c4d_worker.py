@@ -20,6 +20,7 @@ import c4d
 import maxon
 from c4d import documents
 
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW: no ffmpeg console flash on Windows
 RS_SPACE = "com.redshift3d.redshift4c4d.class.nodespace"
 STD = "com.redshift3d.redshift4c4d.nodes.core.standardmaterial"
 TEX = "com.redshift3d.redshift4c4d.nodes.core.texturesampler"
@@ -273,7 +274,7 @@ def _mux_movie(ffmpeg: str, frames_dir: str, fps: int, out_file: str,
                 "-crf", crf.get(str(quality).upper(), "18"), "-pix_fmt", "yuv420p"]
     cmd += [out_file]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, creationflags=_NO_WINDOW)
         ok = os.path.exists(out_file) and os.path.getsize(out_file) > 0
         if not ok:
             log(f"  ffmpeg mux failed: {r.stderr.strip()[-400:]}")
@@ -288,7 +289,7 @@ def _extract_frame(ffmpeg: str, video: str, frame: int, fps: int, out_png: str) 
     t = max(0, frame - 1) / float(fps or 30)
     cmd = [ffmpeg, "-y", "-ss", f"{t:.4f}", "-i", video, "-frames:v", "1", out_png]
     try:
-        subprocess.run(cmd, capture_output=True, timeout=60)
+        subprocess.run(cmd, capture_output=True, timeout=60, creationflags=_NO_WINDOW)
         return os.path.exists(out_png) and os.path.getsize(out_png) > 0
     except Exception as exc:
         log(f"  ffmpeg extract failed: {exc}")

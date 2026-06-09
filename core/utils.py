@@ -10,6 +10,15 @@ from datetime import date
 from pathlib import Path
 
 
+def subprocess_creation_flags() -> int:
+    """CREATE_NO_WINDOW on Windows so headless Blender / c4dpy / deadlinecommand
+    subprocesses don't flash a console window when launched from the GUI app.
+    Zero (no-op) on macOS/Linux."""
+    if os.name == "nt":
+        return 0x08000000  # subprocess.CREATE_NO_WINDOW
+    return 0
+
+
 def iter_process_output(
     process,
     *,

@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .models import JobConfig
-from .utils import iter_process_output
+from .utils import iter_process_output, subprocess_creation_flags
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -61,7 +61,8 @@ def _submit_deadline_files(job, job_info_path, plugin_info_path, on_log) -> int:
         cmd = [deadline_cmd, str(job_info_path), str(plugin_info_path)]
     if on_log:
         on_log("[deadline] Command: " + " ".join(cmd))
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                               creationflags=subprocess_creation_flags())
     if process.stdout is not None:
         for line in process.stdout:
             if on_log:
@@ -148,7 +149,8 @@ def submit_deadline_job(
             on_log("[deadline] Baking Cinema 4D scene for the farm (extracting clip frames)…")
         proc = subprocess.Popen([c4dpy_path, str(worker_path), str(prep_cfg_path)],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                creationflags=subprocess_creation_flags())
         if proc.stdin:
             proc.stdin.write(C4D_LICENSE_INPUT)
             proc.stdin.flush()
@@ -345,6 +347,7 @@ def submit_deadline_job(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            creationflags=subprocess_creation_flags(),
         )
         if process.stdout is not None:
             for line in process.stdout:
@@ -398,6 +401,7 @@ def run_c4d_job(
     process = subprocess.Popen(
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, bufsize=1,
+        creationflags=subprocess_creation_flags(),
     )
     try:
         if process.stdin:
@@ -470,6 +474,7 @@ def run_blender_job(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            creationflags=subprocess_creation_flags(),
         )
 
         if process.stdout is not None:

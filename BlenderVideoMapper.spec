@@ -4,7 +4,7 @@ import platform
 import sys
 
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 
 def _ffmpeg_binaries():
