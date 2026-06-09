@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.7"
+APP_VERSION = "1.4.8"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -1086,7 +1086,9 @@ class _ImageView(QWidget):
         super().__init__(parent)
         self._pm = pixmap
         self._bg = QColor(bg) if bg else None
-        self.setFixedSize(pixmap.size())
+        # Size to the device-independent (logical) size so a Retina/2x pixmap
+        # isn't drawn into an oversized box (which would push it off-centre).
+        self.setFixedSize(pixmap.deviceIndependentSize().toSize())
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         painter = QPainter(self)
@@ -4168,8 +4170,9 @@ class BlenderVideoMapperQt(QMainWindow):
         if logo is not None:
             pm = QPixmap(str(logo))
             if not pm.isNull():
-                lay.addWidget(_ImageView(pm.scaledToWidth(200, Qt.SmoothTransformation), pal.window),
-                              0, Qt.AlignHCenter)
+                scaled = pm.scaledToWidth(260, Qt.SmoothTransformation)  # 2× of 130 for Retina
+                scaled.setDevicePixelRatio(2.0)
+                lay.addWidget(_ImageView(scaled, pal.window), 0, Qt.AlignHCenter)
             else:
                 logo = None
         if logo is None:
@@ -5137,7 +5140,8 @@ class BlenderVideoMapperQt(QMainWindow):
         _logo = self._logo_path()
         _logo_pm = QPixmap(str(_logo)) if _logo is not None else None
         if _logo_pm is not None and not _logo_pm.isNull():
-            scaled = _logo_pm.scaledToWidth(170, Qt.SmoothTransformation)
+            scaled = _logo_pm.scaledToWidth(240, Qt.SmoothTransformation)  # 2× of 120 for Retina
+            scaled.setDevicePixelRatio(2.0)
             lay.addWidget(_ImageView(scaled, self._palette.window), 0, Qt.AlignLeft)
         else:
             brand_lbl = QLabel("Toy Robot Media")
