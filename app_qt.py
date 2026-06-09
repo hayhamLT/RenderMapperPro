@@ -124,7 +124,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.15"
+APP_VERSION = "1.4.16"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -4413,7 +4413,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self.render_panel.rs_ray_depth_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_gi_cb.toggled.connect(lambda _v: self._on_settings_changed())
 
-        self.deadline_panel.settings_changed.connect(lambda: self._on_settings_changed())
+        self.deadline_panel.settings_changed.connect(lambda: self._on_settings_changed(preview=False))
         self.deadline_panel.test_connection_requested.connect(self._test_deadline_connection)
         # When the user ticks "Enable Deadline Submission" but it isn't configured,
         # jump them straight to the Deadline settings to fix it (clicked = user only).
@@ -6161,12 +6161,15 @@ class BlenderVideoMapperQt(QMainWindow):
         finally:
             self._loading_job_into_ui = False
 
-    def _on_settings_changed(self) -> None:
+    def _on_settings_changed(self, preview: bool = True) -> None:
         # Auto-preview works off the live UI, so trigger it regardless of whether
         # there's an active queue job (a camera/resolution change should refresh
-        # the preview even before anything is queued).
+        # the preview even before anything is queued). Farm-only settings (Deadline
+        # pool/group/etc.) pass preview=False — they don't change the rendered frame,
+        # so they must NOT spin up a Blender preview render.
         self._update_status_bar()
-        self._request_auto_preview()
+        if preview:
+            self._request_auto_preview()
         if self._loading_job_into_ui or self._active_job_id is None:
             return
         job = next((j for j in self._jobs if j.id == self._active_job_id), None)
