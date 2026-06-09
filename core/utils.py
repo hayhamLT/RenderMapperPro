@@ -446,3 +446,12 @@ def reconcile_versions(
     # de-dup preserving order
     videos_after = list(dict.fromkeys(videos_after))
     return videos_after, replacements, added
+
+
+# Output profile → (blender output_format, codec)
+OUTPUT_PROFILES: dict[str, tuple[str, str]] = {
+    "H264 MP4": ("MPEG4", "H264"),
+    "ProRes MOV": ("QUICKTIME", "PRORES"),
+    "PNG Sequence": ("PNG", "NONE"),
+    "OpenEXR Sequence": ("OPEN_EXR", "NONE"),
+}

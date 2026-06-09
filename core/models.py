@@ -93,3 +93,40 @@ class JobConfig:
                 )
             ]
         return data
+
+
+@dataclass
+class RenderJob:
+    id: int
+    video_path: str = ""
+    label: str = ""
+    custom_label: bool = False   # True once the user renames the job by hand
+    output_path: str = ""
+    output_input: str = ""
+    scene_path: str = ""
+    target_camera: str = ""
+    output_profile: str = "H264 MP4"
+    render_options: RenderOptions | None = None
+    safe_mode: bool = True
+    status: str = "idle"
+    error: str = ""
+    attempts: int = 0
+    progress: float = 0.0
+    selected: bool = True
+    use_deadline: bool = False
+    deadline_pool: str = ""
+    deadline_secondary_pool: str = ""
+    deadline_group: str = ""
+    deadline_priority: int = 50
+    deadline_comment: str = ""
+    deadline_department: str = ""
+    deadline_chunk_size: int = 1
+    deadline_suspended: bool = False
+    deadline_job_name_template: str = "Render Mapper Pro Job - {scene_name}"
+    deadline_machine_limit: int = 0
+    deadline_limits: str = ""
+    deadline_command_path: str = ""
+    deadline_repo_path: str = ""
+    deadline_whitelist: str = ""
+    deadline_submit_scene: bool = True
+    material_assignments: list[MaterialVideoAssignment] = field(default_factory=list)
