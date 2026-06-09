@@ -62,3 +62,37 @@ def test_watch_folder_scan_actually_runs(tmp_path, monkeypatch):
     assert "listing" in got, "watch scan never emitted — thread not started"
     assert any(p.endswith("Screen_v1.mp4") for p, _s, _m in got["listing"])
     assert sp._watch_scanning is False               # flag reset by _apply_watch_scan
+
+
+def test_batch_output_dedup_and_autorender_defer(tmp_path, monkeypatch):
+    """Two queued jobs with identical output paths must be de-duped (no silent
+    overwrite), and an auto-render firing mid-render must be deferred, not dropped."""
+    from PySide6.QtWidgets import QApplication
+
+    from core.models import MaterialVideoAssignment
+    app = QApplication.instance() or QApplication([])
+    import app_qt
+    monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
+    monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")
+    monkeypatch.setattr(app_qt, "LOG_PATH", tmp_path / "l.txt")
+    w = app_qt.BlenderVideoMapperQt()
+
+    # --- batch dedup ---
+    j1, j2, j3 = app_qt.RenderJob(id=1), app_qt.RenderJob(id=2), app_qt.RenderJob(id=3)
+    same = str(tmp_path / "out.mp4")
+    j1.output_path = j2.output_path = j3.output_path = same
+    assert w._resolve_output_conflicts([j1, j2, j3]) is True
+    paths = {j1.output_path, j2.output_path, j3.output_path}
+    assert len(paths) == 3, f"outputs collided: {paths}"
+
+    # --- auto-render deferral while a render is 'busy' ---
+    started = []
+    monkeypatch.setattr(w, "_start_render", lambda **k: started.append(k))
+    w._autorender_enabled = True
+    w._autorender_start = True
+    w._is_rendering = True            # pretend a render is running
+    w.scene_panel.scene_edit.setText(str(tmp_path / "scene.blend"))
+    w.scene_panel.set_materials(["Screen"])
+    w._on_target_set_ready([MaterialVideoAssignment("Screen", "/v/Screen_v1.mp4", "EMISSION_FULL_BRIGHT")])
+    assert started == [], "auto-render should not start while busy"
+    assert len(w._pending_autorender_ids) == 1, "auto-render job must be deferred, not dropped"

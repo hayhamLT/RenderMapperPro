@@ -124,7 +124,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.17"
+APP_VERSION = "1.4.18"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -3967,6 +3967,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._jobs: list[RenderJob] = []
         self._next_job_id = 1
         self._is_rendering = False
+        self._pending_autorender_ids: set = set()   # auto-render jobs deferred while a render runs
         self._scan_in_progress = False
         self._known_videos: set[str] = set()
         self._ffmpeg_hint_shown = False
@@ -5844,8 +5845,12 @@ class BlenderVideoMapperQt(QMainWindow):
         self._schedule_save()
         screens = ", ".join(a.material_name for a in assignments)
         self._append_log(f"[app] Auto-render queued: {job.label}  ({len(assignments)} screens: {screens})")
-        if self._autorender_start and not self._is_rendering:
-            self._start_render(only_job_ids={job.id})   # start just this auto-render job
+        if self._autorender_start:
+            if self._is_rendering:
+                self._pending_autorender_ids.add(job.id)   # a render is busy — start it when that finishes
+                self._append_log("[app] Auto-render will start when the current render finishes.")
+            else:
+                self._start_render(only_job_ids={job.id})   # start just this auto-render job
 
     def _request_auto_preview(self) -> None:
         """Debounced trigger: when Auto is on, re-render the preview a moment
@@ -6499,6 +6504,25 @@ class BlenderVideoMapperQt(QMainWindow):
     def _resolve_output_conflicts(self, pending: list[RenderJob]) -> bool:
         """Return True to proceed. Detects existing outputs and lets the user
         Overwrite, Auto-rename (keep both), or Cancel."""
+        # Two queued jobs resolving to the SAME path would silently overwrite each
+        # other (neither exists on disk yet), so de-dupe within the batch first.
+        def _key(pth) -> str:
+            return os.path.normcase(os.path.abspath(os.path.expanduser(str(pth))))
+
+        seen_paths: set[str] = set()
+        for j in pending:
+            p = (j.output_path or "").strip()
+            if not p:
+                continue
+            if _key(p) in seen_paths:
+                newp = self._unique_path(Path(p).expanduser())
+                while _key(newp) in seen_paths:            # also dodge already-renamed siblings
+                    newp = self._unique_path(Path(newp))
+                j.output_path = newp
+                self._append_log(f"[app] Two jobs shared an output name — renamed one to "
+                                 f"{Path(j.output_path).name}")
+            seen_paths.add(_key(j.output_path))
+
         existing: list[tuple[RenderJob, Path]] = []
         for j in pending:
             p = (j.output_path or "").strip()
@@ -6577,6 +6601,11 @@ class BlenderVideoMapperQt(QMainWindow):
             QMessageBox.information(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
             return
 
+        # Claim the rendering state NOW — the modal dialogs below spin the Qt event
+        # loop, so without this an auto-render signal could re-enter _start_render
+        # and double-start (orphaning a RenderThread). Reset on every early return.
+        self._is_rendering = True
+
         # Non-blocking warning if the frame range overshoots the source video.
         warnings = self._frame_range_warnings(pending) + self._disk_space_warnings(pending)
         if warnings:
@@ -6586,10 +6615,12 @@ class BlenderVideoMapperQt(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             )
             if ans != QMessageBox.Yes:
+                self._is_rendering = False
                 return
 
         # Overwrite protection.
         if not self._resolve_output_conflicts(pending):
+            self._is_rendering = False
             return
 
         try:
@@ -6597,6 +6628,7 @@ class BlenderVideoMapperQt(QMainWindow):
             c4d_worker = _resolve_runtime_script("c4d_worker.py") if _is_c4d else ""
         except Exception as exc:
             QMessageBox.critical(self, "Worker Missing", str(exc))
+            self._is_rendering = False
             return
         _ffmpeg = (find_ffmpeg_tool("ffmpeg") or "") if _is_c4d else ""
 
@@ -6993,6 +7025,17 @@ class BlenderVideoMapperQt(QMainWindow):
             if vid:
                 self.preview_panel.play_video(vid)
         self._schedule_save()
+        self._render_thread = None   # don't hold a finished thread reference
+
+        # Start any auto-render that arrived while this render was busy.
+        if self._autorender_start and self._pending_autorender_ids:
+            ids = {jid for jid in self._pending_autorender_ids if any(j.id == jid for j in self._jobs)}
+            self._pending_autorender_ids.clear()
+            if ids:
+                self._append_log("[app] Starting deferred auto-render…")
+                self._start_render(only_job_ids=ids)
+                return   # _run_when_done_action will fire after that render
+
         self._run_when_done_action()
 
     # ── Notifications / when-done / reports ──────────────────────────────

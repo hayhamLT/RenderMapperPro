@@ -405,6 +405,7 @@ def main() -> None:
                       str(render.get("video_quality", "HIGH"))):
             log(f"Movie written: {out_path}")
         shutil.rmtree(frame_dir, ignore_errors=True)
+    shutil.rmtree(tmp_dir, ignore_errors=True)   # per-frame extracted stills scratch
     log("Render finished successfully")
 
 
