@@ -122,7 +122,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -204,6 +204,25 @@ def _runtime_download_spec() -> Optional[tuple[str, str]]:
         name = f"blender-{v}-linux-{arch}.tar.xz"
         return f"{base}-linux-{arch}.tar.xz", name
     return None
+
+
+def _version_tuple(v: str) -> tuple:
+    """Parse '1.4.10' → (1, 4, 10) for comparison; non-numeric parts → 0."""
+    out = []
+    for part in str(v).strip().lstrip("v").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out) or (0,)
+
+
+def _update_platform_key() -> str:
+    """Key identifying this build's platform in the update manifest (latest.json)."""
+    if sys.platform == "darwin":
+        m = platform.machine().lower()
+        return "macos-arm64" if ("arm" in m or "aarch64" in m) else "macos-intel"
+    if os.name == "nt":
+        return "windows-x64"
+    return "linux-x64"
 
 
 def _find_c4dpy() -> str:
@@ -3896,6 +3915,8 @@ class PreviewPanel(QWidget):
 
 
 class BlenderVideoMapperQt(QMainWindow):
+    _update_checked = Signal(object, bool)   # (manifest dict | None, was-manual)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -3950,6 +3971,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self._last_report_path = ""
         self._job_durations: dict[int, float] = {}
         self._preview_thread: Optional[PreviewFrameThread] = None
+        self._update_share = ""          # network folder holding latest.json + zips
+        self._update_checked.connect(self._on_update_checked)
 
         self._apply_theme()
         self._build_menu()
@@ -3958,6 +3981,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self._load_profile()
         self._update_health()
         self._update_status_bar()
+        # Quietly check the update share a few seconds after launch.
+        QTimer.singleShot(3000, lambda: self._check_for_updates(manual=False))
         # Size/position the window once it's shown: restore the user's last
         # adjustment if it's reasonable, otherwise default to 70% of the screen
         # centered.
@@ -4057,6 +4082,7 @@ class BlenderVideoMapperQt(QMainWindow):
         help_menu = mb.addMenu("Help")
         help_menu.addAction("Quick Start", self._show_quick_start)
         help_menu.addAction("Keyboard Shortcuts", self._show_shortcuts_help)
+        help_menu.addAction("Check for Updates…", lambda: self._check_for_updates(manual=True))
         help_menu.addSeparator()
         help_menu.addAction(f"About {APP_NAME}", self._show_about)
 
@@ -5004,6 +5030,25 @@ class BlenderVideoMapperQt(QMainWindow):
         ar_pat_hint.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
         ar_pat_row.addWidget(ar_pat_hint)
         lay.addLayout(ar_pat_row)
+
+        lay.addWidget(section_title("UPDATES"))
+        upd_row = QHBoxLayout()
+        upd_edit = QLineEdit(self._update_share)
+        upd_edit.setPlaceholderText("Shared folder holding latest.json + build zips (blank = off)")
+        upd_browse = QPushButton("Browse")
+        def _pick_upd() -> None:
+            d = QFileDialog.getExistingDirectory(dlg, "Update folder (shared)", upd_edit.text() or str(Path.home()))
+            if d:
+                upd_edit.setText(d)
+        upd_browse.clicked.connect(_pick_upd)
+        upd_check_btn = QPushButton("Check Now")
+        upd_check_btn.clicked.connect(lambda: (setattr(self, "_update_share", upd_edit.text().strip()),
+                                               self._check_for_updates(manual=True)))
+        upd_row.addWidget(QLabel("Folder:"))
+        upd_row.addWidget(upd_edit, 1)
+        upd_row.addWidget(upd_browse)
+        upd_row.addWidget(upd_check_btn)
+        lay.addLayout(upd_row)
         lay.addStretch()
 
         # ── Deadline ─────────────────────────────────────────────────────
@@ -5151,6 +5196,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._autorender_start = ar_start_cb.isChecked()
             self._autorender_output = ar_out_edit.text().strip()
             self._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
+            self._update_share = upd_edit.text().strip()
 
             self._schedule_save()
             dlg.accept()
@@ -5316,6 +5362,9 @@ class BlenderVideoMapperQt(QMainWindow):
             sb.addWidget(w)
         spacer = QLabel("")
         sb.addWidget(spacer, 1)
+        self._sb_update = QLabel("")
+        self._sb_update.setStyleSheet(f"color:{self._palette.accent_text}; padding:0 10px; font-weight:600;")
+        sb.addPermanentWidget(self._sb_update)
         ver = QLabel(f"v{APP_VERSION}")
         ver.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 10px;")
         sb.addPermanentWidget(ver)
@@ -5333,6 +5382,80 @@ class BlenderVideoMapperQt(QMainWindow):
         except Exception:
             watching = False
         self._sb_watch.setText("Watch: on" if watching else "")
+
+    # ── Updates (private-repo: a network share holds latest.json + zips) ──
+    def _check_for_updates(self, manual: bool = False) -> None:
+        share = (self._update_share or "").strip()
+        if not share:
+            if manual:
+                QMessageBox.information(self, "Updates",
+                    "Set an update folder first in Properties → General → Updates.")
+            return
+
+        def work():
+            info = None
+            try:
+                mf = Path(share).expanduser() / "latest.json"
+                if mf.is_file():
+                    info = json.loads(mf.read_text(encoding="utf-8"))
+            except Exception:
+                info = None
+            self._update_checked.emit(info, manual)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_checked(self, info, manual: bool) -> None:
+        if not info:
+            if manual:
+                QMessageBox.information(self, "Updates", "Couldn't read the update folder.")
+            return
+        latest = str(info.get("version", "")).strip()
+        if not latest or _version_tuple(latest) <= _version_tuple(APP_VERSION):
+            self._sb_update.setText("")
+            if manual:
+                QMessageBox.information(self, "Updates", f"You're up to date (v{APP_VERSION}).")
+            return
+        self._sb_update.setText(f"● Update v{latest} available")
+        self._pending_update = info
+        self._offer_update(info, latest)
+
+    def _offer_update(self, info, latest: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Update Available")
+        box.setText(f"{APP_NAME} {latest} is available — you have {APP_VERSION}.")
+        if info.get("notes"):
+            box.setInformativeText(str(info["notes"]))
+        get = box.addButton("Get Update", QMessageBox.AcceptRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is get:
+            self._fetch_update(info)
+
+    def _fetch_update(self, info) -> None:
+        key = _update_platform_key()
+        asset = (info.get("assets") or {}).get(key)
+        if not asset:
+            QMessageBox.warning(self, "Update", f"No build for this platform ({key}) in the update folder.")
+            return
+        src = Path(self._update_share).expanduser() / asset
+        if not src.is_file():
+            QMessageBox.warning(self, "Update", f"Update file not found on the share:\n{src}")
+            return
+        downloads = Path.home() / "Downloads"
+        dest = downloads / asset
+        try:
+            downloads.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            import zipfile
+            with zipfile.ZipFile(dest) as z:
+                z.extractall(downloads)
+            reveal_in_file_manager(dest)
+            QMessageBox.information(self, "Update Downloaded",
+                f"{asset} was copied to your Downloads and unzipped.\n\n"
+                f"Quit {APP_NAME} and replace it with the new build, then reopen.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Update Failed", str(exc))
 
     def _set_renderer_options(self, is_c4d: bool, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
@@ -7282,6 +7405,7 @@ class BlenderVideoMapperQt(QMainWindow):
             "autorender_start": self._autorender_start,
             "autorender_output": self._autorender_output,
             "autorender_pattern": self._autorender_pattern,
+            "update_share": self._update_share,
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
@@ -7514,6 +7638,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
+        self._update_share = str(d.get("update_share", "") or "")
         tg = d.get("render_targets", [])
         if isinstance(tg, list):
             self.scene_panel.set_targets(tg)

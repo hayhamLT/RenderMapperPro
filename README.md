@@ -29,6 +29,7 @@ Every push to `main` also publishes the three builds as downloadable **workflow 
 - **Auto‑map by name:** clips link to materials automatically when the material name appears in the filename — on import or via a button (gap‑fill only, never clobbers manual mappings).
 - **Watch folder:** point at a folder and dropped clips import + map themselves. Version‑aware (`Screen_v1`/`v2`/`_3` → latest wins) and auto‑updates the project to a newer version; half‑copied files are skipped until complete.
 - **Auto‑render targets:** mark the screen materials a render must cover (right‑click → *Mark as Render Target*). When the watch folder fills every target — or a newer version arrives — a single multi‑screen render is queued automatically, named after the clips with a `PREVIZ` suffix. Queue‑only or auto‑start; all configurable in *Properties → General → Auto‑render*.
+- **Updates (private‑repo friendly):** point the app at a shared folder (*Properties → General → Updates*) and it checks `latest.json` on launch, shows an "Update available" badge, and fetches the right platform build in one click. Publish each release to that folder with `python tools/publish_update.py <share> [tag]` (needs `gh` + the share mounted) — no GitHub tokens on client machines.
 - Video textures render at **full quality** (cubic sampling, texture‑size limits forced off, no mip down‑scaling).
 - Per‑clip **audio**: clips with sound show a speaker badge; click to mute/include per clip.
 - **Renderer‑aware settings** — the panel adapts to the active engine so every control is real:
