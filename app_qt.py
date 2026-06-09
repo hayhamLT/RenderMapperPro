@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.10"
+APP_VERSION = "1.4.11"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -958,6 +958,7 @@ ROLE_VIDEO_PATH = Qt.UserRole          # absolute video path (existing)
 ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
 ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
 ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
+ROLE_TARGET = Qt.UserRole + 5          # bool: material is a render target
 
 _AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
 _AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
@@ -1009,6 +1010,54 @@ class MappingStripeDelegate(QStyledItemDelegate):
         self._paint_cross_highlight(painter, option, index)
         super().paint(painter, option, index)
         self._paint_stripe(painter, option, index)
+
+
+class TargetStripeDelegate(MappingStripeDelegate):
+    """Material-list delegate. The left stripe IS the render-target indicator:
+      • colourful  → a clip is linked (and the material is a render target)
+      • outline    → marked as a target, waiting for a clip
+      • ghost      → shown on hover, so clicking the stripe marks it a target
+    Clicking the left stripe zone toggles the target; right-click does too."""
+
+    _HIT_W = 16   # clickable zone on the left edge
+
+    def __init__(self, toggle_cb, panel, parent: Optional[QWidget] = None) -> None:
+        super().__init__(panel, "material", parent)
+        self._toggle = toggle_cb
+
+    def _paint_stripe(self, painter, option, index) -> None:
+        color = index.data(ROLE_MAP_COLOR)
+        targeted = bool(index.data(ROLE_TARGET))
+        hovered = bool(option.state & QStyle.State_MouseOver)
+        if not (color or targeted or hovered):
+            return
+        r = option.rect
+        bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
+        pal = active_palette()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        if color:                                   # clip linked → solid colour
+            painter.setBrush(QColor(color))
+        elif targeted:                              # target, no clip yet → dim accent
+            c = QColor(pal.accent)
+            c.setAlpha(120)
+            painter.setBrush(c)
+        else:                                       # hover affordance → faint ghost
+            c = QColor(pal.text_faint)
+            c.setAlpha(80)
+            painter.setBrush(c)
+        painter.drawRoundedRect(bar, 1.5, 1.5)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
+        if (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
+                and (event.position().toPoint().x() - option.rect.left()) <= self._HIT_W):
+            mat = index.data(Qt.DisplayRole)
+            if mat and self._toggle:
+                self._toggle(mat)
+            return True                             # swallow so the row isn't toggled-selected
+        return super().editorEvent(event, model, option, index)
 
 
 class AudioBadgeDelegate(MappingStripeDelegate):
@@ -1322,7 +1371,8 @@ class ScenePanel(QWidget):
     watch_status = Signal(str)       # log message from the watch folder
     watch_changed = Signal(str, bool)  # (folder, enabled) — for persistence
     _watch_scanned = Signal(list)    # internal: background scan results → UI thread
-    target_set_ready = Signal(list)  # mapped set changed + settled → auto-render
+    target_set_ready = Signal(list)  # all targets have clips + set changed → auto-render
+    targets_changed = Signal(list)   # render-target materials changed (persist)
     assignments_cleared = Signal(list)  # mappings about to be cleared (for undo)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -1344,7 +1394,8 @@ class ScenePanel(QWidget):
         self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
         self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
         self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
-        self._autorender_last = None             # last mapped version-set emitted
+        self._targets: list[str] = []            # materials marked as render targets
+        self._autorender_last = None             # last complete target version-set emitted
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
@@ -1356,9 +1407,9 @@ class ScenePanel(QWidget):
         self._autorender_timer.setSingleShot(True)
         self._autorender_timer.setInterval(max(4000, 2 * self._watch_interval_ms))
         self._autorender_timer.timeout.connect(self._fire_target_set)
-        # Any mapping change (manual link, auto-map, unmap, watch ingest) re-checks
-        # the auto-render set — mapping a clip is what targets a material now.
-        self.assignments_changed.connect(lambda *_: self._check_target_set())
+        # Linking a clip auto-targets the material, then re-checks the auto-render
+        # set on any mapping change (manual link, auto-map, unmap, watch ingest).
+        self.assignments_changed.connect(lambda *_: self._auto_target_and_check())
 
     # ── Cross-highlight between the material and video lists ──────────────
     def _is_cross_highlighted(self, kind: str, key) -> bool:
@@ -1502,9 +1553,9 @@ class ScenePanel(QWidget):
         self.mat_search.setPlaceholderText("Filter materials")
         self.mat_search.textChanged.connect(self._refresh_lists)
         self.mat_list = MaterialListWidget()
-        # A mapped material shows a colour stripe — that stripe IS the "targeted"
-        # indicator (mapping a clip targets the material); unmapped rows are empty.
-        self.mat_list.setItemDelegate(MappingStripeDelegate(self, "material", self.mat_list))
+        # The left stripe is the render-target indicator: outline = targeted (no
+        # clip yet), colourful = clip linked, ghost on hover = click to target.
+        self.mat_list.setItemDelegate(TargetStripeDelegate(self._toggle_target, self, self.mat_list))
         self.mat_list.setMouseTracking(True)
         self.mat_list.viewport().setMouseTracking(True)
         self.mat_list.currentItemChanged.connect(lambda *_: self._update_maplink_btn())
@@ -1512,6 +1563,8 @@ class ScenePanel(QWidget):
         self.mat_list.itemEntered.connect(self._on_mat_entered)
         self.mat_list.viewport().installEventFilter(self)
         self.mat_list.scene_dropped.connect(self._on_scene_file_dropped)
+        self.mat_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mat_list.customContextMenuRequested.connect(self._show_material_context_menu)
         left.addWidget(self.mat_search)
         left.addWidget(self.mat_list)
 
@@ -1793,28 +1846,77 @@ class ScenePanel(QWidget):
         return len(matches)
 
     # ── Render targets (for auto-render) ─────────────────────────────────
-    def _check_target_set(self) -> None:
-        """Mapping a clip *is* targeting the material, so auto-render covers every
-        mapped material. When that set changes, (re)start a short debounce so a
-        batch of new clips/versions becomes a single render, not one per file."""
-        if not self._assignments:
-            self._autorender_timer.stop()       # nothing mapped → nothing to render
+    def _toggle_target(self, mat: str) -> None:
+        if mat in self._targets:
+            self._targets.remove(mat)
+        else:
+            self._targets.append(mat)
+        self._autorender_last = None     # re-evaluate against the new target set
+        self._refresh_lists()
+        self.targets_changed.emit(list(self._targets))
+        self._check_target_set()
+
+    def set_targets(self, targets: list) -> None:
+        self._targets = [str(t) for t in targets if str(t)]
+        self._autorender_last = None
+        self._refresh_lists()
+
+    def get_targets(self) -> list:
+        return list(self._targets)
+
+    def _show_material_context_menu(self, pos) -> None:
+        item = self.mat_list.itemAt(pos)
+        if item is None:
             return
-        version_set = frozenset((a.material_name, a.video_path) for a in self._assignments)
+        mat = item.text()
+        menu = QMenu(self)
+        act = menu.addAction("Remove Render Target" if mat in self._targets else "Set as Render Target")
+        act.triggered.connect(lambda: self._toggle_target(mat))
+        menu.exec(self.mat_list.mapToGlobal(pos))
+
+    def _auto_target_and_check(self) -> None:
+        """Linking a clip auto-targets its material, then re-check the set."""
+        changed = False
+        for a in self._assignments:
+            if a.material_name not in self._targets:
+                self._targets.append(a.material_name)
+                changed = True
+        if changed:
+            self.targets_changed.emit(list(self._targets))
+        self._check_target_set()
+
+    def _target_version_set(self):
+        """The (target → clip) map if EVERY target has a clip, else None."""
+        if not self._targets:
+            return None
+        mapped = {a.material_name: a for a in self._assignments}
+        if not all(t in mapped for t in self._targets):
+            return None
+        return mapped
+
+    def _check_target_set(self) -> None:
+        """Once every render-target material has a clip, (re)start a short debounce;
+        the render is queued only when the set stops changing — so a batch of new
+        versions becomes a single render, not one per file."""
+        mapped = self._target_version_set()
+        if mapped is None:
+            self._autorender_timer.stop()       # not every target has a clip yet
+            return
+        version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
         if version_set == self._autorender_last:
             return                              # already rendered this exact set
         self._autorender_timer.start()          # wait for the set to settle, then fire
 
     def _fire_target_set(self) -> None:
-        if not self._assignments:
+        mapped = self._target_version_set()
+        if mapped is None:
             return
-        version_set = frozenset((a.material_name, a.video_path) for a in self._assignments)
+        version_set = frozenset((t, mapped[t].video_path) for t in self._targets)
         if version_set == self._autorender_last:
             return
         self._autorender_last = version_set
-        # Primary (first mapping) drives the output name.
-        snapshot = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode)
-                    for a in self._assignments]
+        snapshot = [MaterialVideoAssignment(t, mapped[t].video_path, mapped[t].mapping_mode)
+                    for t in self._targets]
         self.target_set_ready.emit(snapshot)
 
     # ── Watch folder ─────────────────────────────────────────────────────
@@ -1985,9 +2087,14 @@ class ScenePanel(QWidget):
             if mq and mq not in m.lower():
                 continue
             item = QListWidgetItem(m)
+            targeted = m in self._targets
             if m in mat_to_idx:
                 item.setData(ROLE_MAP_COLOR, LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)])
-                item.setToolTip(f"{m}\nMapped — included in renders")
+                item.setToolTip(f"{m}\nRender target — clip linked")
+            elif targeted:
+                item.setToolTip(f"{m}\nRender target — waiting for a clip")
+            if targeted:
+                item.setData(ROLE_TARGET, True)
             self.mat_list.addItem(item)
         if current_mat:
             for i in range(self.mat_list.count()):
@@ -4269,6 +4376,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
         self.scene_panel.watch_changed.connect(lambda *_: (self._save_profile(), self._update_status_bar()))
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
+        self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
                                          lambda: self.scene_panel.set_assignments(snap)))
@@ -4988,14 +5096,15 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.addLayout(watch_row)
 
         lay.addWidget(section_title("AUTO-RENDER"))
-        ar_enable_cb = QCheckBox("Auto-render the mapped screens when their clips change")
+        ar_enable_cb = QCheckBox("Auto-render once every render-target screen has a clip")
         ar_enable_cb.setChecked(self._autorender_enabled)
-        ar_enable_cb.setToolTip("Mapping a clip to a material targets it. When the mapped set is complete "
-                                "— or newer versions arrive — a single render covering every mapped screen "
-                                "is queued automatically (debounced, so a batch becomes one render).")
+        ar_enable_cb.setToolTip("Mark screens as render targets (right-click a material, or click its "
+                                "left stripe). When every target has a clip — or newer versions arrive — "
+                                "a single render covering all targets is queued (debounced).")
         lay.addWidget(ar_enable_cb)
-        lay.addWidget(hint("Mapping a clip to a material includes it — there's nothing else to mark. "
-                           "Newer versions of any mapped clip re-trigger the render."))
+        lay.addWidget(hint("Mark targets by right-clicking a material → Set as Render Target, or click the "
+                           "stripe on its left. Linking a clip also targets it. The render waits until "
+                           "every target has a clip."))
         ar_start_cb = QCheckBox("Start it automatically (otherwise just add it to the queue)")
         ar_start_cb.setChecked(self._autorender_start)
         lay.addWidget(ar_start_cb)
@@ -7481,6 +7590,7 @@ class BlenderVideoMapperQt(QMainWindow):
             "autorender_start": self._autorender_start,
             "autorender_output": self._autorender_output,
             "autorender_pattern": self._autorender_pattern,
+            "render_targets": self.scene_panel.get_targets(),
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
             "when_done": self._when_done,
@@ -7715,6 +7825,9 @@ class BlenderVideoMapperQt(QMainWindow):
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
+        tg = d.get("render_targets", [])
+        if isinstance(tg, list):
+            self.scene_panel.set_targets(tg)
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
