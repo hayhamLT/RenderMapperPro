@@ -124,7 +124,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.16"
+APP_VERSION = "1.4.17"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -778,11 +778,16 @@ class PreviewFrameThread(QThread):
         self.out_dir = out_dir
         self.c4dpy = c4dpy
         self.c4d_worker = c4d_worker
+        self._cancel = False
+
+    def request_cancel(self) -> None:
+        self._cancel = True
 
     def run(self) -> None:
         try:
             rc = run_blender_job(self.blender, self.worker, self.job, on_log=self.log.emit,
-                                 c4dpy_executable=self.c4dpy, c4d_worker_script=self.c4d_worker)
+                                 c4dpy_executable=self.c4dpy, c4d_worker_script=self.c4d_worker,
+                                 should_cancel=lambda: self._cancel)
             import glob
             pngs = sorted(glob.glob(os.path.join(self.out_dir, "*.png")))
             if rc == 0 and pngs:
@@ -2002,10 +2007,10 @@ class ScenePanel(QWidget):
                 listing = []
             self._watch_scanned.emit(listing)   # queued → delivered on the UI thread
 
+        threading.Thread(target=work, daemon=True).start()
+
     def set_watch_ignore_dir(self, path: str) -> None:
         self._watch_ignore = path or ""
-
-        threading.Thread(target=work, daemon=True).start()
 
     def _apply_watch_scan(self, listing: list) -> None:
         self._watch_scanning = False
@@ -4384,7 +4389,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self.scene_panel.mute_changed.connect(self._schedule_save)
         self.scene_panel.render_requested.connect(self._start_render)
 
-        self.render_panel.output_changed.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.output_changed.connect(lambda _v: self._on_settings_changed(preview=False))
         self.render_panel.tokens_requested.connect(self._show_output_tokens_menu)
         self.render_panel.width_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.height_edit.textChanged.connect(lambda _v: self._on_settings_changed())
@@ -4402,9 +4407,9 @@ class BlenderVideoMapperQt(QMainWindow):
         self.render_panel.exposure_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.gamma_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.device_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
-        self.render_panel.scale_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
-        self.render_panel.quality_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
-        self.render_panel.codec_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.scale_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed(preview=False))
+        self.render_panel.quality_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed(preview=False))
+        self.render_panel.codec_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed(preview=False))
         self.render_panel.transparent_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_preset_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_min_samples_edit.textChanged.connect(lambda _v: self._on_settings_changed())
@@ -4420,7 +4425,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self.deadline_panel.use_dl_cb.clicked.connect(self._on_deadline_enabled_clicked)
         self.deadline_panel.export_requested.connect(self._export_deadline_files)
 
-        self.render_panel.profile_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.profile_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed(preview=False))
         self.scene_panel.scene_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.scene_panel.camera_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
 
@@ -8006,8 +8011,8 @@ class BlenderVideoMapperQt(QMainWindow):
         try:
             PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
             PROFILE_PATH.write_text(json.dumps(self._profile_dict(), indent=2))
-        except Exception:
-            pass
+        except Exception as exc:
+            self._append_log(f"[app] Could not save settings: {exc}")
 
     def _schedule_save(self) -> None:
         if self._save_timer is None:
@@ -8021,6 +8026,14 @@ class BlenderVideoMapperQt(QMainWindow):
         if self._render_thread and self._render_thread.isRunning():
             self._render_thread.request_cancel()
             self._render_thread.wait(3000)
+        # Cancel + wait on the other workers too, so a QThread isn't destroyed
+        # mid-run (which crashes Qt) and its headless subprocess isn't orphaned.
+        for attr in ("_preview_thread", "_discovery_thread", "_export_thread", "_runtime_install_thread"):
+            t = getattr(self, attr, None)
+            if t is not None and t.isRunning():
+                if hasattr(t, "request_cancel"):
+                    t.request_cancel()
+                t.wait(3000)
         event.accept()
 
 

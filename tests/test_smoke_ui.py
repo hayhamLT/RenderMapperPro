@@ -30,3 +30,35 @@ def test_window_builds_and_core_wiring(tmp_path, monkeypatch):
     assert "Screen" not in w._sb_scene.text()  # no scene loaded
     assert isinstance(w._undo_stack, list)
     app.processEvents()
+
+
+def test_watch_folder_scan_actually_runs(tmp_path, monkeypatch):
+    """Regression: _scan_watch_folder must start its worker thread and emit a
+    result (a misplaced thread-start once left the watch folder dead), and
+    set_watch_ignore_dir must not NameError."""
+    import time
+
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    import app_qt
+    monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
+    monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")
+    monkeypatch.setattr(app_qt, "LOG_PATH", tmp_path / "l.txt")
+    w = app_qt.BlenderVideoMapperQt()
+    sp = w.scene_panel
+    wf = tmp_path / "watch"
+    wf.mkdir()
+    (wf / "Screen_v1.mp4").write_bytes(b"x")
+    got = {}
+    sp._watch_scanned.connect(lambda listing: got.setdefault("listing", listing))
+    sp._watch_folder = str(wf)
+    sp.set_watch_ignore_dir(str(tmp_path / "out"))   # must not raise NameError
+    sp._scan_watch_folder()                          # must start the thread + emit
+    for _ in range(60):
+        app.processEvents()
+        time.sleep(0.02)
+        if "listing" in got:
+            break
+    assert "listing" in got, "watch scan never emitted — thread not started"
+    assert any(p.endswith("Screen_v1.mp4") for p, _s, _m in got["listing"])
+    assert sp._watch_scanning is False               # flag reset by _apply_watch_scan
