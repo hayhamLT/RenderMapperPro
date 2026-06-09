@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTableWidget,
     QWidget,
 )
 
@@ -432,3 +433,41 @@ class MaterialListWidget(QListWidget):
             painter.end()
 
 
+
+
+class HintListWidget(QListWidget):
+    """QListWidget that paints a muted call-to-action hint while empty."""
+
+    def __init__(self, hint: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hint = hint
+
+    def set_hint(self, hint: str) -> None:
+        self._hint = hint
+        self.viewport().update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        if self.count() == 0 and self._hint:
+            painter = QPainter(self.viewport())
+            painter.setPen(QColor(active_palette().text_faint))
+            painter.drawText(self.viewport().rect().adjusted(12, 0, -12, 0),
+                             Qt.AlignCenter | Qt.TextWordWrap, self._hint)
+            painter.end()
+
+
+class HintTableWidget(QTableWidget):
+    """QTableWidget that paints a muted call-to-action hint while empty."""
+
+    def __init__(self, rows: int, cols: int, hint: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(rows, cols, parent)
+        self._hint = hint
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        if self.rowCount() == 0 and self._hint:
+            painter = QPainter(self.viewport())
+            painter.setPen(QColor(active_palette().text_faint))
+            painter.drawText(self.viewport().rect().adjusted(16, 0, -16, 0),
+                             Qt.AlignCenter | Qt.TextWordWrap, self._hint)
+            painter.end()

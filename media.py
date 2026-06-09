@@ -105,9 +105,9 @@ def find_ffmpeg_tool(name: str) -> str | None:
         resolved = shutil.which(name)
     if resolved is None:
         for d in _FFMPEG_SYS_DIRS:
-            c = os.path.join(d, exe)
-            if os.path.exists(c):
-                resolved = c
+            sys_candidate = os.path.join(d, exe)
+            if os.path.exists(sys_candidate):
+                resolved = sys_candidate
                 break
 
     _ffmpeg_tool_cache[name] = resolved
@@ -308,3 +308,33 @@ def _normalize_fps(raw: float | None, default: int = 30) -> int:
         return int(round(raw))
     return default
 
+
+
+_video_size_cache: dict[str, tuple[int, int] | None] = {}
+
+
+def probe_video_size(path: str) -> tuple[int, int] | None:
+    """(width, height) of a clip's video stream via ffprobe, cached. None if
+    unknown (no ffprobe, unreadable file, audio-only…)."""
+    if not path:
+        return None
+    if path in _video_size_cache:
+        return _video_size_cache[path]
+    result: tuple[int, int] | None = None
+    ffprobe = _find_ffprobe()
+    if ffprobe and os.path.exists(path):
+        try:
+            out = subprocess.check_output(
+                [ffprobe, "-v", "quiet", "-print_format", "json",
+                 "-show_streams", "-select_streams", "v:0", path],
+                text=True, timeout=10)
+            streams = json.loads(out).get("streams") or []
+            if streams:
+                w = int(streams[0].get("width") or 0)
+                h = int(streams[0].get("height") or 0)
+                if w > 0 and h > 0:
+                    result = (w, h)
+        except Exception:
+            result = None
+    _video_size_cache[path] = result
+    return result

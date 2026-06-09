@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
@@ -104,6 +105,53 @@ class RenderThread(CancellableWorker):
         """Skip only the currently running job; continue with remaining."""
         self._skip_current = True
 
+    def _tag_output_colors(self, cfg) -> None:
+        """Stream-copy remux that tags rec.709 + faststart on movie outputs, so
+        QuickTimes read identically in every player/NLE (untagged movies get
+        re-interpreted and shift colours). Fast (-c copy) and best-effort."""
+        out = str(getattr(cfg, "output_path", "") or "")
+        if getattr(cfg, "use_deadline", False) or Path(out).suffix.lower() not in {".mp4", ".mov"}:
+            return
+        if not os.path.exists(out):
+            return
+        from media import find_ffmpeg_tool
+        ffmpeg = find_ffmpeg_tool("ffmpeg")
+        if not ffmpeg:
+            return
+        import subprocess
+
+        from core.utils import subprocess_creation_flags
+        tmp = str(Path(out).with_suffix(".tagging" + Path(out).suffix))
+        try:
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", out, "-c", "copy",
+                 "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+                 "-movflags", "+faststart", tmp],
+                capture_output=True, text=True, timeout=300,
+                creationflags=subprocess_creation_flags())
+            if r.returncode == 0 and os.path.getsize(tmp) > 0:
+                os.replace(tmp, out)
+                self.log.emit("[app] Output tagged rec.709 (+faststart).")
+            else:
+                Path(tmp).unlink(missing_ok=True)
+        except Exception:
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _queue_retry(self, entry: dict) -> bool:
+        """Re-queue a failed job once (GPU/license hiccups are the common farm
+        failure; one automatic retry protects unattended auto-renders). The
+        retry runs after the remaining jobs. Skipped on cancel."""
+        if self._cancel or entry.get("retried"):
+            return False
+        retry = dict(entry)
+        retry["retried"] = True
+        self.entries.append(retry)   # safe: Python list iteration picks up appends
+        self.log.emit(f"[app] Job {entry['id']} failed — will retry once after the remaining jobs.")
+        return True
+
     def run(self) -> None:
         for entry in self.entries:
             jid: int = entry["id"]
@@ -152,15 +200,21 @@ class RenderThread(CancellableWorker):
                     )
             except Exception as exc:
                 self.log.emit(f"[app] ERROR job {jid}: {exc}")
-                self.job_error.emit(jid, str(exc))
-                self.job_update.emit(jid, "failed", 0.0)
+                if self._queue_retry(entry):
+                    self.job_update.emit(jid, "running", 0.0)
+                else:
+                    self.job_error.emit(jid, str(exc))
+                    self.job_update.emit(jid, "failed", 0.0)
                 self._skip_current = False
                 continue
 
             if self._cancel or self._skip_current:
                 self.job_update.emit(jid, "cancelled", 0.0)
             elif rc == 0:
+                self._tag_output_colors(cfg)
                 self.job_update.emit(jid, "success", 100.0)
+            elif self._queue_retry(entry):
+                self.job_update.emit(jid, "running", 0.0)
             else:
                 reason = last_error[-1] if last_error else f"Blender exited with code {rc}"
                 self.job_error.emit(jid, reason)
@@ -224,3 +278,47 @@ class ExportBlendThread(CancellableWorker):
                 self.done.emit(False, f"Export failed (exit {rc})")
         except Exception as exc:
             self.done.emit(False, str(exc))
+
+
+class DeadlineQueryThread(CancellableWorker):
+    """Asks the Deadline repository for pools/groups/machines off the UI thread
+    (each call can block for many seconds when the farm is unreachable)."""
+
+    result = Signal(dict)   # {ok, error, pools, groups, machines}
+
+    def __init__(self, deadline_cmd: str, repo_path: str = "") -> None:
+        super().__init__()
+        self.deadline_cmd = deadline_cmd
+        self.repo_path = repo_path
+
+    def _run_cmd(self, flag: str) -> tuple[int, str, str]:
+        import subprocess
+
+        from core.utils import subprocess_creation_flags
+        if self.repo_path:
+            args = [self.deadline_cmd, "RunCommandForRepository", "Direct", self.repo_path, flag]
+        else:
+            args = [self.deadline_cmd, flag]
+        r = subprocess.run(args, capture_output=True, text=True, timeout=8,
+                           creationflags=subprocess_creation_flags())
+        return r.returncode, r.stdout, r.stderr
+
+    def run(self) -> None:
+        out = {"ok": False, "error": "", "pools": [], "groups": [], "machines": []}
+        try:
+            rc, stdout, stderr = self._run_cmd("-pools")
+            if rc != 0:
+                out["error"] = (stderr or stdout).strip() or f"deadlinecommand exited with code {rc}"
+                self.result.emit(out)
+                return
+            out["pools"] = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+            rc, stdout, _ = self._run_cmd("-groups")
+            if rc == 0:
+                out["groups"] = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+            rc, stdout, _ = self._run_cmd("-GetSlaveNames")
+            if rc == 0:
+                out["machines"] = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+            out["ok"] = True
+        except Exception as exc:
+            out["error"] = str(exc)
+        self.result.emit(out)

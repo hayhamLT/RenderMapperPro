@@ -495,6 +495,33 @@ def configure_render(config: dict) -> None:
     scene.view_settings.exposure = float(render.get("color_exposure", 0.0))
     scene.view_settings.gamma = float(render.get("color_gamma", 1.0))
 
+    # Burn-in overlay: stamp the clip name/version, frame, camera and date onto
+    # every frame so versioned previz reviews are unambiguous.
+    if render.get("burn_in"):
+        r = scene.render
+        r.use_stamp = True
+        r.use_stamp_note = True
+        r.use_stamp_frame = True
+        r.use_stamp_date = True
+        r.use_stamp_camera = True
+        r.use_stamp_time = False
+        r.use_stamp_render_time = False
+        r.use_stamp_scene = False
+        r.use_stamp_filename = False
+        r.use_stamp_hostname = False
+        r.use_stamp_lens = False
+        r.use_stamp_frame_range = False
+        r.use_stamp_memory = False
+        r.use_stamp_marker = False
+        r.use_stamp_sequencer_strip = False
+        clips = ", ".join(
+            Path(a.get("video_path", "")).stem
+            for a in config.get("material_assignments", []) if a.get("video_path"))
+        r.stamp_note_text = clips[:128]
+        r.stamp_font_size = max(12, int(render["height"]) // 40)
+        r.stamp_foreground = (1.0, 1.0, 1.0, 0.9)
+        r.stamp_background = (0.0, 0.0, 0.0, 0.45)
+
     original_output_path = Path(config["output_path"]).expanduser().resolve()
     output_format = str(render.get("output_format", "MPEG4")).upper()
     is_video = output_format in {"MPEG4", "QUICKTIME"}

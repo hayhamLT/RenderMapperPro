@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QListWidgetItem,
     QMenu,
     QProgressBar,
@@ -35,7 +34,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
-    QTableWidget,
     QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
@@ -75,6 +73,8 @@ from ui_widgets import (
     ROLE_TARGET,
     ROLE_VIDEO_PATH,
     AudioBadgeDelegate,
+    HintListWidget,
+    HintTableWidget,
     MaterialListWidget,
     ScenePathLineEdit,
     TargetStripeDelegate,
@@ -96,6 +96,7 @@ class ScenePanel(QWidget):
     target_set_ready = Signal(list)  # all targets have clips + set changed → auto-render
     targets_changed = Signal(list)   # render-target materials changed (persist)
     assignments_cleared = Signal(list)  # mappings about to be cleared (for undo)
+    videos_removed = Signal(int, dict)  # (count, pre-removal snapshot) for undo
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -254,6 +255,7 @@ class ScenePanel(QWidget):
         cam_lbl.setObjectName("FieldLabel")
         camera_row = QHBoxLayout()
         self.camera_combo = QComboBox()
+        self.camera_combo.setToolTip("Camera to render through. Blank = the scene's active camera.")
         camera_row.addWidget(cam_lbl)
         camera_row.addWidget(self.camera_combo, 1)
         root.addLayout(camera_row)
@@ -502,9 +504,28 @@ class ScenePanel(QWidget):
             paths.add(path)
         if not paths:
             return
+        # Snapshot for undo: removing clips silently cascades to their mappings
+        # and mute state, so it must be reversible like the other destructive actions.
+        snapshot = {
+            "videos": list(self._videos),
+            "assignments": [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode)
+                            for a in self._assignments],
+            "muted": set(self._muted_videos),
+        }
+        self.videos_removed.emit(len(paths), snapshot)
         self._videos = [v for v in self._videos if v not in paths]
         self._assignments = [a for a in self._assignments if a.video_path not in paths]
         self._muted_videos -= paths
+        self._refresh_lists()
+        self.videos_changed.emit(list(self._videos))
+        self.assignments_changed.emit(list(self._assignments))
+
+    def restore_videos_snapshot(self, snapshot: dict) -> None:
+        """Undo support: restore clips + their mappings + mute state."""
+        self._videos = list(snapshot.get("videos", []))
+        self._assignments = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode)
+                             for a in snapshot.get("assignments", [])]
+        self._muted_videos = set(snapshot.get("muted", set()))
         self._refresh_lists()
         self.videos_changed.emit(list(self._videos))
         self.assignments_changed.emit(list(self._assignments))
@@ -592,7 +613,7 @@ class ScenePanel(QWidget):
             return
         mat = item.text()
         menu = QMenu(self)
-        act = menu.addAction("Remove Render Target" if mat in self._targets else "Set as Render Target")
+        act = menu.addAction("Unmark Render Target" if mat in self._targets else "Mark as Render Target")
         act.triggered.connect(lambda: self._toggle_target(mat))
         menu.exec(self.mat_list.mapToGlobal(pos))
 
@@ -815,6 +836,8 @@ class ScenePanel(QWidget):
                 item.setToolTip(f"{m}\nRender target — clip linked")
             elif targeted:
                 item.setToolTip(f"{m}\nRender target — waiting for a clip")
+            else:
+                item.setToolTip(f"{m}\nClick the left edge (or right-click) to mark as a render target")
             if targeted:
                 item.setData(ROLE_TARGET, True)
             self.mat_list.addItem(item)
@@ -914,7 +937,7 @@ class ScenePanel(QWidget):
         item = self.vid_list.itemAt(pos)
         menu = QMenu(self)
         add_action = menu.addAction("Add Videos...")
-        render_action = menu.addAction("Render Queue")
+        render_action = menu.addAction("Start Render")
         remove_action = menu.addAction("Remove Selected")
         mute_action = None
         if item is not None and bool(item.data(ROLE_HAS_AUDIO)):
@@ -969,12 +992,15 @@ class RenderPanel(QWidget):
         res_row = QHBoxLayout()
         res_row.setSpacing(6)
         self.width_edit = QLineEdit("1920")
+        self.width_edit.setToolTip("Output width in pixels.")
         self.width_edit.setPlaceholderText("W")
         self.height_edit = QLineEdit("1080")
+        self.height_edit.setToolTip("Output height in pixels.")
         self.height_edit.setPlaceholderText("H")
         x_lbl = QLabel("×")
         x_lbl.setAlignment(Qt.AlignCenter)
         self.fps_edit = QLineEdit("30")
+        self.fps_edit.setToolTip("Frames per second of the output (and clip playback).")
         self.fps_edit.setPlaceholderText("FPS")
         fps_lbl = QLabel("fps")
         fps_lbl.setAlignment(Qt.AlignVCenter)
@@ -1014,13 +1040,15 @@ class RenderPanel(QWidget):
         renderer_col.setSpacing(2)
         renderer_col.addWidget(section("RENDERER"))
         self.engine_combo = QComboBox()
-        self.engine_combo.addItems(["CYCLES", "BLENDER_EEVEE"])
+        self.engine_combo.setToolTip("Render engine. Cycles = highest quality (slow); EEVEE = fast preview-grade. C4D scenes use Redshift.")
+        self.populate_engines(["CYCLES", "BLENDER_EEVEE"])
         renderer_col.addWidget(self.engine_combo)
 
         format_col = QVBoxLayout()
         format_col.setSpacing(2)
         format_col.addWidget(section("OUTPUT FORMAT"))
         self.profile_combo = QComboBox()
+        self.profile_combo.setToolTip("Output container: H264 MP4 for review, ProRes MOV for editorial, PNG/EXR sequences for comp.")
         self.profile_combo.addItems(list(OUTPUT_PROFILES.keys()))
         format_col.addWidget(self.profile_combo)
 
@@ -1133,21 +1161,29 @@ class RenderPanel(QWidget):
         adv.addWidget(self.rs_threshold_row)
         # Denoise (both) + transparent (Blender only).
         self.denoise_cb = QCheckBox("Denoise")
+        self.denoise_cb.setToolTip("AI-denoise the render — lets you use far fewer samples for the same look.")
         self.denoise_cb.setChecked(True)
         self.transparent_cb = QCheckBox("Transparent background (alpha)")
+        self.burn_in_cb = QCheckBox("Burn-in overlay (clip · frame · date)")
+        self.burn_in_cb.setToolTip("Stamps the clip name/version, frame number, camera and date "
+                                   "onto every frame — so reviews always know which version "
+                                   "they're looking at. Blender renders only.")
         self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
         cb_row = QHBoxLayout()
         cb_row.setSpacing(18)
         cb_row.addWidget(self.denoise_cb)
         cb_row.addWidget(self.transparent_cb)
+        cb_row.addWidget(self.burn_in_cb)
         cb_row.addStretch(1)
         adv.addLayout(cb_row)
 
         # ── Output (same slot for both renderers) ────────────────────────
         adv.addWidget(section("OUTPUT"))
         self.scale_combo = QComboBox()
+        self.scale_combo.setToolTip("Render scale: 50% renders at half resolution — much faster drafts, same framing.")
         self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
         self.quality_combo = QComboBox()
+        self.quality_combo.setToolTip("Movie bitrate/quality (H264 only).")
         self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
         self.quality_combo.setCurrentText("High")
         adv.addLayout(two_col(
@@ -1155,8 +1191,10 @@ class RenderPanel(QWidget):
             labeled("Video Quality", self.quality_combo),
         ))
         self.codec_combo = QComboBox()
+        self.codec_combo.setToolTip("Video codec inside the container.")
         self.codec_combo.addItems(["Default", "H.264", "H.265"])
         self.device_combo = QComboBox()
+        self.device_combo.setToolTip("Render device: GPU is much faster when available.")
         self.device_combo.addItems(["Auto", "GPU", "CPU"])
         # Device is Blender-only (Redshift is GPU); wrap it so it can be hidden.
         self.device_box = QWidget()
@@ -1195,11 +1233,14 @@ class RenderPanel(QWidget):
         color_lay.setSpacing(10)
         color_lay.addWidget(section("COLOR MANAGEMENT"))
         self.view_transform_combo = QComboBox()
+        self.view_transform_combo.setToolTip("Colour view transform: AgX/Filmic = cinematic tone-map, Standard = raw sRGB.")
         self.view_transform_combo.addItems(["AgX", "Filmic", "Standard", "Khronos PBR Neutral", "Raw", "False Color"])
         self.view_transform_combo.setCurrentText("AgX")
         color_lay.addLayout(labeled("View Transform", self.view_transform_combo))
         self.exposure_edit = QLineEdit("0.0")
+        self.exposure_edit.setToolTip("Colour exposure adjustment in stops (0 = unchanged).")
         self.gamma_edit = QLineEdit("1.0")
+        self.gamma_edit.setToolTip("Display gamma adjustment (1.0 = unchanged).")
         color_lay.addLayout(two_col(
             labeled("Exposure", self.exposure_edit),
             labeled("Gamma", self.gamma_edit),
@@ -1257,6 +1298,27 @@ class RenderPanel(QWidget):
         self.rs_preset_combo.setCurrentText("Custom")
         self.rs_preset_combo.blockSignals(False)
 
+    # Friendly renderer names in the UI; the enum value Blender/C4D expects is
+    # carried as itemData so configs/profiles keep the real identifier.
+    ENGINE_LABELS = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift"}
+
+    def populate_engines(self, values: list[str]) -> None:
+        self.engine_combo.clear()
+        for v in values:
+            self.engine_combo.addItem(self.ENGINE_LABELS.get(v, v), v)
+
+    def engine_value(self) -> str:
+        """The engine identifier (CYCLES / BLENDER_EEVEE / Redshift), not the label."""
+        return str(self.engine_combo.currentData() or self.engine_combo.currentText())
+
+    def set_engine_value(self, value: str) -> None:
+        i = self.engine_combo.findData(value)
+        if i >= 0:
+            self.engine_combo.setCurrentIndex(i)
+
+    def engine_values(self) -> list[str]:
+        return [str(self.engine_combo.itemData(i)) for i in range(self.engine_combo.count())]
+
     def set_renderer(self, is_c4d: bool) -> None:
         """Adapt the settings to the active renderer so every visible control is
         real. Redshift: relabel samples, hide Blender-only Device + Color
@@ -1270,6 +1332,7 @@ class RenderPanel(QWidget):
         self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
         self.color_box.setVisible(not is_c4d)        # Blender color management
         self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
+        self.burn_in_cb.setVisible(not is_c4d)      # stamping is a Blender feature
         items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
         existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
         if existing != items:
@@ -1375,9 +1438,7 @@ class RenderPanel(QWidget):
         eng = str(s.get("engine", "")).upper()
         if eng:
             target = "CYCLES" if "CYCLES" in eng else ("BLENDER_EEVEE" if "EEVEE" in eng else "")
-            i = self.engine_combo.findText(target)
-            if i >= 0:
-                self.engine_combo.setCurrentIndex(i)
+            self.set_engine_value(target)
         # Render scale → nearest preset (100/75/50/25).
         if "resolution_percentage" in s:
             pct = int(s["resolution_percentage"])
@@ -1416,7 +1477,7 @@ class RenderPanel(QWidget):
             frame_start=to_int(self.frame_start_edit.text(), 1),
             frame_end=to_int(self.frame_end_edit.text(), 250),
             frame_step=max(1, to_int(self.frame_step_edit.text(), 1)),
-            engine=self.engine_combo.currentText(),
+            engine=self.engine_value(),
             samples=to_int(self.samples_edit.text(), 64),
             use_denoise=self.denoise_cb.isChecked(),
             output_format=out_fmt,
@@ -1427,6 +1488,7 @@ class RenderPanel(QWidget):
             device=device_map.get(self.device_combo.currentText(), "AUTO"),
             resolution_percentage=to_int(self.scale_combo.currentText().rstrip("%"), 100),
             film_transparent=self.transparent_cb.isChecked(),
+            burn_in=self.burn_in_cb.isChecked(),
             video_quality=quality_map.get(self.quality_combo.currentText(), "HIGH"),
             video_codec=codec_map.get(self.codec_combo.currentText(), ""),
             rs_min_samples=to_int(self.rs_min_samples_edit.text(), 4),
@@ -1465,9 +1527,7 @@ class RenderPanel(QWidget):
         setnum(self.exposure_edit, "color_exposure")
         setnum(self.gamma_edit, "color_gamma")
         if "engine" in d:
-            i = self.engine_combo.findText(str(d["engine"]))
-            if i >= 0:
-                self.engine_combo.setCurrentIndex(i)
+            self.set_engine_value(str(d["engine"]))
         if "output_profile" in d:
             i = self.profile_combo.findText(str(d["output_profile"]))
             if i >= 0:
@@ -1478,6 +1538,8 @@ class RenderPanel(QWidget):
             self.denoise_cb.setChecked(bool(d["use_denoise"]))
         if "film_transparent" in d:
             self.transparent_cb.setChecked(bool(d["film_transparent"]))
+        if "burn_in" in d:
+            self.burn_in_cb.setChecked(bool(d["burn_in"]))
         if "device" in d:
             self.device_combo.setCurrentText({"AUTO": "Auto", "GPU": "GPU", "CPU": "CPU"}.get(str(d["device"]).upper(), "Auto"))
         if "resolution_percentage" in d:
@@ -1550,6 +1612,13 @@ class DeadlinePanel(QWidget):
         self.use_dl_cb.stateChanged.connect(self._on_changed)
         root.addWidget(self.use_dl_cb)
 
+        # Connection state lives right under the toggle so test results are
+        # actually visible (it used to update a widget that was never shown).
+        self.connection_status_lbl.setText("Not connected — enable to test, or use Deadline → Test Connection")
+        self.connection_status_lbl.setWordWrap(True)
+        self.connection_status_lbl.setStyleSheet(f"color: {active_palette().text_faint}; font-size: 11px;")
+        root.addWidget(self.connection_status_lbl)
+
         # Container Widget for all other settings
         self.container = QWidget()
         container_layout = QVBoxLayout(self.container)
@@ -1576,7 +1645,8 @@ class DeadlinePanel(QWidget):
 
         # Manual Machine Selection
         container_layout.addWidget(section("MANUAL MACHINE SELECTION"))
-        self.dl_machines_list = QListWidget()
+        self.dl_machines_list = HintListWidget(
+            "Machine list loads from the farm.\nUse Deadline → Test Connection to fetch it.")
         self.dl_machines_list.setFixedHeight(120)
         self.dl_machines_list.itemChanged.connect(self._on_changed)
         container_layout.addWidget(self.dl_machines_list)
@@ -1724,6 +1794,7 @@ class QueuePanel(QWidget):
     job_renamed = Signal(int, str)
     clear_queue_requested = Signal()
     reveal_output_requested = Signal(int)
+    show_error_requested = Signal(int)
     open_output_requested = Signal(int)
     move_job_requested = Signal(int, int)  # job_id, delta (-1 up / +1 down)
 
@@ -1766,8 +1837,12 @@ class QueuePanel(QWidget):
         self.remove_btn = QPushButton(self)
         self.remove_btn.clicked.connect(self.remove_selected_requested.emit)
         self.remove_btn.hide()
-        self.table = QTableWidget(0, 6)
+        self.table = HintTableWidget(
+            0, 6, "Queue is empty.\nMap a clip to a material — a job appears here automatically.")
         self.table.setHorizontalHeaderLabels(["Run", "Job", "Preset", "Status", "Progress", "Output"])
+        run_header = self.table.horizontalHeaderItem(0)
+        if run_header is not None:
+            run_header.setToolTip("Checked jobs are included when you press Start.")
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -1824,6 +1899,7 @@ class QueuePanel(QWidget):
         self.progress_caption.setText(caption)
 
     def set_jobs(self, jobs: list[RenderJob]) -> None:
+        self._failed_ids = {j.id for j in jobs if j.status == "failed"}
         pal = active_palette()
         faint = QColor(pal.text_faint)
         self.table.blockSignals(True)
@@ -1972,10 +2048,12 @@ class QueuePanel(QWidget):
 
         selected_ids = self._selected_row_job_ids()
         menu = QMenu(self)
-        dup_action = reveal_action = open_action = up_action = down_action = delete_action = None
+        dup_action = reveal_action = open_action = up_action = down_action = delete_action = error_action = None
         if selected_ids:
             first = selected_ids[0]
             dup_action = menu.addAction(f"Duplicate  ({MOD_LABEL}D)")
+            if first in getattr(self, "_failed_ids", set()):
+                error_action = menu.addAction("Show Error…")
             menu.addSeparator()
             reveal_action = menu.addAction(f"Reveal Output in {file_manager_name()}")
             open_action = menu.addAction("Open Output")
@@ -1994,6 +2072,8 @@ class QueuePanel(QWidget):
             return
         if action == dup_action:
             self.duplicate_jobs_requested.emit(selected_ids)
+        elif error_action is not None and action == error_action:
+            self.show_error_requested.emit(first)
         elif action == delete_action:
             self.remove_jobs_requested.emit(selected_ids)
         elif action == reveal_action:
@@ -2023,7 +2103,8 @@ class PresetBrowserPanel(QWidget):
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
 
-        self.list = QListWidget()
+        self.list = HintListWidget(
+            "No presets yet.\nDial in render settings, then click Save to keep them as a reusable preset.")
         self.list.itemDoubleClicked.connect(self._load_current)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._show_context_menu)
@@ -2432,7 +2513,7 @@ class PreviewPanel(QWidget):
         lay.addWidget(self.frame_row_widget)
 
         self._pixmap: QPixmap | None = None
-        self.image_label = _PreviewImage("No preview yet.\nStart a render with Live Preview enabled.")
+        self.image_label = _PreviewImage("No preview yet.\nClick the camera button above to render the current frame.")
         self.image_label.setObjectName("HintLabel")
         self.image_label.setToolTip("Double-click to toggle Fit ⇄ 100% · drag to pan at 100%")
         # Scroll area lets fixed-zoom previews (100%, 200%…) pan; in Fit mode the
@@ -2473,6 +2554,12 @@ class PreviewPanel(QWidget):
             self.play_btn = QPushButton("Pause")
             self.play_btn.setObjectName("SmallButton")
             self.play_btn.clicked.connect(self._toggle_play)
+            self.play_btn.setToolTip("Play/pause the rendered movie (Space)")
+            space_act = QAction("Play/Pause", self)
+            space_act.setShortcut(QKeySequence(Qt.Key_Space))
+            space_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            space_act.triggered.connect(self._toggle_play)
+            self.addAction(space_act)
             self.mute_btn = QPushButton("Unmute")
             self.mute_btn.setObjectName("SmallButton")
             self.mute_btn.clicked.connect(self._toggle_mute)
@@ -2618,7 +2705,7 @@ class PreviewPanel(QWidget):
             self.stack.setCurrentIndex(0)
             self.controls.setVisible(False)
         self.image_label.clear_source()
-        self.image_label.setText("No preview yet.\nStart a render with Live Preview enabled.")
+        self.image_label.setText("No preview yet.\nClick the camera button above to render the current frame.")
         self.caption.setText("Live frame preview")
         self._goto_fit()
 

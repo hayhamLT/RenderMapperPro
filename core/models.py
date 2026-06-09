@@ -29,6 +29,7 @@ class RenderOptions:
     device: str = "AUTO"                 # AUTO | CPU | GPU
     resolution_percentage: int = 100     # render scale %
     film_transparent: bool = False       # transparent background (alpha)
+    burn_in: bool = False                # stamp clip/version/frame/date onto frames
     video_quality: str = "HIGH"          # FFMPEG constant_rate_factor
     video_codec: str = ""                # optional codec override (e.g. H265); blank = profile default
     # Redshift optimisation (render-speed levers; honoured only on the C4D path)

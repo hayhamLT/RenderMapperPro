@@ -272,7 +272,10 @@ def _mux_movie(ffmpeg: str, frames_dir: str, fps: int, out_file: str,
     else:
         cmd += ["-c:v", "libx265" if str(codec).upper() == "H265" else "libx264",
                 "-crf", crf.get(str(quality).upper(), "18"), "-pix_fmt", "yuv420p"]
-    cmd += [out_file]
+    # Tag rec.709 + faststart so QuickTimes look identical in every player/NLE
+    # (untagged movies get re-interpreted and shift colours).
+    cmd += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+            "-movflags", "+faststart", out_file]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, creationflags=_NO_WINDOW)
         ok = os.path.exists(out_file) and os.path.getsize(out_file) > 0

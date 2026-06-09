@@ -93,10 +93,37 @@ def discover_settings() -> dict:
     return s
 
 
+def material_aspects() -> dict:
+    """Estimate each material's screen aspect from the objects that use it: the
+    two largest world-space dimensions of the carrying object approximate a flat
+    screen's width x height. Lets the app warn when a 16:9 clip lands on a 21:9
+    screen. Best-effort — materials on non-flat geometry just give noise, so the
+    app only warns on large mismatches."""
+    aspects: dict[str, float] = {}
+    try:
+        for obj in bpy.data.objects:
+            if obj is None or obj.type != "MESH":
+                continue
+            dims = sorted((abs(obj.dimensions.x), abs(obj.dimensions.y), abs(obj.dimensions.z)),
+                          reverse=True)
+            if dims[0] <= 0 or dims[1] <= 0:
+                continue
+            ratio = dims[0] / dims[1]
+            for slot in obj.material_slots:
+                mat = slot.material
+                if mat is not None and mat.name and mat.name not in aspects:
+                    aspects[mat.name] = round(ratio, 3)
+    except Exception as exc:
+        log(f"aspect probe warning: {exc}")
+    return aspects
+
+
 def discover() -> dict:
     materials = sorted({m.name for m in bpy.data.materials if m is not None and m.name})
     cameras = sorted({obj.name for obj in bpy.data.objects if obj and obj.type == "CAMERA"})
-    return {"materials": materials, "cameras": cameras, "settings": discover_settings()}
+    settings = discover_settings()
+    settings["material_aspects"] = material_aspects()
+    return {"materials": materials, "cameras": cameras, "settings": settings}
 
 
 def main() -> None:
