@@ -123,7 +123,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -1074,6 +1074,26 @@ class AudioBadgeDelegate(MappingStripeDelegate):
                     self._toggle(path)
             return True  # swallow press/dblclick too → selection is untouched
         return super().editorEvent(event, model, option, index)
+
+
+class _ImageView(QWidget):
+    """Paints a pixmap directly in paintEvent over an opaque background — bypasses
+    a Qt quirk where a QLabel's pixmap (or a translucent widget) can fail to
+    composite while a global stylesheet is active."""
+
+    def __init__(self, pixmap: QPixmap, bg: Optional[str] = None,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._pm = pixmap
+        self._bg = QColor(bg) if bg else None
+        self.setFixedSize(pixmap.size())
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        if self._bg is not None:
+            painter.fillRect(self.rect(), self._bg)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.drawPixmap(0, 0, self._pm)
 
 
 class VideoListWidget(QListWidget):
@@ -4126,9 +4146,8 @@ class BlenderVideoMapperQt(QMainWindow):
             lay.addWidget(w, 0, Qt.AlignHCenter)
             return w
 
-        icon_lbl = QLabel()
-        icon_lbl.setPixmap(_make_app_icon().pixmap(QSize(92, 92)))
-        centered(icon_lbl)
+        lay.addWidget(_ImageView(_make_app_icon().pixmap(QSize(92, 92)), pal.window),
+                      0, Qt.AlignHCenter)
 
         name = centered(QLabel(APP_NAME))
         name.setStyleSheet(f"color:{pal.text}; font-size:19px; font-weight:700; margin-top:8px;")
@@ -4149,9 +4168,8 @@ class BlenderVideoMapperQt(QMainWindow):
         if logo is not None:
             pm = QPixmap(str(logo))
             if not pm.isNull():
-                logo_lbl = QLabel()
-                logo_lbl.setPixmap(pm.scaledToWidth(200, Qt.SmoothTransformation))
-                centered(logo_lbl)
+                lay.addWidget(_ImageView(pm.scaledToWidth(200, Qt.SmoothTransformation), pal.window),
+                              0, Qt.AlignHCenter)
             else:
                 logo = None
         if logo is None:
@@ -5107,6 +5125,24 @@ class BlenderVideoMapperQt(QMainWindow):
         diag_tools.addStretch()
         lay.addLayout(diag_tools)
         lay.addStretch()
+
+        # Powered-by branding (logo image if present in assets/, else styled text).
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"color:{self._palette.border};")
+        lay.addWidget(sep)
+        powered_lbl = QLabel("Powered by")
+        powered_lbl.setStyleSheet(f"color:{self._palette.text_faint}; font-size:11px;")
+        lay.addWidget(powered_lbl)
+        _logo = self._logo_path()
+        _logo_pm = QPixmap(str(_logo)) if _logo is not None else None
+        if _logo_pm is not None and not _logo_pm.isNull():
+            scaled = _logo_pm.scaledToWidth(170, Qt.SmoothTransformation)
+            lay.addWidget(_ImageView(scaled, self._palette.window), 0, Qt.AlignLeft)
+        else:
+            brand_lbl = QLabel("Toy Robot Media")
+            brand_lbl.setStyleSheet(f"color:{self._palette.text}; font-size:14px; font-weight:700;")
+            lay.addWidget(brand_lbl)
 
         # Dialog buttons live below the tabs.
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
