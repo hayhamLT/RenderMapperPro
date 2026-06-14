@@ -41,7 +41,11 @@ Every push to `main` also publishes the three builds as downloadable **workflow 
   - **Blender:** Cycles/EEVEE, samples, denoise, device, colour transform/exposure/gamma, transparent.
   - **Redshift:** Speed Preset (Draft→Final), Max/Min samples, adaptive Noise Threshold, denoise, GI bounces / on‑off, Max Ray Depth.
 - Output profiles: H.264 MP4, ProRes MOV, PNG/EXR sequence.
-- **Render farm (Thinkbox Deadline):** submit Blender *and* Cinema 4D jobs. C4D jobs are baked and rendered with the licensed Cinema 4D command‑line renderer; jobs carry the app icon in the Deadline Monitor and distribute frames across nodes.
+- **Render farm (Thinkbox Deadline):** submit Blender *and* Cinema 4D jobs. C4D jobs are baked and rendered with the licensed Cinema 4D command‑line renderer; jobs carry the app icon in the Deadline Monitor and distribute frames across nodes. **Auto‑chunking** sizes frames‑per‑task from render history; *Deadline → Farm Nodes…* lists the farm; right‑click a job to **Set Priority** or **Requeue**.
+- **Render analytics & cost:** every render records seconds/frame, total time and an estimated power **cost** (set wattage + rate in *Tools → Power & Cost*) — shown live and in *Tools → Render History*, with an upfront ETA from prior runs of the same scene.
+- **Output review:** auto‑generated **contact sheets** for each render (preview them from History), plus a shareable **HTML report** with timing, cost and embedded thumbnails.
+- **Notifications:** get pinged on render complete/fail via the system tray and/or a **Discord webhook** (*Tools → Notifications*) — everything also logs to Live Logs.
+- **Command palette** (**⌘/Ctrl+K**) to search and run any action; **light/dark** theme toggle (*View → Light Theme*).
 
 ### Live Preview
 
@@ -55,7 +59,7 @@ Every push to `main` also publishes the three builds as downloadable **workflow 
 - **Auto‑draft:** the moment you map a video it becomes a live job; edits save into it continuously — no "unsaved changes" limbo, no save dialog.
 - Always exactly **one active job** (remembered across sessions); selecting a row opens it, switching never loses work.
 - **Double‑click a job name to rename** (sticks; auto‑labels are tagged with the camera otherwise).
-- New jobs are added at the **top**; **⌘/Ctrl+D** duplicates, **Delete** removes, right‑click for Duplicate / Reveal / Open / Move / **Clear Queue**.
+- New jobs are added at the **top**; **⌘/Ctrl+D** duplicates, **Delete** removes, right‑click for Duplicate / Set Priority / Requeue / Reveal / Open / Move / **Clear Queue**.
 - Per‑row **Run** checkbox and progress; live, filterable logs (text + level filters).
 
 ## Project / preset files

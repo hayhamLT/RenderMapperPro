@@ -127,7 +127,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -820,6 +820,17 @@ class BlenderVideoMapperQt(QMainWindow):
         self-contained scene and rendered with the licensed Cinema 4D command-line renderer (the same
         engine the stock Cinema4D plugin uses), so node licensing just works. Frames distribute across
         nodes, and jobs show the app icon in the Deadline Monitor.</p>
+        <p class="muted"><b>Chunking</b> can be <i>Manual</i> or <i>Auto</i> (~5/10/20 min per task) —
+        Auto sizes Frames-Per-Task from your render history. <i>Deadline → Farm Nodes…</i> lists the
+        nodes on the farm, and right-clicking a queued job offers <b>Set Priority</b> and
+        <b>Requeue</b>.</p>
+        <h3>Analytics, reports &amp; notifications</h3>
+        <p class="muted">Renders record <b>seconds/frame</b>, total time and an estimated <b>cost</b>
+        (set machine wattage + rate in <i>Tools → Power &amp; Cost</i>); see them in
+        <i>Tools → Render History</i>, which also builds a <b>contact sheet</b> for any output. Each run
+        writes an <b>HTML report</b> (<i>Tools → Open HTML Render Report</i>) with timing, cost and
+        embedded thumbnails. Get pinged when a render finishes or fails via <i>Tools → Notifications</i>
+        — system tray and/or a <b>Discord webhook</b> (everything is also logged to Live Logs).</p>
         <h3>Audio</h3>
         <p class="muted">Any clip that contains sound shows a <b>speaker</b> badge in the Videos
         list. Click the badge (or right-click → <i>Mute audio</i>) to drop that clip's audio; every
@@ -827,19 +838,21 @@ class BlenderVideoMapperQt(QMainWindow):
         <h3>Queue</h3>
         <p class="muted">Click a row to activate and edit it; <b>double-click the name</b> to rename.
         New jobs (the <b>+</b> button) are added at the top. Duplicate with <kbd>⌘D</kbd>,
-        delete with <kbd>⌫</kbd>, or right-click for Duplicate / Reveal / Open / Move / Delete.
-        Tick the <b>Run</b> box to include a job when you press Start.</p>
+        delete with <kbd>⌫</kbd>, or right-click for Duplicate / Set Priority / Requeue / Reveal /
+        Open / Move / Delete. Tick the <b>Run</b> box to include a job when you press Start.</p>
         <h3>Layout &amp; appearance</h3>
         <p class="muted"><i>View → Layout</i> offers Default, All Panels (grid), Render Focus,
         Setup Focus, Stacked and Tabbed presets, plus <b>Save Current Layout</b>. Drag a panel's
         tab to rearrange, tab, or float it, and show/hide panels from <i>View</i>.
-        <i>View → Theme / Accent Color</i> restyle the app. The window opens at 70% of your
+        Toggle <i>View → Light Theme</i> for light/dark, and press <kbd>⌘K</kbd> for the
+        <b>command palette</b> to search and run any action. The window opens at 70% of your
         screen, centered, and remembers your size and position.</p>
         """
         self._show_help_dialog("Quick Start", html)
 
     def _show_shortcuts_help(self) -> None:
         rows = [
+            ("⌘K", "Command palette — search & run any action"),
             ("⌘O", "Open a project"),
             ("⌘S", "Save the project"),
             ("⌘,", "Properties & Settings"),
