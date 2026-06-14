@@ -63,6 +63,16 @@ class FrameTimer:
         return delta
 
 
+def auto_chunk_size(target_minutes: float, sec_per_frame: float, frame_count: int) -> int:
+    """Frames per Deadline task to target ~``target_minutes`` of work each, given
+    measured ``sec_per_frame``. Clamped to [1, frame_count]. Returns 0 when it
+    can't be computed (no timing yet) so the caller can fall back to manual."""
+    if target_minutes <= 0 or sec_per_frame <= 0 or frame_count <= 0:
+        return 0
+    frames = int((target_minutes * 60.0) / sec_per_frame)
+    return max(1, min(frames, frame_count))
+
+
 def estimate_energy_cost(duration_s: float, watts: float, rate_per_kwh: float,
                          machines: int = 1) -> tuple[float, float]:
     """From a render duration, return (kWh, cost) for the given draw (watts),

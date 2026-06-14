@@ -63,7 +63,12 @@ from PySide6.QtWidgets import (
 
 import icons
 import theme as T
-from core.metrics import estimate_energy_cost, estimate_output_bytes, predict_total_seconds
+from core.metrics import (
+    auto_chunk_size,
+    estimate_energy_cost,
+    estimate_output_bytes,
+    predict_total_seconds,
+)
 from core.models import (
     VIDEO_MAPPING_MODE_EMISSION,
     JobConfig,
@@ -536,11 +541,15 @@ class BlenderVideoMapperQt(QMainWindow):
         self._single_instance_server: object = None   # set by run_qt_app, kept alive
         self._power_watts = 300.0        # est. machine draw for cost reporting
         self._power_rate = 0.15          # electricity rate ($/kWh)
+        self._notify_desktop = True      # system-tray notifications on render events
+        self._discord_webhook = ""       # optional Discord webhook for render events
+        self._discord_thread: FuncThread | None = None
         self._job_durations: dict[int, float] = {}
         self._job_metrics: dict[int, dict] = {}   # job_id → {frames, avg_spf, p95_spf}
         self._preview_thread: PreviewFrameThread | None = None
         self._deadline_test_thread: DeadlineQueryThread | None = None
         self._props_deadline_thread: DeadlineQueryThread | None = None
+        self._farm_nodes_thread: DeadlineQueryThread | None = None
         # Managed background threads (vs. raw daemons) so closeEvent can wait on
         # them — a signal emitted after the app quits would otherwise crash Qt.
         self._update_check_thread: FuncThread | None = None
@@ -652,6 +661,7 @@ class BlenderVideoMapperQt(QMainWindow):
         force_act.toggled.connect(lambda on: setattr(self, "_c4d_force_submit", on))
         tools.addAction(force_act)
         tools.addAction("Power & Cost Settings…", self._show_power_settings)
+        tools.addAction("Notifications…", self._show_notification_settings)
         palette_act = tools.addAction("Command Palette…", self._show_command_palette)
         palette_act.setShortcut(QKeySequence("Ctrl+K"))   # ⌘K on macOS
         tools.addSeparator()
@@ -674,6 +684,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         deadline = mb.addMenu("Deadline")
         deadline.addAction("Test Connection", self._test_deadline_connection)
+        deadline.addAction("Farm Nodes…", self._show_farm_nodes)
         deadline.addAction("Export Current Job Files…", self._export_deadline_files)
 
         self.view_menu = mb.addMenu("View")
@@ -1032,6 +1043,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self.queue_panel.open_output_requested.connect(self._open_job_output)
         self.queue_panel.move_job_requested.connect(self._move_job)
         self.queue_panel.duplicate_jobs_requested.connect(self._duplicate_jobs)
+        self.queue_panel.set_priority_requested.connect(self._set_jobs_priority)
+        self.queue_panel.requeue_requested.connect(self._requeue_jobs)
         self.queue_panel.job_renamed.connect(self._on_job_renamed)
         self.queue_panel.clear_queue_requested.connect(self._clear_queue)
 
@@ -2679,7 +2692,7 @@ class BlenderVideoMapperQt(QMainWindow):
         job.output_input = self.render_panel.output_edit.text().strip()
         job.output_profile = self.render_panel.profile_combo.currentText()
         job.render_options = self.render_panel.render_options()
-        job.safe_mode = True
+        job.safe_mode = self.render_panel.safe_mode_cb.isChecked()
         job.use_deadline = self.deadline_panel.use_dl_cb.isChecked()
         job.deadline_pool = self.deadline_panel.dl_pool_combo.currentText().strip()
         job.deadline_secondary_pool = self.deadline_panel.dl_sec_pool_combo.currentText().strip()
@@ -2687,7 +2700,7 @@ class BlenderVideoMapperQt(QMainWindow):
         job.deadline_priority = self.deadline_panel.dl_prio_spin.value()
         job.deadline_comment = self._deadline_comment
         job.deadline_department = self.deadline_panel.dl_dept_edit.text().strip()
-        job.deadline_chunk_size = self.deadline_panel.dl_chunk_spin.value()
+        job.deadline_chunk_size = self._effective_chunk_size(job)
         job.deadline_suspended = self.deadline_panel.dl_suspended_cb.isChecked()
         job.deadline_submit_scene = self.deadline_panel.dl_submit_scene_cb.isChecked()
         job.deadline_job_name_template = self._deadline_job_name_template
@@ -3087,6 +3100,34 @@ class BlenderVideoMapperQt(QMainWindow):
         self.queue_panel.select_job(job_id)
         self._schedule_save()
 
+    def _set_jobs_priority(self, job_ids: object) -> None:
+        ids = [j for j in job_ids if isinstance(j, int)] if isinstance(job_ids, (list, tuple, set)) else []
+        if not ids:
+            return
+        cur = next((j.deadline_priority for j in self._jobs if j.id in ids), 50)
+        val, ok = QInputDialog.getInt(self, "Set Priority", "Deadline priority (0–100):", cur, 0, 100)
+        if not ok:
+            return
+        for j in self._jobs:
+            if j.id in ids:
+                j.deadline_priority = val
+        self._schedule_save()
+        self._show_toast(f"Priority set to {val} for {len(ids)} job(s).", "info")
+
+    def _requeue_jobs(self, job_ids: object) -> None:
+        ids = [j for j in job_ids if isinstance(j, int)] if isinstance(job_ids, (list, tuple, set)) else []
+        n = 0
+        for j in self._jobs:
+            if j.id in ids and j.status in ("failed", "cancelled", "success"):
+                j.status = "idle"
+                j.progress = 0.0
+                j.error = ""
+                j.selected = True
+                n += 1
+        if n:
+            self._refresh_queue_view()
+            self._show_toast(f"Requeued {n} job(s) — press Render to run them again.", "info")
+
     def _duplicate_jobs(self, job_ids: object) -> None:
         if self._is_rendering:
             return
@@ -3271,6 +3312,34 @@ class BlenderVideoMapperQt(QMainWindow):
             elif free < 2 * gb:
                 warns.append(f"Low disk space on “{dpaths[key]}”: {free / gb:.1f} GB free.")
         return warns
+
+    def _recent_spf_for_scene(self, scene_path: str) -> float:
+        """Most-recent measured sec/frame for this scene, from history (0 if none)."""
+        name = Path(scene_path).name
+        for h in self._load_history():   # newest-first
+            if h.get("scene") == name and h.get("avg_spf"):
+                return float(h["avg_spf"])
+        return 0.0
+
+    def _effective_chunk_size(self, job: RenderJob) -> int:
+        """Manual Frames-Per-Task, or an Auto value sized from render history."""
+        manual = self.deadline_panel.dl_chunk_spin.value()
+        target_min = self.deadline_panel.chunk_target_minutes()
+        if target_min <= 0:
+            return manual
+        opts = job.render_options
+        if opts is None:
+            return manual
+        fc = max(1, opts.frame_end - opts.frame_start + 1)
+        spf = self._recent_spf_for_scene(job.scene_path)
+        auto = auto_chunk_size(target_min, spf, fc)
+        if auto:
+            self._append_log(f"[deadline] Auto chunk: {auto} frames/task "
+                             f"(~{target_min:.0f} min at {spf:.1f}s/frame).")
+            return auto
+        self._append_log("[deadline] Auto chunk: no timing history for this scene yet — "
+                         f"using manual ({manual}).")
+        return manual
 
     def _deadline_warnings(self, pending: list[RenderJob]) -> list[str]:
         """Warn before submit if a job's Deadline pool/group isn't in the farm's
@@ -3911,12 +3980,35 @@ class BlenderVideoMapperQt(QMainWindow):
 
     # ── Notifications / when-done / reports ──────────────────────────────
     def _notify(self, title: str, message: str) -> None:
-        """System notification via the tray icon — carries the app's own icon and
-        clicking it focuses the app (the old osascript route showed Script
-        Editor's icon and opened Script Editor on click). Works on Windows too."""
+        """Fan an event out to every enabled channel: Live Logs always (the
+        no-popup-safe surface), the system tray if enabled, and a Discord webhook
+        if configured — so unattended overnight renders can reach you."""
+        self._append_log(f"[notify] {title} — {message}")
         tray = getattr(self, "_tray", None)
-        if tray is not None and QSystemTrayIcon.supportsMessages():
+        if self._notify_desktop and tray is not None and QSystemTrayIcon.supportsMessages():
             tray.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 6000)
+        self._dispatch_discord(f"**{title}** — {message}")
+
+    def _dispatch_discord(self, content: str) -> None:
+        """POST a message to the configured Discord webhook off-thread (no-op if
+        unset). Failures are surfaced to Live Logs, never raised."""
+        url = (self._discord_webhook or "").strip()
+        if not url:
+            return
+
+        def work() -> None:
+            try:
+                import urllib.request
+                data = json.dumps({"content": content[:1900]}).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=data,
+                    headers={"Content-Type": "application/json", "User-Agent": APP_NAME})
+                urllib.request.urlopen(req, timeout=10).close()
+            except Exception as exc:
+                self._delivery_log.emit(f"Discord notification failed: {exc}", "error")
+
+        self._discord_thread = FuncThread(work)
+        self._discord_thread.start()
 
     def _build_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -4235,6 +4327,100 @@ class BlenderVideoMapperQt(QMainWindow):
         populate()
         search.setFocus()
         dlg.exec()
+
+    def _show_farm_nodes(self) -> None:
+        """A live list of the Deadline farm's render nodes (reuses the proven
+        deadlinecommand query path), with a Refresh button."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Farm Nodes")
+        dlg.setMinimumSize(420, 460)
+        lay = QVBoxLayout(dlg)
+        status = QLabel("Fetching nodes…")
+        status.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        lay.addWidget(status)
+        lst = QListWidget()
+        lay.addWidget(lst)
+        roww = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh")
+        roww.addWidget(refresh_btn)
+        roww.addStretch()
+        lay.addLayout(roww)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+
+        def _on_done(res: dict) -> None:
+            try:
+                refresh_btn.setEnabled(True)
+                if not res.get("ok"):
+                    status.setText(f"Couldn't reach the farm: {(res.get('error', '') or '')[:200]}")
+                    return
+                machines = res.get("machines", [])
+                lst.clear()
+                for m in machines:
+                    lst.addItem(QListWidgetItem(m))
+                status.setText(f"{len(machines)} node(s) on the farm.")
+            except RuntimeError:
+                pass
+
+        def fetch() -> None:
+            cmd = self.deadline_panel.dl_cmd_edit.text().strip() \
+                or find_deadlinecommand() or "deadlinecommand"
+            if not Path(cmd).exists() and not shutil.which(cmd):
+                status.setText("deadlinecommand not found — set it in Properties → Deadline.")
+                return
+            if self._farm_nodes_thread is not None and self._farm_nodes_thread.isRunning():
+                return
+            status.setText("Fetching nodes…")
+            refresh_btn.setEnabled(False)
+            self._farm_nodes_thread = DeadlineQueryThread(
+                cmd, self.deadline_panel.dl_repo_edit.text().strip())
+            self._farm_nodes_thread.result.connect(_on_done)
+            self._farm_nodes_thread.start()
+
+        refresh_btn.clicked.connect(fetch)
+        fetch()
+        dlg.exec()
+
+    def _show_notification_settings(self) -> None:
+        """Configure render-event notifications: system tray + an optional Discord
+        webhook. Everything also always goes to Live Logs (no-popup-safe)."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Notifications")
+        dlg.setMinimumWidth(440)
+        form = QFormLayout(dlg)
+        desktop_cb = QCheckBox("Desktop notifications (system tray)")
+        desktop_cb.setChecked(self._notify_desktop)
+        form.addRow(desktop_cb)
+        webhook = QLineEdit(self._discord_webhook)
+        webhook.setPlaceholderText("https://discord.com/api/webhooks/…")
+        form.addRow("Discord webhook URL:", webhook)
+        hint = QLabel("Render-complete and failure events post here. Leave blank to disable. "
+                      "Create one in Discord → Server Settings → Integrations → Webhooks.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        form.addRow(hint)
+        test_btn = QPushButton("Send Test")
+
+        def _send_test() -> None:
+            self._discord_webhook = webhook.text().strip()
+            if not self._discord_webhook:
+                self._show_toast("Enter a webhook URL first.", "warning")
+                return
+            self._dispatch_discord("✅ Test notification from Render Mapper Pro")
+            self._show_toast("Test sent — check Discord (and Live Logs for errors).", "info")
+
+        test_btn.clicked.connect(_send_test)
+        form.addRow(test_btn)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        if dlg.exec():
+            self._notify_desktop = desktop_cb.isChecked()
+            self._discord_webhook = webhook.text().strip()
+            self._schedule_save()
 
     def _show_power_settings(self) -> None:
         """Configure the per-machine power draw + electricity rate used to
@@ -4833,6 +5019,8 @@ class BlenderVideoMapperQt(QMainWindow):
             "accent": self._accent,
             "power_watts": self._power_watts,
             "power_rate": self._power_rate,
+            "notify_desktop": self._notify_desktop,
+            "discord_webhook": self._discord_webhook,
             "live_preview": self._preview_enabled,
             "watch_folder": watch_folder,
             "watch_enabled": watch_enabled,
@@ -4936,6 +5124,8 @@ class BlenderVideoMapperQt(QMainWindow):
             self._power_rate = float(d.get("power_rate", self._power_rate))
         except (TypeError, ValueError):
             pass
+        self._notify_desktop = bool(d.get("notify_desktop", self._notify_desktop))
+        self._discord_webhook = str(d.get("discord_webhook", self._discord_webhook) or "")
         if "live_preview" in d:
             self._preview_enabled = bool(d.get("live_preview", True))
             if hasattr(self, "preview_action"):
@@ -5337,7 +5527,7 @@ class BlenderVideoMapperQt(QMainWindow):
         # mid-run (which crashes Qt) and its headless subprocess isn't orphaned.
         for attr in ("_preview_thread", "_discovery_thread", "_export_thread",
                      "_runtime_install_thread", "_deadline_test_thread",
-                     "_props_deadline_thread", "_update_check_thread"):
+                     "_props_deadline_thread", "_farm_nodes_thread", "_update_check_thread"):
             t = getattr(self, attr, None)
             if t is not None and t.isRunning():
                 if hasattr(t, "request_cancel"):
@@ -5351,6 +5541,9 @@ class BlenderVideoMapperQt(QMainWindow):
         st = self._sheet_thread
         if st is not None and st.isRunning():
             st.wait(15000)
+        nt = self._discord_thread
+        if nt is not None and nt.isRunning():
+            nt.wait(5000)
         event.accept()
 
 

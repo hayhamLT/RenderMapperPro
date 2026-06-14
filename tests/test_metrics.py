@@ -1,12 +1,27 @@
 """Tests for core.metrics — render-time analytics math."""
 from core.metrics import (
     FrameTimer,
+    auto_chunk_size,
     estimate_energy_cost,
     estimate_output_bytes,
     percentile,
     predict_total_seconds,
     summarize,
 )
+
+
+def test_auto_chunk_size():
+    # 10 min target at 2 s/frame = 300 frames of work per task.
+    assert auto_chunk_size(10, 2.0, 1000) == 300
+    # Clamped to the available frame count.
+    assert auto_chunk_size(10, 2.0, 100) == 100
+    # 10 min at 100 s/frame = 6 frames.
+    assert auto_chunk_size(10, 100.0, 1000) == 6
+    # No timing or no target → 0 so the caller falls back to manual.
+    assert auto_chunk_size(5, 0, 100) == 0
+    assert auto_chunk_size(0, 2.0, 100) == 0
+    # Never below 1 when computable.
+    assert auto_chunk_size(0.001, 2.0, 100) == 1
 
 
 def test_estimate_energy_cost():

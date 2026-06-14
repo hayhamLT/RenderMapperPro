@@ -106,3 +106,37 @@ def test_power_cost_roundtrips(tmp_path, monkeypatch):
     w2._apply_profile_data(w._profile_dict())
     assert w2._power_watts == 450.0
     assert w2._power_rate == 0.22
+
+
+def test_notify_settings_roundtrip(tmp_path, monkeypatch):
+    app_qt, w = _window(tmp_path, monkeypatch)
+    w._notify_desktop = False
+    w._discord_webhook = "https://discord.com/api/webhooks/abc"
+    w2 = app_qt.BlenderVideoMapperQt()
+    w2._apply_profile_data(w._profile_dict())
+    assert w2._notify_desktop is False
+    assert w2._discord_webhook == "https://discord.com/api/webhooks/abc"
+
+
+def test_requeue_jobs(tmp_path, monkeypatch):
+    app_qt, w = _window(tmp_path, monkeypatch)
+    job = app_qt.RenderJob(id=1)
+    job.status = "failed"
+    job.error = "boom"
+    job.progress = 100.0
+    job.selected = False
+    w._jobs = [job]
+    w._requeue_jobs([1])
+    assert job.status == "idle"
+    assert job.selected is True
+    assert job.error == ""
+    assert job.progress == 0.0
+
+
+def test_chunk_target_minutes(tmp_path, monkeypatch):
+    _app_qt, w = _window(tmp_path, monkeypatch)
+    dp = w.deadline_panel
+    dp.dl_chunk_strategy.setCurrentIndex(0)   # Manual
+    assert dp.chunk_target_minutes() == 0.0
+    dp.dl_chunk_strategy.setCurrentIndex(2)   # ~10 min
+    assert dp.chunk_target_minutes() == 10.0

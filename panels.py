@@ -1185,11 +1185,18 @@ class RenderPanel(QWidget):
                                    "onto every frame — so reviews always know which version "
                                    "they're looking at. (Farm C4D renders: not yet.)")
         self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
+        self.safe_mode_cb = QCheckBox("Validate file paths (safe mode)")
+        self.safe_mode_cb.setChecked(True)
+        self.safe_mode_cb.setToolTip(
+            "Before rendering, check that the scene and every mapped clip exist, are "
+            "readable, and have a supported extension. Turn off only if you use "
+            "symlinks or relative paths that are valid on the render machine.")
         cb_row = QHBoxLayout()
         cb_row.setSpacing(18)
         cb_row.addWidget(self.denoise_cb)
         cb_row.addWidget(self.transparent_cb)
         cb_row.addWidget(self.burn_in_cb)
+        cb_row.addWidget(self.safe_mode_cb)
         cb_row.addStretch(1)
         adv.addLayout(cb_row)
 
@@ -1701,10 +1708,21 @@ class DeadlinePanel(QWidget):
         self.dl_prio_spin.valueChanged.connect(self._on_changed)
         ctrl_layout.addRow("Priority (0-100):", self.dl_prio_spin)
 
+        self.dl_chunk_strategy = QComboBox()
+        self.dl_chunk_strategy.addItems(
+            ["Manual", "Auto · ~5 min/task", "Auto · ~10 min/task", "Auto · ~20 min/task"])
+        self.dl_chunk_strategy.setToolTip(
+            "Auto sizes Frames Per Task from your render history so each task runs "
+            "about the chosen time. Falls back to the manual value when there's no "
+            "timing history for the scene yet.")
+        self.dl_chunk_strategy.currentIndexChanged.connect(self._on_changed)
+        ctrl_layout.addRow("Chunking:", self.dl_chunk_strategy)
+
         self.dl_chunk_spin = QSpinBox()
         self.dl_chunk_spin.setRange(1, 10000)
         self.dl_chunk_spin.setValue(1)
-        self.dl_chunk_spin.setToolTip("How many frames rendered by one machine per task")
+        self.dl_chunk_spin.setToolTip("How many frames rendered by one machine per task "
+                                      "(used directly when Chunking = Manual)")
         self.dl_chunk_spin.valueChanged.connect(self._on_changed)
         ctrl_layout.addRow("Frames Per Task:", self.dl_chunk_spin)
 
@@ -1761,6 +1779,10 @@ class DeadlinePanel(QWidget):
         self.dl_machines_list.blockSignals(False)
         self._on_changed()
 
+    def chunk_target_minutes(self) -> float:
+        """Target minutes-per-task for Auto chunking; 0.0 means Manual."""
+        return {1: 5.0, 2: 10.0, 3: 20.0}.get(self.dl_chunk_strategy.currentIndex(), 0.0)
+
     def get_selected_machines(self) -> str:
         selected = []
         for i in range(self.dl_machines_list.count()):
@@ -1814,6 +1836,8 @@ class QueuePanel(QWidget):
     show_error_requested = Signal(int)
     open_output_requested = Signal(int)
     move_job_requested = Signal(int, int)  # job_id, delta (-1 up / +1 down)
+    set_priority_requested = Signal(object)   # job_ids → window prompts for value
+    requeue_requested = Signal(object)        # job_ids → reset to idle + selected
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1919,6 +1943,7 @@ class QueuePanel(QWidget):
 
     def set_jobs(self, jobs: list[RenderJob]) -> None:
         self._failed_ids = {j.id for j in jobs if j.status == "failed"}
+        self._finished_ids = {j.id for j in jobs if j.status in ("failed", "cancelled", "success")}
         pal = active_palette()
         faint = QColor(pal.text_faint)
         self.table.blockSignals(True)
@@ -2068,11 +2093,15 @@ class QueuePanel(QWidget):
         selected_ids = self._selected_row_job_ids()
         menu = QMenu(self)
         dup_action = reveal_action = open_action = up_action = down_action = delete_action = error_action = None
+        prio_action = requeue_action = None
         if selected_ids:
             first = selected_ids[0]
             dup_action = menu.addAction(f"Duplicate  ({MOD_LABEL}D)")
             if first in getattr(self, "_failed_ids", set()):
                 error_action = menu.addAction("Show Error…")
+            prio_action = menu.addAction("Set Priority…")
+            if any(i in getattr(self, "_finished_ids", set()) for i in selected_ids):
+                requeue_action = menu.addAction("Requeue (run again)")
             menu.addSeparator()
             reveal_action = menu.addAction(f"Reveal Output in {file_manager_name()}")
             open_action = menu.addAction("Open Output")
@@ -2093,6 +2122,10 @@ class QueuePanel(QWidget):
             self.duplicate_jobs_requested.emit(selected_ids)
         elif error_action is not None and action == error_action:
             self.show_error_requested.emit(first)
+        elif prio_action is not None and action == prio_action:
+            self.set_priority_requested.emit(selected_ids)
+        elif requeue_action is not None and action == requeue_action:
+            self.requeue_requested.emit(selected_ids)
         elif action == delete_action:
             self.remove_jobs_requested.emit(selected_ids)
         elif action == reveal_action:
