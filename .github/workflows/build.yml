@@ -12,6 +12,8 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -62,6 +64,7 @@ jobs:
   build:
     name: Build (${{ matrix.label }})
     needs: [lint-test, ui-smoke]
+    if: github.event_name != 'pull_request'   # PRs run gates only, not full builds
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -114,6 +117,7 @@ jobs:
   build-intel:
     name: Build (macOS-intel)
     needs: [lint-test, ui-smoke]
+    if: github.event_name != 'pull_request'   # PRs run gates only, not full builds
     runs-on: macos-13
     steps:
       - uses: actions/checkout@v4
