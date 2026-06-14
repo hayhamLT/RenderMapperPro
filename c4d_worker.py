@@ -366,7 +366,8 @@ def _extract_frame(ffmpeg: str, video: str, frame: int, fps: int, out_png: str) 
 def main() -> None:
     if len(sys.argv) < 2:
         raise RuntimeError("Missing config path argument")
-    cfg = json.loads(open(sys.argv[1], encoding="utf-8").read())
+    with open(sys.argv[1], encoding="utf-8") as _cfg_file:
+        cfg = json.loads(_cfg_file.read())
     render = cfg.get("render", {})
     scene = cfg["scene_path"]
 

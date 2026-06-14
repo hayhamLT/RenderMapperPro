@@ -7,7 +7,7 @@ line-length = 120
 target-version = "py312"
 # deadline/ is excluded deliberately: the plugin runs inside Deadline's own
 # (old) Python host on the farm, so py312 modernisation could break it there.
-extend-exclude = ["patch.py", "vendor", "dist", "build", ".venv", "deadline"]
+extend-exclude = ["vendor", "dist", "build", ".venv", "deadline"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

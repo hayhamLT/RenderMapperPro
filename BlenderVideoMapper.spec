@@ -39,6 +39,7 @@ a = Analysis(
         ('c4d_worker.py', '.'),
         ('c4d_discover.py', '.'),
         ('assets', 'assets'),
+        ('THIRD_PARTY_LICENSES.md', '.'),   # GPL/LGPL notices for bundled ffmpeg + Qt
     ],
     hiddenimports=[],
     hookspath=[],

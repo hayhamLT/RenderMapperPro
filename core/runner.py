@@ -163,11 +163,19 @@ def submit_deadline_job(
         if not prepared.exists():
             raise RuntimeError("Cinema 4D scene bake failed — prepared .c4d was not produced.")
         # A bake that produced no clip frames means ffmpeg extraction failed — refuse
-        # to submit a blank/unmapped render that would "succeed" on the farm.
+        # to submit a blank/unmapped render that would "succeed" on the farm. The
+        # user can override this guard (force_submit) when they know better.
         seq_dir = staging_dir / "seq"
-        if job.material_assignments and not (seq_dir.is_dir() and any(seq_dir.glob("*.png"))):
-            raise RuntimeError("Cinema 4D bake produced no clip frames (ffmpeg extraction "
-                               "likely failed) — refusing to submit a blank render.")
+        no_frames = not (seq_dir.is_dir() and any(seq_dir.glob("*.png")))
+        if job.material_assignments and no_frames:
+            if getattr(job, "force_submit", False):
+                if on_log:
+                    on_log("[deadline] WARNING: bake produced no clip frames, but "
+                           "force-submit is on — submitting anyway.")
+            else:
+                raise RuntimeError("Cinema 4D bake produced no clip frames (ffmpeg extraction "
+                                   "likely failed) — refusing to submit a blank render. Enable "
+                                   "“Force submit” in Tools to override.")
 
         out_p = Path(job.output_path)
         if out_p.suffix:           # a movie/file path → frames next to it
@@ -189,6 +197,12 @@ def submit_deadline_job(
             f.write("Plugin=RenderMapperPro\n")
             f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
             chunk = getattr(job, "deadline_chunk_size", 1)
+            frame_count = job.render.frame_end - job.render.frame_start + 1
+            if chunk and chunk > frame_count:
+                if on_log:
+                    on_log(f"[deadline] Chunk size {chunk} exceeds the {frame_count}-frame "
+                           f"range; clamping to {frame_count}.")
+                chunk = frame_count
             if chunk and chunk > 1:
                 f.write(f"ChunkSize={chunk}\n")
             f.write(f"OutputDirectory0={out_dir}\n")
@@ -289,8 +303,17 @@ def submit_deadline_job(
         ext = ext_for_format(job.render.output_format)
         is_video = ext != ""
         chunk_size = getattr(job, 'deadline_chunk_size', 1)
+        frame_count = job.render.frame_end - job.render.frame_start + 1
         if is_video:
-            chunk_size = max(1, job.render.frame_end - job.render.frame_start + 1)
+            chunk_size = max(1, frame_count)
+        elif chunk_size > frame_count:
+            # A chunk larger than the range yields a job Deadline can't split,
+            # wasting a farm round-trip to discover it. Clamp to the frame count.
+            if on_log:
+                on_log(f"[deadline] Chunk size {chunk_size} exceeds the {frame_count}-frame "
+                       f"range; clamping to {frame_count}.")
+            chunk_size = frame_count
+        chunk_size = max(1, chunk_size)
         if chunk_size > 1:
             f.write(f"ChunkSize={chunk_size}\n")
 
@@ -351,22 +374,24 @@ def submit_deadline_job(
         on_log(f"[deadline] Submitting job: frames {job.render.frame_start}-{job.render.frame_end}")
         on_log("[deadline] Command: " + " ".join(cmd))
 
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        creationflags=subprocess_creation_flags(),
+    )
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            creationflags=subprocess_creation_flags(),
-        )
         if process.stdout is not None:
             for line in process.stdout:
                 if on_log:
                     on_log(line.rstrip())
         return process.wait()
     finally:
-        pass
+        # Never leak the deadlinecommand subprocess if on_log throws mid-stream.
+        if process.poll() is None:
+            process.kill()
 
 
 C4D_LICENSE_INPUT = "1\n"   # selects "Maxon App" at c4dpy's license-method prompt

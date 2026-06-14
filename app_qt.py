@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import threading
 import time
 import urllib.request
 import zipfile
@@ -37,12 +36,15 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMenu,
@@ -61,12 +63,7 @@ from PySide6.QtWidgets import (
 
 import icons
 import theme as T
-
-try:
-    _HAS_MULTIMEDIA = True
-except Exception:
-    _HAS_MULTIMEDIA = False
-
+from core.metrics import estimate_energy_cost, estimate_output_bytes, predict_total_seconds
 from core.models import (
     VIDEO_MAPPING_MODE_EMISSION,
     JobConfig,
@@ -88,6 +85,7 @@ from media import (
     _find_ffprobe,
     _normalize_fps,
     _parse_mp4_info,
+    build_contact_sheet,
     find_ffmpeg_tool,
     probe_video_size,
     reveal_in_file_manager,
@@ -106,7 +104,14 @@ from theme import set_active_palette
 from ui_widgets import (
     _ImageView,
 )
-from workers import DeadlineQueryThread, DiscoveryThread, ExportBlendThread, PreviewFrameThread, RenderThread
+from workers import (
+    DeadlineQueryThread,
+    DiscoveryThread,
+    ExportBlendThread,
+    FuncThread,
+    PreviewFrameThread,
+    RenderThread,
+)
 
 PROFILE_PATH = Path.home() / ".blender_video_mapper" / "profile.json"
 PRESETS_DIR = Path.home() / ".blender_video_mapper" / "presets"
@@ -250,17 +255,26 @@ def _find_blender(preferred: str = "") -> str | None:
                 for bundle in sorted(root.glob("Blender*.app"), reverse=True):
                     add(str(bundle))
                     add(str(bundle / "Contents/MacOS/Blender"))
+        add(str(Path.home() / "Library/Application Support/Steam/steamapps/common/"
+                              "Blender/Blender.app/Contents/MacOS/Blender"))
     elif os.name == "nt":
         import glob as _glob
+        local = os.environ.get("LOCALAPPDATA", "")
         for pat in (r"C:\Program Files\Blender Foundation\Blender *\blender.exe",
                     r"C:\Program Files\Blender Foundation\*\blender.exe",
                     r"C:\Program Files\Blender Foundation\blender.exe",
-                    r"C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe"):
+                    r"C:\Program Files (x86)\Steam\steamapps\common\Blender\blender.exe",
+                    r"D:\Steam\steamapps\common\Blender\blender.exe",
+                    r"D:\SteamLibrary\steamapps\common\Blender\blender.exe",
+                    (local + r"\Programs\Blender Foundation\*\blender.exe") if local else ""):
+            if not pat:
+                continue
             for hit in sorted(_glob.glob(pat), reverse=True):
                 add(hit)
     else:  # linux
         import glob as _glob
-        for p in ("/usr/bin/blender", "/usr/local/bin/blender", "/snap/bin/blender"):
+        for p in ("/usr/bin/blender", "/usr/local/bin/blender", "/snap/bin/blender",
+                  str(Path.home() / ".local/bin/blender")):
             add(p)
         for hit in sorted(_glob.glob("/opt/blender*/blender"), reverse=True):
             add(hit)
@@ -271,6 +285,26 @@ def _find_blender(preferred: str = "") -> str | None:
             return r
     return None
 
+
+# Blender versions this app has been tested against. Outside this range still
+# runs, but warn the user since render/preview behavior may differ.
+BLENDER_MIN_TESTED = (4, 0)
+BLENDER_MAX_TESTED = (5, 99)
+
+
+def _blender_version_status(version_line: str) -> str:
+    """Format a 'Blender X.Y.Z' --version line with a compatibility hint."""
+    m = re.search(r"(\d+)\.(\d+)", version_line)
+    if not m:
+        return f"✓ {version_line}"
+    mv = (int(m.group(1)), int(m.group(2)))
+    if mv < BLENDER_MIN_TESTED:
+        return (f"⚠ {version_line} — older than the recommended "
+                f"{BLENDER_MIN_TESTED[0]}.{BLENDER_MIN_TESTED[1]}+; may not render correctly.")
+    if mv > BLENDER_MAX_TESTED:
+        return (f"⚠ {version_line} — newer than the tested range "
+                f"({BLENDER_MIN_TESTED[0]}.x–{BLENDER_MAX_TESTED[0]}.x); untested, but worth a try.")
+    return f"✓ {version_line}"
 
 
 def _resolve_runtime_script(name: str) -> str:
@@ -290,11 +324,14 @@ class RuntimeInstallThread(QThread):
 
     def _download(self, url: str, dest: Path) -> None:
         self.log.emit(f"[runtime] Downloading {url}")
+        self.log.emit("[runtime] This is a ~300–700 MB download and can take several minutes.")
         req = urllib.request.Request(url, headers={"User-Agent": "RenderMapperPro/1.0"})
         with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:
             total = int(resp.headers.get("Content-Length", "0") or "0")
             read = 0
             last_pct = -5
+            t0 = time.monotonic()
+            mb = 1024 * 1024
             while True:
                 chunk = resp.read(1024 * 512)
                 if not chunk:
@@ -305,7 +342,12 @@ class RuntimeInstallThread(QThread):
                     pct = int((read / total) * 100)
                     if pct >= last_pct + 5:        # 5% steps, not one line per 512 KB
                         last_pct = pct
-                        self.log.emit(f"[runtime] Download {pct}% of {total // (1024 * 1024)} MB")
+                        elapsed = max(0.001, time.monotonic() - t0)
+                        speed = read / elapsed     # bytes/s
+                        eta = (total - read) / speed if speed > 0 else 0
+                        self.log.emit(
+                            f"[runtime] Download {pct}% — {read // mb}/{total // mb} MB "
+                            f"· {speed / mb:.1f} MB/s · ~{int(eta)}s left")
 
     def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
         name = archive_path.name.lower()
@@ -426,6 +468,7 @@ class RuntimeInstallThread(QThread):
 class BlenderVideoMapperQt(QMainWindow):
     _update_checked = Signal(object, bool)   # (manifest dict | None, was-manual)
     _delivery_log = Signal(str, str)         # (message, kind) from the delivery-copy thread
+    _sheets_built = Signal(int)              # count of contact sheets generated post-render
 
     def __init__(self) -> None:
         super().__init__()
@@ -446,6 +489,11 @@ class BlenderVideoMapperQt(QMainWindow):
         self._is_rendering = False
         self._pending_autorender_ids: set = set()   # auto-render jobs deferred while a render runs
         self._scan_in_progress = False
+        # Animated "still working" indicator for long operations (e.g. Scan).
+        self._busy_timer: QTimer | None = None
+        self._busy_active = False
+        self._busy_label = ""
+        self._busy_i = 0
         self._known_videos: set[str] = set()
         self._ffmpeg_hint_shown = False
         self._active_job_id: int | None = None
@@ -483,11 +531,26 @@ class BlenderVideoMapperQt(QMainWindow):
         self._aspect_warned: set = set()    # (material, clip) pairs already warned about
         self._autorender_start = False        # auto-start vs queue-only
         self._last_report_path = ""
+        self._last_html_report_path = ""
+        self._c4d_force_submit = False   # override the C4D blank-bake guard
+        self._single_instance_server: object = None   # set by run_qt_app, kept alive
+        self._power_watts = 300.0        # est. machine draw for cost reporting
+        self._power_rate = 0.15          # electricity rate ($/kWh)
         self._job_durations: dict[int, float] = {}
+        self._job_metrics: dict[int, dict] = {}   # job_id → {frames, avg_spf, p95_spf}
         self._preview_thread: PreviewFrameThread | None = None
         self._deadline_test_thread: DeadlineQueryThread | None = None
+        self._props_deadline_thread: DeadlineQueryThread | None = None
+        # Managed background threads (vs. raw daemons) so closeEvent can wait on
+        # them — a signal emitted after the app quits would otherwise crash Qt.
+        self._update_check_thread: FuncThread | None = None
+        self._delivery_thread: FuncThread | None = None
+        self._shutting_down = False
         self._update_checked.connect(self._on_update_checked)
         self._delivery_log.connect(self._show_toast)
+        self._sheets_built.connect(
+            lambda n: self._append_log(f"[app] Generated {n} contact sheet(s).") if n else None)
+        self._sheet_thread: FuncThread | None = None
         self._undo_stack: list = []      # (description, restore_callable) for destructive actions
 
         self._apply_theme()
@@ -511,6 +574,19 @@ class BlenderVideoMapperQt(QMainWindow):
         self._palette = T.build_palette(self._theme_mode, self._accent)
         set_active_palette(self._palette)
         self.setStyleSheet(T.stylesheet(self._palette))
+
+    def _toggle_theme(self, light: bool) -> None:
+        mode = "light" if light else "dark"
+        if mode == self._theme_mode:
+            return
+        self._theme_mode = mode
+        self._restyle_all()
+        # Keep the menu checkmark in sync even when toggled programmatically.
+        if hasattr(self, "theme_action") and self.theme_action.isChecked() != light:
+            self.theme_action.blockSignals(True)
+            self.theme_action.setChecked(light)
+            self.theme_action.blockSignals(False)
+        self._schedule_save()
 
     def _restyle_all(self) -> None:
         """Rebuild stylesheet and re-tint every icon for the active palette."""
@@ -538,7 +614,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         edit = mb.addMenu("Edit")
         self._undo_action = QAction("Undo", self)
-        self._undo_action.setShortcut(QKeySequence.Undo)   # ⌘Z / Ctrl+Z
+        self._undo_action.setShortcut(QKeySequence.StandardKey.Undo)   # ⌘Z / Ctrl+Z
         self._undo_action.setEnabled(False)
         self._undo_action.triggered.connect(self._undo)
         edit.addAction(self._undo_action)
@@ -548,9 +624,9 @@ class BlenderVideoMapperQt(QMainWindow):
         props_act.setShortcut(QKeySequence("Ctrl+,"))   # ⌘, — the macOS settings convention
         profile.addSeparator()
         open_act = profile.addAction("Open Project…", self._open_project)
-        open_act.setShortcut(QKeySequence.Open)          # ⌘O / Ctrl+O
+        open_act.setShortcut(QKeySequence.StandardKey.Open)          # ⌘O / Ctrl+O
         save_act = profile.addAction("Save Project As…", self._save_project)
-        save_act.setShortcut(QKeySequence.Save)          # ⌘S / Ctrl+S
+        save_act.setShortcut(QKeySequence.StandardKey.Save)          # ⌘S / Ctrl+S
         profile.addSeparator()
         profile.addAction("Save Preset…", self._save_preset)
         profile.addAction("Load Preset…", self._load_preset)
@@ -564,6 +640,20 @@ class BlenderVideoMapperQt(QMainWindow):
         self._open_report_action.triggered.connect(self._open_last_report)
         self._open_report_action.setEnabled(False)
         tools.addAction(self._open_report_action)
+        self._open_html_action = QAction("Open HTML Render Report", self)
+        self._open_html_action.triggered.connect(self._open_html_report)
+        self._open_html_action.setEnabled(False)
+        tools.addAction(self._open_html_action)
+        tools.addSeparator()
+        force_act = QAction("Force C4D Submit (ignore blank-bake guard)", self, checkable=True)
+        force_act.setToolTip("Submit Cinema 4D farm jobs even when the bake produced no clip "
+                             "frames. Off by default — only enable if you know the blank result "
+                             "is intentional.")
+        force_act.toggled.connect(lambda on: setattr(self, "_c4d_force_submit", on))
+        tools.addAction(force_act)
+        tools.addAction("Power & Cost Settings…", self._show_power_settings)
+        palette_act = tools.addAction("Command Palette…", self._show_command_palette)
+        palette_act.setShortcut(QKeySequence("Ctrl+K"))   # ⌘K on macOS
         tools.addSeparator()
         tools.addAction("Copy Diagnostics", self._copy_diagnostics)
         tools.addSeparator()
@@ -573,7 +663,7 @@ class BlenderVideoMapperQt(QMainWindow):
         for label, val in (("Do Nothing", "nothing"), ("Quit App", "quit"), ("Sleep Computer", "sleep")):
             act = QAction(label, self, checkable=True)
             act.setChecked(val == self._when_done)
-            act.triggered.connect(lambda _c=False, v=val: setattr(self, "_when_done", v) or self._schedule_save())
+            act.triggered.connect(lambda _c=False, v=val: self._set_when_done(v))
             when_group.addAction(act)
             when_menu.addAction(act)
         self._when_actions = {a.text(): a for a in when_group.actions()}
@@ -602,6 +692,10 @@ class BlenderVideoMapperQt(QMainWindow):
         layout_menu.addAction(self.restore_layout_action)
 
         self.view_menu.addSeparator()
+        self.theme_action = QAction("Light Theme", self, checkable=True)
+        self.theme_action.setChecked(self._theme_mode == "light")
+        self.theme_action.toggled.connect(self._toggle_theme)
+        self.view_menu.addAction(self.theme_action)
         self.preview_action = QAction("Live Preview While Rendering", self, checkable=True)
         self.preview_action.setChecked(self._preview_enabled)
         self.preview_action.toggled.connect(self._set_preview_enabled)
@@ -645,7 +739,7 @@ class BlenderVideoMapperQt(QMainWindow):
         browser.setStyleSheet(f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 16px; }}")
         browser.setHtml(html)
         lay.addWidget(browser)
-        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(dlg.reject)
         btns.accepted.connect(dlg.accept)
         lay.addWidget(btns)
@@ -776,7 +870,7 @@ class BlenderVideoMapperQt(QMainWindow):
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(28, 26, 28, 22)
         lay.setSpacing(6)
-        lay.setAlignment(Qt.AlignHCenter)
+        lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         def centered(w):
             w.setAlignment(Qt.AlignCenter)
@@ -784,7 +878,7 @@ class BlenderVideoMapperQt(QMainWindow):
             return w
 
         lay.addWidget(_ImageView(_make_app_icon().pixmap(QSize(92, 92)), pal.window),
-                      0, Qt.AlignHCenter)
+                      0, Qt.AlignmentFlag.AlignHCenter)
 
         name = centered(QLabel(APP_NAME))
         name.setStyleSheet(f"color:{pal.text}; font-size:19px; font-weight:700; margin-top:8px;")
@@ -795,7 +889,7 @@ class BlenderVideoMapperQt(QMainWindow):
         desc.setWordWrap(True)
 
         sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color:{pal.border}; margin:14px 40px;")
         lay.addWidget(sep)
 
@@ -805,16 +899,16 @@ class BlenderVideoMapperQt(QMainWindow):
         if logo is not None:
             pm = QPixmap(str(logo))
             if not pm.isNull():
-                scaled = pm.scaledToWidth(260, Qt.SmoothTransformation)  # 2× of 130 for Retina
+                scaled = pm.scaledToWidth(260, Qt.TransformationMode.SmoothTransformation)  # 2× of 130 for Retina
                 scaled.setDevicePixelRatio(2.0)
-                lay.addWidget(_ImageView(scaled, pal.window), 0, Qt.AlignHCenter)
+                lay.addWidget(_ImageView(scaled, pal.window), 0, Qt.AlignmentFlag.AlignHCenter)
             else:
                 logo = None
         if logo is None:
             brand = centered(QLabel("Toy Robot Media"))
             brand.setStyleSheet(f"color:{pal.text}; font-size:14px; font-weight:700;")
 
-        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(dlg.reject)
         btns.accepted.connect(dlg.accept)
         lay.addSpacing(10)
@@ -823,19 +917,19 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _build_layout(self) -> None:
         self.setDockOptions(
-            QMainWindow.AllowNestedDocks
-            | QMainWindow.AllowTabbedDocks
-            | QMainWindow.AnimatedDocks
-            | QMainWindow.GroupedDragging
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
+            | QMainWindow.DockOption.GroupedDragging
         )
         # Tabs on top (the tab acts as the panel header) instead of Qt's default
         # bottom placement.
-        self.setTabPosition(Qt.AllDockWidgetAreas, QTabWidget.North)
+        self.setTabPosition(Qt.DockWidgetArea.AllDockWidgetAreas, QTabWidget.TabPosition.North)
 
         # No central widget at all: the docks fill the whole window. A zero-size
         # central widget would otherwise leave a phantom, draggable separator
         # pinned to the far-right edge.
-        self.setCentralWidget(None)
+        self.setCentralWidget(None)  # type: ignore[arg-type]  # Qt: None clears it
 
         self.scene_panel = ScenePanel()
         self.render_panel = RenderPanel()
@@ -872,7 +966,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 f"[app] Auto-mapped {n} of {total} materials by name"
                 + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
-        self.scene_panel.watch_changed.connect(lambda *_: (self._save_profile(), self._update_status_bar()))
+        self.scene_panel.watch_changed.connect(lambda *_: self._save_and_refresh_status())
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
@@ -959,15 +1053,15 @@ class BlenderVideoMapperQt(QMainWindow):
         # Custom QWidget subclasses ignore their stylesheet background unless
         # WA_StyledBackground is set — without this the panel paints nothing and
         # you see through it (e.g. to the panel behind it in a tab stack).
-        widget.setAttribute(Qt.WA_StyledBackground, True)
+        widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         dock.setWidget(widget)
         # Standard dock behaviour: movable, floatable and closable. Closable is
         # what lets the View-menu toggleViewAction() entries enable/check; without
         # it Qt greys them out because the panel can never be hidden.
         dock.setFeatures(
-            QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetFloatable
-            | QDockWidget.DockWidgetClosable
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
         # When a dock gets tabbed / untabbed / floated, re-evaluate whether its
         # title bar should be hidden (tabbed → tab is the header) or shown.
@@ -993,7 +1087,7 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.setSpacing(0)
         chip = QLabel(dock.windowTitle(), bar)
         chip.setObjectName("SoloTab")
-        lay.addWidget(chip, 0, Qt.AlignLeft | Qt.AlignBottom)
+        lay.addWidget(chip, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom)
         lay.addStretch(1)
         return bar
 
@@ -1033,7 +1127,7 @@ class BlenderVideoMapperQt(QMainWindow):
         bar.setObjectName("FlowBar")
         bar.setMovable(False)
         bar.setFloatable(False)
-        self.addToolBar(Qt.TopToolBarArea, bar)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
 
         container = QWidget()
         row = QHBoxLayout(container)
@@ -1126,7 +1220,7 @@ class BlenderVideoMapperQt(QMainWindow):
         anim.setDuration(320)
         anim.setStartValue(1.0)
         anim.setEndValue(0.0)
-        anim.setEasingCurve(QEasingCurve.InCubic)
+        anim.setEasingCurve(QEasingCurve.Type.InCubic)
         anim.finished.connect(toast.deleteLater)
         anim.start()
         self._toast_anim = anim
@@ -1154,7 +1248,7 @@ class BlenderVideoMapperQt(QMainWindow):
             d.setFloating(False)
             self.removeDockWidget(d)
         for d in self._all_docks:
-            self.addDockWidget(Qt.LeftDockWidgetArea, d)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, d)
             d.show()
 
         if preset == "grid":
@@ -1163,42 +1257,42 @@ class BlenderVideoMapperQt(QMainWindow):
             #   col1: Scene / Presets
             #   col2: Render Settings / Deadline Farm
             #   col3: Queue / Live Preview / Live Logs
-            self.splitDockWidget(sc, rd, Qt.Horizontal)
-            self.splitDockWidget(rd, q, Qt.Horizontal)
-            self.splitDockWidget(sc, pr, Qt.Vertical)
-            self.splitDockWidget(rd, dl, Qt.Vertical)
-            self.splitDockWidget(q, pv, Qt.Vertical)
-            self.splitDockWidget(pv, lg, Qt.Vertical)
-            self.resizeDocks([sc, rd, q], [440, 440, 560], Qt.Horizontal)
-            self.resizeDocks([sc, pr], [480, 320], Qt.Vertical)
-            self.resizeDocks([rd, dl], [480, 320], Qt.Vertical)
-            self.resizeDocks([q, pv, lg], [360, 320, 180], Qt.Vertical)
+            self.splitDockWidget(sc, rd, Qt.Orientation.Horizontal)
+            self.splitDockWidget(rd, q, Qt.Orientation.Horizontal)
+            self.splitDockWidget(sc, pr, Qt.Orientation.Vertical)
+            self.splitDockWidget(rd, dl, Qt.Orientation.Vertical)
+            self.splitDockWidget(q, pv, Qt.Orientation.Vertical)
+            self.splitDockWidget(pv, lg, Qt.Orientation.Vertical)
+            self.resizeDocks([sc, rd, q], [440, 440, 560], Qt.Orientation.Horizontal)
+            self.resizeDocks([sc, pr], [480, 320], Qt.Orientation.Vertical)
+            self.resizeDocks([rd, dl], [480, 320], Qt.Orientation.Vertical)
+            self.resizeDocks([q, pv, lg], [360, 320, 180], Qt.Orientation.Vertical)
         elif preset == "focus":
             # Big render-monitoring layout: Scene+Render left, Queue+Preview
             # large on the right, Logs underneath.
-            self.splitDockWidget(sc, q, Qt.Horizontal)
-            self.splitDockWidget(sc, rd, Qt.Vertical)
-            self.splitDockWidget(q, lg, Qt.Vertical)
+            self.splitDockWidget(sc, q, Qt.Orientation.Horizontal)
+            self.splitDockWidget(sc, rd, Qt.Orientation.Vertical)
+            self.splitDockWidget(q, lg, Qt.Orientation.Vertical)
             self.tabifyDockWidget(rd, dl)
             self.tabifyDockWidget(rd, pr)
             self.tabifyDockWidget(q, pv)
             rd.raise_()
             pv.raise_()
-            self.resizeDocks([sc, q], [430, 870], Qt.Horizontal)
-            self.resizeDocks([q, lg], [640, 220], Qt.Vertical)
+            self.resizeDocks([sc, q], [430, 870], Qt.Orientation.Horizontal)
+            self.resizeDocks([q, lg], [640, 220], Qt.Orientation.Vertical)
         elif preset == "setup":
             # Configuration-focused: Scene + Render Settings side by side and
             # large; the render/monitor docks tabbed along the bottom.
-            self.splitDockWidget(sc, rd, Qt.Horizontal)
-            self.splitDockWidget(sc, q, Qt.Vertical)
+            self.splitDockWidget(sc, rd, Qt.Orientation.Horizontal)
+            self.splitDockWidget(sc, q, Qt.Orientation.Vertical)
             self.tabifyDockWidget(sc, dl)
             self.tabifyDockWidget(q, pr)
             self.tabifyDockWidget(q, lg)
             self.tabifyDockWidget(q, pv)
             sc.raise_()
             q.raise_()
-            self.resizeDocks([sc, rd], [620, 620], Qt.Horizontal)
-            self.resizeDocks([sc, q], [560, 240], Qt.Vertical)
+            self.resizeDocks([sc, rd], [620, 620], Qt.Orientation.Horizontal)
+            self.resizeDocks([sc, q], [560, 240], Qt.Orientation.Vertical)
         elif preset == "tabbed":
             # Single pane: every panel tabbed into one stack, maximising the
             # working area of whichever panel is active.
@@ -1207,23 +1301,23 @@ class BlenderVideoMapperQt(QMainWindow):
             sc.raise_()
         elif preset == "stacked":
             # Two columns: Scene left, everything else tabbed on the right.
-            self.splitDockWidget(sc, rd, Qt.Horizontal)
+            self.splitDockWidget(sc, rd, Qt.Orientation.Horizontal)
             for d in (dl, q, pr, lg, pv):
                 self.tabifyDockWidget(rd, d)
             rd.raise_()
-            self.resizeDocks([sc, rd], [430, 1040], Qt.Horizontal)
+            self.resizeDocks([sc, rd], [430, 1040], Qt.Orientation.Horizontal)
         else:  # "default" — three columns
-            self.splitDockWidget(sc, rd, Qt.Horizontal)
-            self.splitDockWidget(rd, q, Qt.Horizontal)
-            self.splitDockWidget(rd, pr, Qt.Vertical)
-            self.splitDockWidget(q, lg, Qt.Vertical)
+            self.splitDockWidget(sc, rd, Qt.Orientation.Horizontal)
+            self.splitDockWidget(rd, q, Qt.Orientation.Horizontal)
+            self.splitDockWidget(rd, pr, Qt.Orientation.Vertical)
+            self.splitDockWidget(q, lg, Qt.Orientation.Vertical)
             self.tabifyDockWidget(rd, dl)
             self.tabifyDockWidget(q, pv)
             rd.raise_()
             q.raise_()
-            self.resizeDocks([sc, rd, q], [380, 480, 620], Qt.Horizontal)
-            self.resizeDocks([rd, pr], [520, 240], Qt.Vertical)
-            self.resizeDocks([q, lg], [640, 200], Qt.Vertical)
+            self.resizeDocks([sc, rd, q], [380, 480, 620], Qt.Orientation.Horizontal)
+            self.resizeDocks([rd, pr], [520, 240], Qt.Orientation.Vertical)
+            self.resizeDocks([q, lg], [640, 200], Qt.Orientation.Vertical)
 
         self._current_layout = preset
         self._schedule_titlebar_sync()
@@ -1287,7 +1381,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._schedule_save()
 
     def _save_custom_layout(self) -> None:
-        self._custom_layout_state = bytes(self.saveState().toBase64()).decode("ascii")
+        self._custom_layout_state = bytes(self.saveState().toBase64().data()).decode("ascii")
         if hasattr(self, "restore_layout_action"):
             self.restore_layout_action.setEnabled(True)
         self._schedule_save()
@@ -1367,13 +1461,13 @@ class BlenderVideoMapperQt(QMainWindow):
             "Blender Not Found",
             "Blender is missing. Install managed Blender runtime now?\n\n"
             "Choose No to locate Blender manually.",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
         )
-        if ans == QMessageBox.Yes:
+        if ans == QMessageBox.StandardButton.Yes:
             self._install_managed_runtime()
             return None
-        if ans == QMessageBox.No:
+        if ans == QMessageBox.StandardButton.No:
             self._show_properties_dialog()
         return _find_blender(self._blender_path)
 
@@ -1386,10 +1480,10 @@ class BlenderVideoMapperQt(QMainWindow):
             "Install Blender Runtime",
             "No Blender installation was found.\n"
             "Would you like to download and install a managed Blender runtime now?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
-        if ans == QMessageBox.Yes:
+        if ans == QMessageBox.StandardButton.Yes:
             self._install_managed_runtime()
 
     def _install_managed_runtime(self) -> None:
@@ -1398,6 +1492,9 @@ class BlenderVideoMapperQt(QMainWindow):
             return
 
         self._append_log(f"[runtime] Installing Blender {BLENDER_RUNTIME_VERSION}...")
+        if hasattr(self, "logs_dock"):   # surface the download progress
+            self.logs_dock.show()
+            self.logs_dock.raise_()
         self._runtime_install_thread = RuntimeInstallThread(self)
         self._runtime_install_thread.log.connect(self._append_log)
         self._runtime_install_thread.finished_install.connect(self._on_runtime_installed)
@@ -1550,7 +1647,8 @@ class BlenderVideoMapperQt(QMainWindow):
                 out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15)
                 text = (out.stdout or out.stderr).strip()
                 first = text.splitlines()[0] if text else ""
-                blender_ver_lbl.setText(f"✓ {first}" if first else "Could not read Blender version.")
+                blender_ver_lbl.setText(
+                    _blender_version_status(first) if first else "Could not read Blender version.")
             except Exception as exc:
                 blender_ver_lbl.setText(f"Version check failed: {exc}")
 
@@ -1560,7 +1658,9 @@ class BlenderVideoMapperQt(QMainWindow):
                 blender_edit.setText(found)
                 do_check_version()
             else:
-                blender_ver_lbl.setText("No Blender found in the usual locations.")
+                blender_ver_lbl.setText(
+                    "No Blender found in the usual locations. Use “Locate” to pick it "
+                    "manually, or set the BLENDER_PATH environment variable.")
 
         detect_btn.clicked.connect(do_autodetect)
         install_btn.clicked.connect(self._install_managed_runtime)
@@ -1742,6 +1842,16 @@ class BlenderVideoMapperQt(QMainWindow):
                 cmd_edit.setText(chosen)
         cmd_locate.clicked.connect(do_locate_cmd)
 
+        repo_help = QLabel(
+            "Repository Path is your Deadline repository folder — e.g. "
+            "/opt/Thinkbox/Deadline/repository, or \\\\server\\DeadlineRepository on "
+            "Windows. Leave it blank to use this machine's configured default. "
+            "Command Path is auto-detected; set it only if deadlinecommand isn't found. "
+            "Use Test Connection to verify — any failure shows full details in Live Logs.")
+        repo_help.setWordWrap(True)
+        repo_help.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        lay.addWidget(repo_help)
+
         # Name Template
         template_row = QHBoxLayout()
         template_edit = QLineEdit(self._deadline_job_name_template)
@@ -1806,7 +1916,7 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.addStretch()
 
         # Dialog buttons live below the tabs.
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         root.addWidget(btns)
 
         # Handle Ok/Cancel
@@ -1857,90 +1967,79 @@ class BlenderVideoMapperQt(QMainWindow):
         btns.accepted.connect(on_accept)
         btns.rejected.connect(dlg.reject)
 
-        # Handle testing connection and exporting files inside dialog
-        def run_test_connection() -> None:
-            cmd = cmd_edit.text().strip()
-            if not cmd:
-                cmd = find_deadlinecommand() or "deadlinecommand"
+        # Handle testing connection and exporting files inside dialog. The query
+        # runs off-thread (DeadlineQueryThread) so the dialog never freezes — the
+        # modal event loop still delivers the result signal while it's open.
+        def _apply_props_test_result(res: dict) -> None:
+            ok = bool(res.get("ok"))
+            dp = self.deadline_panel
+            if ok:
+                pools = res.get("pools", [])
+                current_pool = dp.dl_pool_combo.currentText()
+                current_sec_pool = dp.dl_sec_pool_combo.currentText()
+                dp.dl_pool_combo.clear()
+                dp.dl_sec_pool_combo.clear()
+                dp.dl_pool_combo.addItems(pools)
+                dp.dl_sec_pool_combo.addItems([""] + pools)
+                if current_pool:
+                    dp.dl_pool_combo.setCurrentText(current_pool)
+                if current_sec_pool:
+                    dp.dl_sec_pool_combo.setCurrentText(current_sec_pool)
 
-            status_lbl.setText("Connection status: Testing...")
-            status_lbl.setStyleSheet(f"color: {self._palette.warning}; font-size: 11px; font-weight: bold;")
-            QApplication.processEvents()
+                groups = res.get("groups", [])
+                current_group = dp.dl_group_combo.currentText()
+                dp.dl_group_combo.clear()
+                dp.dl_group_combo.addItems([""] + groups)
+                if current_group:
+                    dp.dl_group_combo.setCurrentText(current_group)
 
-            if not Path(cmd).exists() and not shutil.which(cmd):
-                status_lbl.setText("Connection status: deadlinecommand not found")
-                status_lbl.setStyleSheet(f"color: {self._palette.danger}; font-size: 11px; font-weight: bold;")
-                QMessageBox.critical(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
-                return
+                machines = res.get("machines", [])
+                dp.dl_machines_list.blockSignals(True)
+                currently_checked = {
+                    dp.dl_machines_list.item(i).text().strip()
+                    for i in range(dp.dl_machines_list.count())
+                    if dp.dl_machines_list.item(i).checkState() == Qt.CheckState.Checked
+                }
+                dp.dl_machines_list.clear()
+                for m in machines:
+                    item = QListWidgetItem(m)
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(
+                        Qt.CheckState.Checked if (m in currently_checked or not currently_checked)
+                        else Qt.CheckState.Unchecked)
+                    dp.dl_machines_list.addItem(item)
+                dp.dl_machines_list.blockSignals(False)
 
-            repo = repo_edit.text().strip()
-            if repo:
-                p_args = [cmd, "RunCommandForRepository", "Direct", repo, "-pools"]
-                g_args = [cmd, "RunCommandForRepository", "Direct", repo, "-groups"]
-                m_args = [cmd, "RunCommandForRepository", "Direct", repo, "-GetSlaveNames"]
-            else:
-                p_args = [cmd, "-pools"]
-                g_args = [cmd, "-groups"]
-                m_args = [cmd, "-GetSlaveNames"]
-
+            # Dialog feedback — guarded, since the dialog may be closed mid-test.
             try:
-                p_res = subprocess.run(p_args, capture_output=True, text=True, timeout=8)
-                g_res = subprocess.run(g_args, capture_output=True, text=True, timeout=8)
-                m_res = subprocess.run(m_args, capture_output=True, text=True, timeout=8)
-
-                if p_res.returncode == 0:
-                    pools = [line.strip() for line in p_res.stdout.splitlines() if line.strip()]
-                    current_pool = self.deadline_panel.dl_pool_combo.currentText()
-                    current_sec_pool = self.deadline_panel.dl_sec_pool_combo.currentText()
-                    self.deadline_panel.dl_pool_combo.clear()
-                    self.deadline_panel.dl_sec_pool_combo.clear()
-                    self.deadline_panel.dl_pool_combo.addItems(pools)
-                    self.deadline_panel.dl_sec_pool_combo.addItems([""] + pools)
-                    if current_pool:
-                        self.deadline_panel.dl_pool_combo.setCurrentText(current_pool)
-                    if current_sec_pool:
-                        self.deadline_panel.dl_sec_pool_combo.setCurrentText(current_sec_pool)
-
-                if g_res.returncode == 0:
-                    groups = [line.strip() for line in g_res.stdout.splitlines() if line.strip()]
-                    current_group = self.deadline_panel.dl_group_combo.currentText()
-                    self.deadline_panel.dl_group_combo.clear()
-                    self.deadline_panel.dl_group_combo.addItems([""] + groups)
-                    if current_group:
-                        self.deadline_panel.dl_group_combo.setCurrentText(current_group)
-
-                if m_res.returncode == 0:
-                    machines = [line.strip() for line in m_res.stdout.splitlines() if line.strip()]
-                    self.deadline_panel.dl_machines_list.blockSignals(True)
-                    currently_checked = set()
-                    for i in range(self.deadline_panel.dl_machines_list.count()):
-                        item = self.deadline_panel.dl_machines_list.item(i)
-                        if item.checkState() == Qt.Checked:
-                            currently_checked.add(item.text().strip())
-
-                    self.deadline_panel.dl_machines_list.clear()
-                    for m in machines:
-                        item = QListWidgetItem(m)
-                        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                        if m in currently_checked or not currently_checked:
-                            item.setCheckState(Qt.Checked)
-                        else:
-                            item.setCheckState(Qt.Unchecked)
-                        self.deadline_panel.dl_machines_list.addItem(item)
-                    self.deadline_panel.dl_machines_list.blockSignals(False)
-
-                if p_res.returncode == 0:
+                test_conn_btn.setEnabled(True)
+                if ok:
                     status_lbl.setText("Connection status: Connected")
                     status_lbl.setStyleSheet(f"color: {self._palette.success}; font-size: 11px; font-weight: bold;")
                     QMessageBox.information(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
                 else:
                     status_lbl.setText("Connection status: Connection failed")
                     status_lbl.setStyleSheet(f"color: {self._palette.danger}; font-size: 11px; font-weight: bold;")
-                    QMessageBox.warning(dlg, "Deadline Warning", f"deadlinecommand returned exit code {p_res.returncode}.\nStderr: {p_res.stderr.strip()}")
-            except Exception as exc:
-                status_lbl.setText(f"Connection status: Error ({type(exc).__name__})")
+                    QMessageBox.warning(dlg, "Deadline Warning",
+                                        res.get("error", "") or "deadlinecommand failed.")
+            except RuntimeError:
+                pass   # dialog already closed
+
+        def run_test_connection() -> None:
+            cmd = cmd_edit.text().strip() or find_deadlinecommand() or "deadlinecommand"
+            status_lbl.setText("Connection status: Testing...")
+            status_lbl.setStyleSheet(f"color: {self._palette.warning}; font-size: 11px; font-weight: bold;")
+            if not Path(cmd).exists() and not shutil.which(cmd):
+                status_lbl.setText("Connection status: deadlinecommand not found")
                 status_lbl.setStyleSheet(f"color: {self._palette.danger}; font-size: 11px; font-weight: bold;")
-                QMessageBox.critical(dlg, "Deadline Connection Error", f"Failed to communicate with Deadline:\n{exc}")
+                QMessageBox.critical(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
+                return
+            if self._props_deadline_thread is not None and self._props_deadline_thread.isRunning():
+                return
+            test_conn_btn.setEnabled(False)
+            self._props_deadline_thread = DeadlineQueryThread(cmd, repo_edit.text().strip())
+            self._props_deadline_thread.result.connect(_apply_props_test_result)
+            self._props_deadline_thread.start()
 
         test_conn_btn.clicked.connect(run_test_connection)
         export_files_btn.clicked.connect(self._export_deadline_files)
@@ -1974,7 +2073,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 return
             blender = self._blender_path
         else:
-            blender = self._ensure_blender(interactive=True)
+            blender = self._ensure_blender(interactive=True) or ""
             if not blender:
                 return
         self._add_recent_scene(scene)
@@ -1984,9 +2083,9 @@ class BlenderVideoMapperQt(QMainWindow):
         self._scan_in_progress = True
         self.scene_panel.scan_btn.setEnabled(False)
         self._append_log("[app] Scanning scene...")
-        # Headless Blender can take 10-60s to open a heavy scene; without this
-        # the app just looks inert while it works.
-        self.statusBar().showMessage(f"Scanning {Path(scene).name} — this can take a minute…")
+        # Headless Blender can take 10-60s to open a heavy scene; the animated
+        # spinner + busy cursor make clear it's working, not frozen.
+        self._begin_busy(f"Scanning {Path(scene).name}")
 
         try:
             script = _resolve_runtime_script("blender_discover.py")
@@ -1995,6 +2094,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._append_log(f"[app] ERROR: {exc}")
             self.scene_panel.scan_btn.setEnabled(True)
             self._scan_in_progress = False
+            self._end_busy()
             return
 
         self._discovery_thread = DiscoveryThread(
@@ -2084,25 +2184,39 @@ class BlenderVideoMapperQt(QMainWindow):
                     "(no update token was baked in).")
             return
 
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+        def _fetch(use_token: bool):
+            import urllib.request
+            headers = {"Accept": "application/vnd.github+json",
+                       "X-GitHub-Api-Version": "2022-11-28",
+                       "User-Agent": APP_NAME}
+            if use_token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.loads(r.read().decode("utf-8"))
+
         def work():
             info = None
             try:
-                import urllib.request
-                req = urllib.request.Request(
-                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-                    headers={"Authorization": f"Bearer {token}",
-                             "Accept": "application/vnd.github+json",
-                             "X-GitHub-Api-Version": "2022-11-28",
-                             "User-Agent": APP_NAME})
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    info = json.loads(r.read().decode("utf-8"))
+                info = _fetch(use_token=True)
             except Exception:
-                info = None
+                # Token may be revoked or rate-limited — fall back to the public
+                # API (works if the repo is/becomes public) so updates degrade
+                # gracefully instead of breaking on a single embedded credential.
+                try:
+                    info = _fetch(use_token=False)
+                except Exception:
+                    info = None
             self._update_checked.emit(info, manual)
 
-        threading.Thread(target=work, daemon=True).start()
+        self._update_check_thread = FuncThread(work)
+        self._update_check_thread.start()
 
     def _on_update_checked(self, info, manual: bool) -> None:
+        if self._shutting_down:
+            return
         if not info:
             if manual:
                 QMessageBox.information(self, "Updates", "Couldn't reach GitHub to check for updates.")
@@ -2118,20 +2232,20 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _offer_update(self, info, tag: str) -> None:
         box = QMessageBox(self)
-        box.setIcon(QMessageBox.Information)
+        box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("Update Available")
         box.setText(f"{APP_NAME} {tag} is available — you have v{APP_VERSION}.")
         notes = str(info.get("body") or "").strip()
         if notes:
             box.setInformativeText(notes[:600] + ("…" if len(notes) > 600 else ""))
-        get = box.addButton("Download Update", QMessageBox.AcceptRole)
-        box.addButton("Later", QMessageBox.RejectRole)
+        get = box.addButton("Download Update", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         if box.clickedButton() is get:
             self._fetch_update(info)
 
     def _fetch_update(self, info) -> None:
-        want = self._ASSET_FOR_PLATFORM.get(_update_platform_key())
+        want = self._ASSET_FOR_PLATFORM.get(_update_platform_key()) or ""
         asset = next((a for a in info.get("assets", []) if a.get("name") == want), None)
         if not asset:
             QMessageBox.warning(self, "Update",
@@ -2232,22 +2346,67 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _on_discovery_error(self, err: str) -> None:
         self._append_log(f"[app] Discovery ERROR: {err}")
-        scene_name = Path(self.scene_panel.scene_edit.text().strip()).name or "the scene"
+        scene = self.scene_panel.scene_edit.text().strip()
+        scene_name = Path(scene).name or "the scene"
+        # Distinguish "gone" from "present but unreadable" (cloud sync / permissions).
+        detail = ("The file may be from a newer Blender/Cinema 4D version, still syncing "
+                  "from Dropbox, or moved. Try opening it in the DCC once, then Rescan.")
+        if scene:
+            p = Path(scene).expanduser()
+            if not p.exists():
+                detail = ("The scene file isn't at that path anymore — it may have moved or a "
+                          "network/cloud drive isn't mounted. Use Browse to re-locate it.")
+            elif not os.access(str(p), os.R_OK):
+                detail = ("The scene file exists but can't be read — likely still syncing from "
+                          "the cloud, or a permissions issue. Wait for sync to finish, then Rescan.")
+                self._append_log(f"[app] Scene not readable (os.R_OK failed): {p}")
         box = QMessageBox(self)
-        box.setIcon(QMessageBox.Critical)
+        box.setIcon(QMessageBox.Icon.Critical)
         box.setWindowTitle("Scan Failed")
         box.setText(f"Couldn't read materials and cameras from {scene_name}.")
-        box.setInformativeText(
-            "The file may be from a newer Blender/Cinema 4D version, still syncing "
-            "from Dropbox, or moved. Try opening it in the DCC once, then Rescan. "
-            "Technical details below.")
+        box.setInformativeText(detail + "\n\nTechnical details below.")
         box.setDetailedText(err)
+        rescan = box.addButton("Rescan", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
         box.exec()
+        if box.clickedButton() is rescan:
+            self._scan_scene()
+
+    _BUSY_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _begin_busy(self, label: str) -> None:
+        """Show an animated spinner + busy cursor in the status bar for a
+        long-running operation, so the app never looks frozen."""
+        self._busy_label = label
+        if self._busy_active:
+            return
+        self._busy_active = True
+        self._busy_i = 0
+        if self._busy_timer is None:
+            self._busy_timer = QTimer(self)
+            self._busy_timer.timeout.connect(self._tick_busy)
+        self._busy_timer.start(110)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._tick_busy()
+
+    def _tick_busy(self) -> None:
+        frame = self._BUSY_FRAMES[self._busy_i % len(self._BUSY_FRAMES)]
+        self._busy_i += 1
+        self.statusBar().showMessage(f"{frame}  {self._busy_label} — this can take a minute…")
+
+    def _end_busy(self) -> None:
+        if not self._busy_active:
+            return
+        self._busy_active = False
+        if self._busy_timer is not None:
+            self._busy_timer.stop()
+        QApplication.restoreOverrideCursor()
+        self.statusBar().clearMessage()
 
     def _on_discovery_done(self) -> None:
         self._scan_in_progress = False
         self.scene_panel.scan_btn.setEnabled(True)
-        self.statusBar().clearMessage()
+        self._end_busy()
 
     def _reprobe_loaded_videos(self) -> None:
         """Re-read the loaded video files from disk and update fps + frame range
@@ -2802,9 +2961,9 @@ class BlenderVideoMapperQt(QMainWindow):
         resp = QMessageBox.question(
             self, "Clear Queue",
             f"Remove all {len(self._jobs)} job(s) from the queue?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
         )
-        if resp != QMessageBox.Yes:
+        if resp != QMessageBox.StandardButton.Yes:
             return
         import copy
         snap_jobs, snap_active = copy.deepcopy(self._jobs), self._active_job_id
@@ -2831,16 +2990,60 @@ class BlenderVideoMapperQt(QMainWindow):
                 return None
         return p
 
+    @staticmethod
+    def _friendly_error_hint(text: str) -> str:
+        """Map common renderer failures to a plain-language 'what to try' line.
+        Returns "" when nothing matches (the raw error is always shown anyway)."""
+        t = (text or "").lower()
+        rules = [
+            (("out of memory", "cuda error: out of memory", "memoryerror", "vram",
+              "cuda_error_out_of_memory", "out of gpu memory"),
+             "The GPU or system ran out of memory. Lower the resolution or sample "
+             "count, or set Device to CPU in Render settings."),
+            (("no space left", "errno 28", "disk full"),
+             "The output disk is full. Free up space or pick a different output folder."),
+            (("permission denied", "errno 13", "access is denied"),
+             "Permission denied writing the output. Choose a different output folder "
+             "or check its permissions."),
+            (("no such file", "filenotfounderror", "cannot read", "unable to open",
+              "could not open", "errno 2"),
+             "A scene or media file couldn't be found — it may have moved or still be "
+             "syncing. Re-locate it, then try again."),
+            (("unknown encoder", "codec", "ffmpeg", "unsupported pixel format",
+              "no video stream"),
+             "The video codec/format isn't available. Try a different codec or output "
+             "format (e.g. H.264 MP4)."),
+            (("created in a newer", "blend file format", "version mismatch",
+              "unsupported .blend", "blender version"),
+             "The scene may be from a newer Blender/Cinema 4D version than the one "
+             "configured. Open it once in the matching app, or point Properties at a "
+             "newer build."),
+            (("material not found", "no material named", "cannot find material",
+              "unknown material"),
+             "A material referenced by the mapping wasn't found in the scene. Re-scan "
+             "the scene and check the mappings."),
+            (("license", "maxon app"),
+             "Cinema 4D licensing failed — make sure you're signed in to the Maxon app "
+             "on this machine."),
+        ]
+        for needles, hint in rules:
+            if any(n in t for n in needles):
+                return hint
+        return ""
+
     def _show_job_error(self, job_id: int) -> None:
         job = next((j for j in self._jobs if j.id == job_id), None)
         if job is None:
             return
         box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
+        box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Why This Job Failed")
         box.setText(f"{job.label or f'Job {job.id}'} failed.")
-        box.setInformativeText("The last error from the renderer is below. The full output "
-                               "is in Live Logs.")
+        info = "The last error from the renderer is below. The full output is in Live Logs."
+        hint = self._friendly_error_hint(job.error or "")
+        if hint:
+            info = f"What to try:  {hint}\n\n{info}"
+        box.setInformativeText(info)
         box.setDetailedText(job.error or "No error text was captured — check Live Logs.")
         box.exec()
 
@@ -2887,7 +3090,8 @@ class BlenderVideoMapperQt(QMainWindow):
     def _duplicate_jobs(self, job_ids: object) -> None:
         if self._is_rendering:
             return
-        ids = [j for j in (job_ids or []) if isinstance(j, int)]
+        seq = job_ids if isinstance(job_ids, (list, tuple, set)) else []
+        ids = [j for j in seq if isinstance(j, int)]
         if not ids:
             return
         last_new_id: int | None = None
@@ -3024,9 +3228,24 @@ class BlenderVideoMapperQt(QMainWindow):
                     )
         return warns
 
+    def _estimate_job_bytes(self, job: RenderJob) -> int:
+        opts = job.render_options
+        if not opts:
+            return 0
+        from core.utils import ext_for_format
+        is_video = bool(ext_for_format(opts.output_format))
+        step = max(1, getattr(opts, "frame_step", 1))
+        frames = max(1, (opts.frame_end - opts.frame_start) // step + 1)
+        return estimate_output_bytes(
+            opts.width, opts.height, frames,
+            is_video=is_video, quality=getattr(opts, "video_quality", "HIGH"),
+            image_format=opts.output_format,
+            scale_percent=getattr(opts, "resolution_percentage", 100))
+
     def _disk_space_warnings(self, pending: list[RenderJob]) -> list[str]:
         warns: list[str] = []
-        seen: set[str] = set()
+        by_dir: dict[str, int] = {}
+        dpaths: dict[str, Path] = {}
         for j in pending:
             out = (j.output_path or "").strip()
             if not out:
@@ -3034,19 +3253,49 @@ class BlenderVideoMapperQt(QMainWindow):
             d = Path(out).expanduser().parent
             while not d.exists() and d.parent != d:
                 d = d.parent
-            if not d.exists() or str(d) in seen:
+            if not d.exists():
                 continue
-            seen.add(str(d))
+            key = str(d)
+            dpaths[key] = d
+            by_dir[key] = by_dir.get(key, 0) + self._estimate_job_bytes(j)
+        for key, est in by_dir.items():
             try:
-                free = shutil.disk_usage(str(d)).free
-                if free < 2 * 1024 ** 3:  # under 2 GB
-                    warns.append(f"Low disk space on “{d}”: {free / 1024 ** 3:.1f} GB free.")
+                free = shutil.disk_usage(key).free
             except Exception:
-                pass
+                continue
+            gb = 1024 ** 3
+            if est and free < est * 1.15:
+                warns.append(
+                    f"“{dpaths[key]}” may run out of room: ~{est / gb:.1f} GB estimated, "
+                    f"only {free / gb:.1f} GB free.")
+            elif free < 2 * gb:
+                warns.append(f"Low disk space on “{dpaths[key]}”: {free / gb:.1f} GB free.")
+        return warns
+
+    def _deadline_warnings(self, pending: list[RenderJob]) -> list[str]:
+        """Warn before submit if a job's Deadline pool/group isn't in the farm's
+        fetched lists (a typo or stale value the farm will reject)."""
+        dp = self.deadline_panel
+        avail_pools = {dp.dl_pool_combo.itemText(i) for i in range(dp.dl_pool_combo.count())}
+        avail_groups = {dp.dl_group_combo.itemText(i) for i in range(dp.dl_group_combo.count())}
+        warns: list[str] = []
+        seen: set[str] = set()
+        for j in pending:
+            if not getattr(j, "use_deadline", False):
+                continue
+            pool = getattr(j, "deadline_pool", "")
+            group = getattr(j, "deadline_group", "")
+            if pool and avail_pools and pool not in avail_pools and f"pool:{pool}" not in seen:
+                seen.add(f"pool:{pool}")
+                warns.append(f"Deadline pool “{pool}” isn't in the farm's pool list — the job "
+                             "may be rejected. Re-run Test Connection to refresh the pools.")
+            if group and avail_groups and group not in avail_groups and f"grp:{group}" not in seen:
+                seen.add(f"grp:{group}")
+                warns.append(f"Deadline group “{group}” isn't in the farm's group list.")
         return warns
 
     @staticmethod
-    def _unique_path(path: Path) -> str:
+    def _unique_path(path: str | Path) -> str:
         # NOTE: " (2)" style, NOT "_v2" — a _vN suffix would read as a clip
         # VERSION to the watch-folder/auto-map pipeline (latest-version-wins).
         path = Path(path)
@@ -3105,16 +3354,16 @@ class BlenderVideoMapperQt(QMainWindow):
         box.setWindowTitle("Outputs Already Exist")
         box.setText(f"{len(existing)} output(s) already exist:\n{names}{more}")
         box.setInformativeText("Overwrite them, auto-rename to keep both, or cancel?")
-        ow = box.addButton("Overwrite", QMessageBox.DestructiveRole)
-        rn = box.addButton("Auto-rename", QMessageBox.AcceptRole)
-        box.addButton("Cancel", QMessageBox.RejectRole)
+        ow = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
+        rn = box.addButton("Auto-rename", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         box.exec()
         clicked = box.clickedButton()
         if clicked is ow:
             return True
         if clicked is rn:
-            for j, p in existing:
-                j.output_path = self._unique_path(p)
+            for j, pth in existing:
+                j.output_path = self._unique_path(pth)
             self._refresh_queue_view()
             return True
         return False
@@ -3144,7 +3393,7 @@ class BlenderVideoMapperQt(QMainWindow):
             blender = self._blender_path
         else:
             c4dpy = ""
-            blender = self._ensure_blender(interactive=True)
+            blender = self._ensure_blender(interactive=True) or ""
             if not blender:
                 return
 
@@ -3167,15 +3416,18 @@ class BlenderVideoMapperQt(QMainWindow):
         # and double-start (orphaning a RenderThread). Reset on every early return.
         self._is_rendering = True
 
-        # Non-blocking warning if the frame range overshoots the source video.
-        warnings = self._frame_range_warnings(pending) + self._disk_space_warnings(pending)
+        # Non-blocking warning if the frame range overshoots the source video,
+        # the output disk looks too small, or a Deadline pool/group is unknown.
+        warnings = (self._frame_range_warnings(pending)
+                    + self._disk_space_warnings(pending)
+                    + self._deadline_warnings(pending))
         if warnings:
             ans = QMessageBox.warning(
                 self, "Frame Range Warning",
                 "\n\n".join(warnings) + "\n\nProceed anyway?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes,
             )
-            if ans != QMessageBox.Yes:
+            if ans != QMessageBox.StandardButton.Yes:
                 self._is_rendering = False
                 return
 
@@ -3250,6 +3502,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 audio_paths=self._audio_paths_for(audio_src),
                 material_assignments=asn,
                 ffmpeg_path=(_ffmpeg if str(j.scene_path).lower().endswith(".c4d") else ""),
+                force_submit=self._c4d_force_submit,
             )
             entries.append({"id": j.id, "label": j.label, "cfg": cfg})
 
@@ -3259,8 +3512,10 @@ class BlenderVideoMapperQt(QMainWindow):
         self.queue_panel.queue_btn.setEnabled(False)
 
         self._job_started = {}
+        self._job_metrics = {}
         self._render_t0 = time.monotonic()
         self.queue_panel.set_progress(0, "Starting…")
+        self._log_eta_prediction(entries)
 
         if self._preview_path:
             self.preview_panel.clear_preview()
@@ -3275,6 +3530,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._render_thread.log.connect(self._append_log)
         self._render_thread.job_update.connect(self._on_job_update)
         self._render_thread.job_error.connect(self._on_job_error)
+        self._render_thread.frame_metrics.connect(self._on_frame_metrics)
         self._render_thread.all_done.connect(self._on_render_done)
         self._render_thread.start()
 
@@ -3333,7 +3589,7 @@ class BlenderVideoMapperQt(QMainWindow):
             "Pack the video file(s) into the .blend so it renders on any machine "
             "without shared storage?\n\nYes = one self-contained (larger) file.\n"
             "No  = smaller file; workers must be able to reach the source videos.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
 
         asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
         opts = self.render_panel.render_options()
@@ -3372,7 +3628,7 @@ class BlenderVideoMapperQt(QMainWindow):
         active queue job."""
         if self._is_rendering:
             return
-        if getattr(self, "_preview_thread", None) is not None and self._preview_thread.isRunning():
+        if self._preview_thread is not None and self._preview_thread.isRunning():
             # A preview is already rendering — remember that state changed so we
             # re-render with the *latest* settings as soon as it finishes. Without
             # this, rapid changes get dropped and the preview looks stuck.
@@ -3392,7 +3648,7 @@ class BlenderVideoMapperQt(QMainWindow):
             blender = self._blender_path
         else:
             c4dpy = ""
-            blender = self._ensure_blender(interactive=True)
+            blender = self._ensure_blender(interactive=True) or ""
             if not blender:
                 return
         try:
@@ -3467,6 +3723,42 @@ class BlenderVideoMapperQt(QMainWindow):
                 j.error = message
                 break
 
+    def _on_frame_metrics(self, job_id: int, frames_done: int, avg_spf: float, p95_spf: float) -> None:
+        self._job_metrics[job_id] = {"frames": frames_done, "avg_spf": avg_spf, "p95_spf": p95_spf}
+        if self._is_rendering:
+            self._update_progress_caption()
+
+    @staticmethod
+    def _load_history() -> list[dict]:
+        try:
+            if HISTORY_PATH.exists():
+                data = json.loads(HISTORY_PATH.read_text())
+                return data if isinstance(data, list) else []
+        except Exception:
+            pass
+        return []
+
+    def _log_eta_prediction(self, entries: list[dict]) -> None:
+        """Before a render, estimate total time from prior runs of the same
+        scene(s) and log it — so the user can decide whether to leave it running."""
+        history = self._load_history()
+        total = 0.0
+        have_any = False
+        for e in entries:
+            cfg = e.get("cfg")
+            if cfg is None:
+                continue
+            scene = Path(getattr(cfg, "scene_path", "") or "").name
+            fc = max(1, cfg.render.frame_end - cfg.render.frame_start + 1)
+            pred = predict_total_seconds(history, scene, fc)
+            if pred is not None:
+                total += pred
+                have_any = True
+        if have_any:
+            self._append_log(
+                f"[app] Estimated ~{self._fmt_dur(total)} for this render "
+                "(from previous runs of these scenes).")
+
     def _on_job_update(self, job_id: int, status: str, progress: float) -> None:
         started = getattr(self, "_job_started", None)
         if started is not None and status == "running" and job_id not in started:
@@ -3491,15 +3783,23 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _record_history(self, job: RenderJob, status: str, duration: float) -> None:
         opts = job.render_options
+        metrics = self._job_metrics.get(job.id, {})
         entry = {
             "time": datetime.now().isoformat(timespec="seconds"),
             "label": job.label,
             "scene": Path(job.scene_path).name if job.scene_path else "",
+            "scene_full": job.scene_path or "",
             "output": job.output_path,
             "status": status,
             "frames": (f"{opts.frame_start}-{opts.frame_end}" if opts else ""),
+            "frame_count": metrics.get("frames", 0),
             "duration": round(duration, 1),
+            "avg_spf": round(metrics.get("avg_spf", 0.0), 3),
+            "p95_spf": round(metrics.get("p95_spf", 0.0), 3),
         }
+        kwh, cost = estimate_energy_cost(duration, self._power_watts, self._power_rate)
+        entry["kwh"] = round(kwh, 3)
+        entry["cost"] = round(cost, 2)
         try:
             HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
             hist = []
@@ -3548,6 +3848,11 @@ class BlenderVideoMapperQt(QMainWindow):
                 elapsed = time.monotonic() - started
                 eta = elapsed * (100.0 - cur.progress) / cur.progress
                 caption += f" · {self._fmt_dur(elapsed)} elapsed · ~{self._fmt_dur(eta)} left"
+            m = self._job_metrics.get(cur.id)
+            if m and m.get("avg_spf"):
+                caption += f" · {m['avg_spf']:.1f}s/frame avg"
+                if m.get("p95_spf"):
+                    caption += f" (p95 {m['p95_spf']:.1f}s)"
         else:
             caption = f"{completed}/{total} jobs"
         self.queue_panel.set_progress(overall, caption)
@@ -3577,6 +3882,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         self._write_run_report()
         self._deliver_outputs()
+        self._generate_contact_sheets()
 
         # Play the freshly rendered video in the preview, if any.
         if self._preview_enabled:
@@ -3630,7 +3936,7 @@ class BlenderVideoMapperQt(QMainWindow):
         self._tray.show()
 
     def _raise_window(self) -> None:
-        self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        self.setWindowState((self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
         self.show()
         self.raise_()
         self.activateWindow()
@@ -3674,7 +3980,48 @@ class BlenderVideoMapperQt(QMainWindow):
             except Exception as exc:
                 self._delivery_log.emit(f"Delivery copy failed: {exc}", "error")
 
-        threading.Thread(target=work, args=(outputs, dest_root), daemon=True).start()
+        paths, dest = outputs, dest_root
+        self._delivery_thread = FuncThread(lambda: work(paths, dest))
+        self._delivery_thread.start()
+
+    @staticmethod
+    def _sheet_path_for(output: str) -> Path | None:
+        """Where the contact sheet for a given output lives: next to a movie
+        file, or inside an image-sequence folder."""
+        if not output:
+            return None
+        p = Path(output)
+        if p.suffix:
+            return p.with_name(p.stem + "_contactsheet.png")
+        return p / "_contactsheet.png"
+
+    def _generate_contact_sheets(self) -> None:
+        """Build a contact-sheet thumbnail grid for each successful output, on a
+        managed background thread (ffmpeg can take a few seconds per output)."""
+        targets: list[tuple[str, str]] = []
+        for j in self._jobs:
+            if j.status != "success" or not j.output_path:
+                continue
+            sheet = self._sheet_path_for(j.output_path)
+            if sheet is None or sheet.exists():
+                continue
+            if Path(j.output_path).exists():
+                targets.append((j.output_path, str(sheet)))
+        if not targets:
+            return
+
+        def work(items: list) -> None:
+            built = 0
+            for src, dest in items:
+                try:
+                    if build_contact_sheet(src, dest):
+                        built += 1
+                except Exception:
+                    pass
+            self._sheets_built.emit(built)
+
+        self._sheet_thread = FuncThread(lambda: work(targets))
+        self._sheet_thread.start()
 
     def _write_run_report(self) -> None:
         try:
@@ -3702,14 +4049,81 @@ class BlenderVideoMapperQt(QMainWindow):
             self._last_report_path = str(path)
             if hasattr(self, "_open_report_action"):
                 self._open_report_action.setEnabled(True)
+            try:
+                html_path = REPORTS_DIR / f"run_report_{stamp}.html"
+                html_path.write_text(self._build_html_report(), encoding="utf-8")
+                self._last_html_report_path = str(html_path)
+                if hasattr(self, "_open_html_action"):
+                    self._open_html_action.setEnabled(True)
+            except Exception:
+                pass
         except Exception:
             pass
+
+    def _build_html_report(self) -> str:
+        """A standalone, shareable HTML report of the last run: per-job status,
+        timing, sec/frame, error text, and embedded contact-sheet thumbnails."""
+        import html as _html
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        scene = _html.escape(self.scene_panel.scene_edit.text().strip() or "—")
+        rows = []
+        for j in self._jobs:
+            opts = j.render_options
+            frames = f"{opts.frame_start}-{opts.frame_end}" if opts else ""
+            dur = self._fmt_dur(self._job_durations.get(j.id, 0.0))
+            m = self._job_metrics.get(j.id, {})
+            spf = f"{m['avg_spf']:.1f}s" if m.get("avg_spf") else "—"
+            _kwh, _cost = estimate_energy_cost(
+                self._job_durations.get(j.id, 0.0), self._power_watts, self._power_rate)
+            cost = f"${_cost:.2f}" if _cost else "—"
+            color = {"success": "#3ba55d", "failed": "#ed4245",
+                     "cancelled": "#888"}.get(j.status, "#bbb")
+            sheet_html = ""
+            sheet = self._sheet_path_for(j.output_path) if j.status == "success" else None
+            if sheet is not None:
+                try:
+                    sheet_html = f'<div><img src="{_html.escape(sheet.as_uri())}" loading="lazy"></div>'
+                except Exception:
+                    sheet_html = ""
+            err = f'<div class="err">{_html.escape(j.error)}</div>' if j.error else ""
+            extra = f'<tr><td colspan="6">{sheet_html}{err}</td></tr>' if (sheet_html or err) else ""
+            rows.append(
+                f'<tr><td>{_html.escape(j.label or f"Job {j.id}")}</td>'
+                f'<td style="color:{color};font-weight:600">{_html.escape(j.status)}</td>'
+                f'<td>{_html.escape(frames)}</td><td>{_html.escape(dur)}</td>'
+                f'<td>{_html.escape(spf)}</td><td>{_html.escape(cost)}</td></tr>{extra}')
+        body = "\n".join(rows)
+        return (
+            '<!doctype html><html><head><meta charset="utf-8">'
+            f'<title>Render Report — {stamp}</title><style>'
+            'body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#15171c;'
+            'color:#e6e6e6;margin:0;padding:32px}'
+            'h1{font-size:20px;margin:0 0 4px}.sub{color:#9aa0a6;font-size:13px;margin-bottom:24px}'
+            'table{border-collapse:collapse;width:100%}'
+            'th,td{text-align:left;padding:8px 12px;border-bottom:1px solid #2a2d34;'
+            'font-size:13px;vertical-align:top}'
+            'th{color:#9aa0a6;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.04em}'
+            'img{max-width:100%;border-radius:6px;margin:8px 0}'
+            '.err{color:#ed4245;font-family:ui-monospace,monospace;font-size:12px;'
+            'white-space:pre-wrap;margin:6px 0}.brand{color:#e8833a;font-weight:700}'
+            '</style></head><body>'
+            '<h1><span class="brand">Render Mapper Pro</span> — Render Report</h1>'
+            f'<div class="sub">{stamp} · Scene: {scene}</div>'
+            '<table><thead><tr><th>Job</th><th>Status</th><th>Frames</th>'
+            '<th>Duration</th><th>Avg/frame</th><th>Est. Cost</th></tr></thead>'
+            f'<tbody>{body}</tbody></table></body></html>')
 
     def _open_last_report(self) -> None:
         if self._last_report_path and Path(self._last_report_path).exists():
             self._open_path(self._last_report_path)
         else:
             self._show_toast("No run report yet", "warning")
+
+    def _open_html_report(self) -> None:
+        if self._last_html_report_path and Path(self._last_html_report_path).exists():
+            self._open_path(self._last_html_report_path)
+        else:
+            self._show_toast("No HTML report yet — run a render first.", "warning")
 
     @staticmethod
     def _open_path(path: str) -> None:
@@ -3755,22 +4169,135 @@ class BlenderVideoMapperQt(QMainWindow):
             self._show_toast(f"Open failed: {exc}", "error")
 
     # ── Render history ───────────────────────────────────────────────────
+    def _command_actions(self) -> list[tuple[str, object]]:
+        """The (label, callable) pairs offered by the command palette."""
+        return [
+            ("Scan Scene", self._scan_scene),
+            ("Render Selected", lambda: self._start_render(render_all=False)),
+            ("Render All", lambda: self._start_render(render_all=True)),
+            ("Properties…", self._show_properties_dialog),
+            ("Open Project…", self._open_project),
+            ("Save Project As…", self._save_project),
+            ("Save Preset…", self._save_preset),
+            ("Load Preset…", self._load_preset),
+            ("Render History…", self._show_history_dialog),
+            ("Open HTML Render Report", self._open_html_report),
+            ("Power & Cost Settings…", self._show_power_settings),
+            ("Toggle Light/Dark Theme", lambda: self._toggle_theme(self._theme_mode != "light")),
+            ("Quick Start", self._show_quick_start),
+            ("Copy Diagnostics", self._copy_diagnostics),
+            ("Check for Updates…", lambda: self._check_for_updates(manual=True)),
+        ]
+
+    def _show_command_palette(self) -> None:
+        """A ⌘K / Ctrl+K fuzzy action launcher — type a few letters, Enter runs it."""
+        actions = self._command_actions()
+        by_name = dict(actions)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Command Palette")
+        dlg.resize(460, 380)
+        lay = QVBoxLayout(dlg)
+        search = QLineEdit()
+        search.setPlaceholderText("Type a command…")
+        lay.addWidget(search)
+        lst = QListWidget()
+        lay.addWidget(lst)
+
+        def populate(flt: str = "") -> None:
+            lst.clear()
+            f = flt.strip().lower()
+            for name, _fn in actions:
+                if all(tok in name.lower() for tok in f.split()):
+                    lst.addItem(QListWidgetItem(name))
+            if lst.count():
+                lst.setCurrentRow(0)
+
+        def run_current() -> None:
+            it = lst.currentItem()
+            if it is None:
+                return
+            fn = by_name.get(it.text())
+            dlg.accept()
+            if callable(fn):
+                fn()
+
+        # Down-arrow from the search box drops focus into the result list.
+        def on_search_key(event):  # type: ignore[no-untyped-def]
+            if event.key() in (Qt.Key_Down, Qt.Key_Up) and lst.count():
+                lst.setFocus()
+                return
+            QLineEdit.keyPressEvent(search, event)
+
+        search.keyPressEvent = on_search_key   # type: ignore[method-assign]
+        search.textChanged.connect(populate)
+        search.returnPressed.connect(run_current)
+        lst.itemActivated.connect(lambda _i: run_current())
+        populate()
+        search.setFocus()
+        dlg.exec()
+
+    def _show_power_settings(self) -> None:
+        """Configure the per-machine power draw + electricity rate used to
+        estimate render cost in the history and HTML report."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Power & Cost")
+        form = QFormLayout(dlg)
+        watts = QDoubleSpinBox()
+        watts.setRange(0, 100000)
+        watts.setDecimals(0)
+        watts.setSuffix(" W")
+        watts.setValue(self._power_watts)
+        rate = QDoubleSpinBox()
+        rate.setRange(0, 100)
+        rate.setDecimals(3)
+        rate.setPrefix("$ ")
+        rate.setSuffix(" /kWh")
+        rate.setValue(self._power_rate)
+        form.addRow("Machine power draw:", watts)
+        form.addRow("Electricity rate:", rate)
+        hint = QLabel("Used to estimate render energy + cost in History and the HTML report.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
+        form.addRow(hint)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        form.addRow(bb)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        if dlg.exec():
+            self._power_watts = float(watts.value())
+            self._power_rate = float(rate.value())
+            self._schedule_save()
+
+    def _show_image_dialog(self, path: str, title: str) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(960, 640)
+        lay = QVBoxLayout(dlg)
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pix = QPixmap(path)
+        if pix.isNull():
+            lbl.setText("Could not load image.")
+        else:
+            lbl.setPixmap(pix.scaled(920, 560, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        lay.addWidget(lbl)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        dlg.exec()
+
     def _show_history_dialog(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Render History")
         dlg.setMinimumSize(660, 420)
         lay = QVBoxLayout(dlg)
-        table = QTableWidget(0, 5)
-        table.setHorizontalHeaderLabels(["When", "Job", "Status", "Duration", "Output"])
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table = QTableWidget(0, 7)
+        table.setHorizontalHeaderLabels(
+            ["When", "Job", "Status", "Duration", "s/frame", "Cost", "Output"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.horizontalHeader().setStretchLastSection(True)
-        hist = []
-        try:
-            if HISTORY_PATH.exists():
-                hist = json.loads(HISTORY_PATH.read_text())
-        except Exception:
-            hist = []
+        hist = self._load_history()
         for e in hist:
             r = table.rowCount()
             table.insertRow(r)
@@ -3778,27 +4305,66 @@ class BlenderVideoMapperQt(QMainWindow):
             table.setItem(r, 1, QTableWidgetItem(e.get("label", "")))
             table.setItem(r, 2, QTableWidgetItem(e.get("status", "")))
             table.setItem(r, 3, QTableWidgetItem(self._fmt_dur(float(e.get("duration", 0) or 0))))
+            spf = float(e.get("avg_spf", 0) or 0)
+            spf_item = QTableWidgetItem(f"{spf:.1f}s" if spf else "—")
+            if e.get("p95_spf"):
+                spf_item.setToolTip(f"p95: {float(e['p95_spf']):.1f}s/frame · "
+                                    f"{int(e.get('frame_count', 0))} frames")
+            table.setItem(r, 4, spf_item)
+            cost = float(e.get("cost", 0) or 0)
+            cost_item = QTableWidgetItem(f"${cost:.2f}" if cost else "—")
+            if e.get("kwh"):
+                cost_item.setToolTip(f"{float(e['kwh']):.2f} kWh")
+            table.setItem(r, 5, cost_item)
             oi = QTableWidgetItem(e.get("output", ""))
-            oi.setData(Qt.UserRole, e.get("output", ""))
-            table.setItem(r, 4, oi)
+            oi.setData(Qt.ItemDataRole.UserRole, e.get("output", ""))
+            table.setItem(r, 6, oi)
         table.setColumnWidth(0, 160)
         table.setColumnWidth(1, 190)
         table.setColumnWidth(2, 70)
         table.setColumnWidth(3, 80)
+        table.setColumnWidth(4, 70)
+        table.setColumnWidth(5, 70)
         lay.addWidget(table)
 
         def sel_out() -> str:
             r = table.currentRow()
-            it = table.item(r, 4) if r >= 0 else None
-            return it.data(Qt.UserRole) if it else ""
+            it = table.item(r, 6) if r >= 0 else None
+            return it.data(Qt.ItemDataRole.UserRole) if it else ""
 
         row = QHBoxLayout()
         reveal_b = QPushButton("Reveal Output")
         open_b = QPushButton("Open Output")
+        sheet_b = QPushButton("Contact Sheet")
         clear_b = QPushButton("Clear History")
-        reveal_b.clicked.connect(lambda: (sel_out() and Path(sel_out()).exists()
-                                          and reveal_in_file_manager(sel_out())))
-        open_b.clicked.connect(lambda: sel_out() and self._open_path(sel_out()))
+        def _do_reveal() -> None:
+            o = sel_out()
+            if o and Path(o).exists():
+                reveal_in_file_manager(o)
+
+        reveal_b.clicked.connect(_do_reveal)
+        open_b.clicked.connect(lambda: self._open_path(sel_out()) if sel_out() else None)
+
+        def show_sheet() -> None:
+            out = sel_out()
+            sheet = self._sheet_path_for(out)
+            if sheet is not None and sheet.exists():
+                self._show_image_dialog(str(sheet), "Contact Sheet")
+                return
+            if not out or not Path(out).exists():
+                self._show_toast("Output not found.", "warning")
+                return
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                ok = build_contact_sheet(out, str(sheet)) if sheet else False
+            finally:
+                QApplication.restoreOverrideCursor()
+            if ok and sheet is not None:
+                self._show_image_dialog(str(sheet), "Contact Sheet")
+            else:
+                self._show_toast("Couldn't build a contact sheet for this output.", "warning")
+
+        sheet_b.clicked.connect(show_sheet)
 
         def do_clear() -> None:
             try:
@@ -3810,10 +4376,11 @@ class BlenderVideoMapperQt(QMainWindow):
         clear_b.clicked.connect(do_clear)
         row.addWidget(reveal_b)
         row.addWidget(open_b)
+        row.addWidget(sheet_b)
         row.addStretch()
         row.addWidget(clear_b)
         lay.addLayout(row)
-        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(dlg.reject)
         lay.addWidget(bb)
         dlg.exec()
@@ -3880,7 +4447,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._append_log(f"[deadline] Connection failed: {res.get('error', '')}")
             if interactive:
                 box = QMessageBox(self)
-                box.setIcon(QMessageBox.Warning)
+                box.setIcon(QMessageBox.Icon.Warning)
                 box.setWindowTitle("Deadline Unreachable")
                 box.setText("Couldn't reach the Deadline repository.")
                 box.setInformativeText(
@@ -3915,12 +4482,12 @@ class BlenderVideoMapperQt(QMainWindow):
             dp.dl_machines_list.blockSignals(True)
             checked = {dp.dl_machines_list.item(i).text().strip()
                        for i in range(dp.dl_machines_list.count())
-                       if dp.dl_machines_list.item(i).checkState() == Qt.Checked}
+                       if dp.dl_machines_list.item(i).checkState() == Qt.CheckState.Checked}
             dp.dl_machines_list.clear()
             for m in machines:
                 item = QListWidgetItem(m)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked if (m in checked or not checked) else Qt.Unchecked)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if (m in checked or not checked) else Qt.CheckState.Unchecked)
                 dp.dl_machines_list.addItem(item)
             dp.dl_machines_list.blockSignals(False)
 
@@ -4175,7 +4742,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._refresh_preset_browser()
             return
         ans = QMessageBox.question(self, "Delete Preset", f"Delete preset '{p.stem}'?")
-        if ans != QMessageBox.Yes:
+        if ans != QMessageBox.StandardButton.Yes:
             return
         try:
             p.unlink()
@@ -4205,8 +4772,8 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _profile_dict(self) -> dict:
         videos = self.scene_panel.get_videos()
-        layout_state = bytes(self.saveState().toBase64()).decode("ascii")
-        layout_geometry = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        layout_state = bytes(self.saveState().toBase64().data()).decode("ascii")
+        layout_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
 
         def _opts_dict(opts: RenderOptions | None) -> dict | None:
             if opts is None:
@@ -4264,6 +4831,8 @@ class BlenderVideoMapperQt(QMainWindow):
             "version": PROFILE_VERSION,
             "theme_mode": self._theme_mode,
             "accent": self._accent,
+            "power_watts": self._power_watts,
+            "power_rate": self._power_rate,
             "live_preview": self._preview_enabled,
             "watch_folder": watch_folder,
             "watch_enabled": watch_enabled,
@@ -4334,8 +4903,39 @@ class BlenderVideoMapperQt(QMainWindow):
             "deadline_available_machines": [self.deadline_panel.dl_machines_list.item(i).text().strip() for i in range(self.deadline_panel.dl_machines_list.count())],
         }
 
+    def _migrate_profile(self, d: dict) -> dict:
+        """Bring an older saved profile up to the current schema. A newer-than-
+        current profile is loaded as-is (best effort) so a downgrade never wipes
+        state. This is the scaffold to hang real field migrations on."""
+        try:
+            ver = int(d.get("version", 1))
+        except (TypeError, ValueError):
+            ver = 1
+        if ver > PROFILE_VERSION:
+            self._append_log(
+                f"[app] Settings are from a newer build (v{ver} > v{PROFILE_VERSION}); "
+                "loading what's compatible.")
+            return d
+        if ver == PROFILE_VERSION:
+            return d
+        migrated = dict(d)
+        # Forward migrations go here, smallest version first, e.g.:
+        #   if ver < 4: migrated = self._migrate_v3_to_v4(migrated)
+        migrated["version"] = PROFILE_VERSION
+        self._append_log(f"[app] Migrated settings from v{ver} to v{PROFILE_VERSION}.")
+        return migrated
+
     def _apply_profile_data(self, d: dict) -> None:
-        # Theme is fixed (dark + orange); ignore any saved theme/accent keys.
+        d = self._migrate_profile(d)
+        # Accent stays the brand orange; honor the saved light/dark choice.
+        tm = str(d.get("theme_mode", self._theme_mode))
+        if tm in ("dark", "light"):
+            self._theme_mode = tm
+        try:
+            self._power_watts = float(d.get("power_watts", self._power_watts))
+            self._power_rate = float(d.get("power_rate", self._power_rate))
+        except (TypeError, ValueError):
+            pass
         if "live_preview" in d:
             self._preview_enabled = bool(d.get("live_preview", True))
             if hasattr(self, "preview_action"):
@@ -4377,8 +4977,8 @@ class BlenderVideoMapperQt(QMainWindow):
             self.deadline_panel.dl_machines_list.clear()
             for m in machines:
                 item = QListWidgetItem(m)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Unchecked)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
                 self.deadline_panel.dl_machines_list.addItem(item)
             self.deadline_panel.dl_machines_list.blockSignals(False)
 
@@ -4468,10 +5068,22 @@ class BlenderVideoMapperQt(QMainWindow):
             return ""
 
         vids: list[str] = []
+        unresolved: list[str] = []
+        seen_missing: set[str] = set()
+
+        def note_missing(vp: str, vn: str) -> None:
+            name = vn or Path(vp).name or vp
+            if name and name.lower() not in seen_missing:
+                seen_missing.add(name.lower())
+                unresolved.append(name)
+
         for vp, vn in video_entries:
             resolved = resolve_video(vp, vn)
-            if resolved and resolved not in vids:
-                vids.append(resolved)
+            if resolved:
+                if resolved not in vids:
+                    vids.append(resolved)
+            else:
+                note_missing(vp, vn)
 
         asn: list[MaterialVideoAssignment] = []
         for item in d.get("material_assignments", []):
@@ -4486,9 +5098,19 @@ class BlenderVideoMapperQt(QMainWindow):
                 asn.append(MaterialVideoAssignment(mn, resolved, mm))
                 if resolved not in vids:
                     vids.append(resolved)
+            elif mn and not resolved:
+                note_missing(vp, vn)
 
         self.scene_panel.set_videos(vids)
         self.scene_panel.set_assignments(asn)
+        if unresolved:
+            for name in unresolved:
+                self._append_log(f"[load] Clip not found — skipped: {name}")
+            n = len(unresolved)
+            self._show_toast(
+                f"{n} clip{'s' if n != 1 else ''} from the project couldn't be located "
+                f"and {'were' if n != 1 else 'was'} skipped — see Live Logs.",
+                "warning")
 
         muted: list[str] = []
         for p in d.get("muted_videos", []):
@@ -4634,6 +5256,14 @@ class BlenderVideoMapperQt(QMainWindow):
             self._apply_profile_data(json.loads(PROFILE_PATH.read_text()))
         except Exception:
             pass
+        # Widgets were built under the default dark theme; apply a saved light
+        # choice now and sync the menu checkbox without re-triggering a restyle.
+        if self._theme_mode != "dark":
+            self._restyle_all()
+        if hasattr(self, "theme_action"):
+            self.theme_action.blockSignals(True)
+            self.theme_action.setChecked(self._theme_mode == "light")
+            self.theme_action.blockSignals(False)
 
     def _maybe_first_run(self) -> None:
         """A one-time welcome on the very first launch: show what's detected and
@@ -4641,18 +5271,23 @@ class BlenderVideoMapperQt(QMainWindow):
         if not getattr(self, "_is_first_run", False):
             return
         blender = _find_blender(self._blender_path)
+        ffmpeg = find_ffmpeg_tool("ffmpeg")
         lines = [
             f"Blender:  {'✓ ' + Path(blender).name if blender else '✗ not found — set it in Properties'}",
             f"Cinema 4D:  {'✓ detected' if self._c4dpy_path else '— not detected (optional)'}",
+            f"ffmpeg:  {'✓ bundled' if ffmpeg else '✗ not found — frame extraction will be limited'}",
         ]
         box = QMessageBox(self)
-        box.setIcon(QMessageBox.Information)
+        box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle(f"Welcome to {APP_NAME}")
         box.setText("You're set up to map videos onto a 3D scene and render headlessly.")
-        box.setInformativeText("\n".join(lines) + "\n\nDrop in a scene, add clips, map them, and hit render.")
-        qs = box.addButton("Open Quick Start", QMessageBox.ActionRole)
-        loc = box.addButton("Locate Blender…", QMessageBox.ActionRole) if not blender else None
-        box.addButton("Get Started", QMessageBox.AcceptRole)
+        box.setInformativeText(
+            "\n".join(lines)
+            + "\n\nffmpeg ships with the app (used to extract clip frames). "
+            "Drop in a scene, add clips, map them, and hit render.")
+        qs = box.addButton("Open Quick Start", QMessageBox.ButtonRole.ActionRole)
+        loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) if not blender else None
+        box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
         box.exec()
         clicked = box.clickedButton()
         if clicked is qs:
@@ -4664,9 +5299,26 @@ class BlenderVideoMapperQt(QMainWindow):
     def _save_profile(self) -> None:
         try:
             PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            PROFILE_PATH.write_text(json.dumps(self._profile_dict(), indent=2))
+            data = json.dumps(self._profile_dict(), indent=2)
+            # Atomic write: a crash/power-loss/full-disk mid-write must never
+            # corrupt the existing profile. Write to a sibling temp file, fsync,
+            # then atomically rename over the target (POSIX rename / NTFS replace).
+            tmp = PROFILE_PATH.with_name(PROFILE_PATH.name + ".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            tmp.replace(PROFILE_PATH)
         except Exception as exc:
             self._append_log(f"[app] Could not save settings: {exc}")
+
+    def _set_when_done(self, value: str) -> None:
+        self._when_done = value
+        self._schedule_save()
+
+    def _save_and_refresh_status(self) -> None:
+        self._save_profile()
+        self._update_status_bar()
 
     def _schedule_save(self) -> None:
         if self._save_timer is None:
@@ -4676,18 +5328,29 @@ class BlenderVideoMapperQt(QMainWindow):
         self._save_timer.start(400)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._shutting_down = True   # late background signals become no-ops
         self._save_profile()
         if self._render_thread and self._render_thread.isRunning():
             self._render_thread.request_cancel()
             self._render_thread.wait(3000)
         # Cancel + wait on the other workers too, so a QThread isn't destroyed
         # mid-run (which crashes Qt) and its headless subprocess isn't orphaned.
-        for attr in ("_preview_thread", "_discovery_thread", "_export_thread", "_runtime_install_thread", "_deadline_test_thread"):
+        for attr in ("_preview_thread", "_discovery_thread", "_export_thread",
+                     "_runtime_install_thread", "_deadline_test_thread",
+                     "_props_deadline_thread", "_update_check_thread"):
             t = getattr(self, attr, None)
             if t is not None and t.isRunning():
                 if hasattr(t, "request_cancel"):
                     t.request_cancel()
                 t.wait(3000)
+        # A delivery copy can be many GB; wait longer so we never abort it
+        # mid-copy and leave partial files in the delivery folder.
+        dt = self._delivery_thread
+        if dt is not None and dt.isRunning():
+            dt.wait(30000)
+        st = self._sheet_thread
+        if st is not None and st.isRunning():
+            st.wait(15000)
         event.accept()
 
 
@@ -4704,7 +5367,7 @@ def _set_macos_app_name(name: str) -> None:
         import ctypes
         import ctypes.util
 
-        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc") or "")
         objc.objc_getClass.restype = ctypes.c_void_p
         objc.sel_registerName.restype = ctypes.c_void_p
 
@@ -4783,7 +5446,12 @@ def run_qt_app() -> None:
     _set_macos_app_name(APP_NAME)
     app = QApplication.instance()
     if app is None:
+        # Crisp scaling on fractional-DPI displays (e.g. Windows 150%, 4K). Must
+        # be set before the QApplication is constructed.
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
         app = QApplication(sys.argv)
+    assert isinstance(app, QApplication)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
@@ -4800,7 +5468,7 @@ def run_qt_app() -> None:
     if probe.waitForConnected(250):
         probe.write(b"raise")
         probe.flush()
-        if probe.state() == QLocalSocket.ConnectedState:
+        if probe.state() == QLocalSocket.LocalSocketState.ConnectedState:
             probe.waitForBytesWritten(250)
             probe.disconnectFromServer()
         print("Render Mapper Pro is already running — focusing the existing window.", file=sys.stderr)
@@ -4819,7 +5487,7 @@ def run_qt_app() -> None:
         conn = server.nextPendingConnection()
         if conn is not None:
             conn.disconnectFromServer()
-        win.setWindowState((win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        win.setWindowState((win.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive)
         win.show()
         win.raise_()
         win.activateWindow()

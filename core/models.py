@@ -47,15 +47,15 @@ class MaterialVideoAssignment:
     mapping_mode: str = VIDEO_MAPPING_MODE_EMISSION
 
 
-@dataclass
-class JobConfig:
-    scene_path: str
-    video_path: str
-    target_material: str
-    target_camera: str
-    output_path: str
-    render: RenderOptions
-    safe_mode: bool = True
+@dataclass(kw_only=True)
+class DeadlineFields:
+    """Deadline farm-submission settings shared by JobConfig and RenderJob.
+
+    A single source of truth for the deadline_* fields both carry. Declared
+    ``kw_only`` so the flat field API is preserved (``job.deadline_pool``,
+    ``asdict``, ``getattr`` all keep working) without disturbing the positional
+    construction of the classes that inherit it.
+    """
     use_deadline: bool = False
     deadline_pool: str = ""
     deadline_secondary_pool: str = ""
@@ -71,7 +71,19 @@ class JobConfig:
     deadline_command_path: str = ""
     deadline_repo_path: str = ""
     deadline_whitelist: str = ""
+
+
+@dataclass
+class JobConfig(DeadlineFields):
+    scene_path: str
+    video_path: str
+    target_material: str
+    target_camera: str
+    output_path: str
+    render: RenderOptions
+    safe_mode: bool = True
     submit_scene: bool = True
+    force_submit: bool = False   # C4D: submit even if the bake produced no clip frames
     preview_path: str = ""
     preview_frame: int = 0   # >0 → render only this single scene frame (fast preview)
     prepared_blend_path: str = ""   # set → save a mapped .blend here instead of rendering
@@ -97,7 +109,7 @@ class JobConfig:
 
 
 @dataclass
-class RenderJob:
+class RenderJob(DeadlineFields):
     id: int
     video_path: str = ""
     label: str = ""
@@ -114,20 +126,6 @@ class RenderJob:
     attempts: int = 0
     progress: float = 0.0
     selected: bool = True
-    use_deadline: bool = False
-    deadline_pool: str = ""
-    deadline_secondary_pool: str = ""
-    deadline_group: str = ""
-    deadline_priority: int = 50
-    deadline_comment: str = ""
-    deadline_department: str = ""
-    deadline_chunk_size: int = 1
-    deadline_suspended: bool = False
-    deadline_job_name_template: str = "Render Mapper Pro Job - {scene_name}"
-    deadline_machine_limit: int = 0
-    deadline_limits: str = ""
-    deadline_command_path: str = ""
-    deadline_repo_path: str = ""
-    deadline_whitelist: str = ""
+    # deadline_* + use_deadline come from DeadlineFields; this one is RenderJob-only.
     deadline_submit_scene: bool = True
     material_assignments: list[MaterialVideoAssignment] = field(default_factory=list)

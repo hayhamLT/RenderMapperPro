@@ -11,11 +11,14 @@ from __future__ import annotations
 import glob
 import os
 import re
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
 from core.discovery import discover_scene_elements
+from core.metrics import FrameTimer, summarize
 from core.models import JobConfig
 from core.runner import run_blender_job, submit_deadline_job
 
@@ -49,6 +52,19 @@ class CancellableWorker(QThread):
 
     def cancelled(self) -> bool:
         return self._cancel
+
+
+class FuncThread(QThread):
+    """Runs a plain callable on a managed Qt thread, so fire-and-forget background
+    work participates in the app's shutdown wait. A raw daemon thread does not —
+    it can emit a Qt signal after the QApplication is gone, which crashes Qt."""
+
+    def __init__(self, fn: Callable[[], None]) -> None:
+        super().__init__()
+        self._fn = fn
+
+    def run(self) -> None:
+        self._fn()
 
 
 class DiscoveryThread(CancellableWorker):
@@ -85,6 +101,7 @@ class RenderThread(CancellableWorker):
     log = Signal(str)
     job_update = Signal(int, str, float)
     job_error = Signal(int, str)
+    frame_metrics = Signal(int, int, float, float)  # job_id, frames_done, avg_spf, p95_spf
     all_done = Signal()
 
     def __init__(self, blender: str, worker: str, entries: list[dict],
@@ -167,8 +184,10 @@ class RenderThread(CancellableWorker):
             fs, fe = cfg.render.frame_start, cfg.render.frame_end
             span = max(1, fe - fs + 1)
             last_error: list[str] = []
+            timer = FrameTimer()
 
-            def on_log(line: str, _j: int = jid, _fs: int = fs, _span: int = span, _err: list = last_error) -> None:
+            def on_log(line: str, _j: int = jid, _fs: int = fs, _span: int = span,
+                       _err: list = last_error, _timer: FrameTimer = timer) -> None:
                 self.log.emit(line)
                 low = line.lower()
                 if "error" in low or "traceback" in low or "not found" in low:
@@ -177,6 +196,9 @@ class RenderThread(CancellableWorker):
                 if frame is not None:
                     pct = max(0.0, min(100.0, ((frame - _fs) / _span) * 100.0))
                     self.job_update.emit(_j, "running", pct)
+                    if _timer.record(frame, time.monotonic()) is not None:
+                        s = summarize(_timer.samples)
+                        self.frame_metrics.emit(_j, int(s["count"]), s["avg"], s["p95"])
 
             try:
                 if getattr(cfg, "use_deadline", False):
