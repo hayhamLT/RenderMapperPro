@@ -212,6 +212,12 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     fps = int(r.fps) or 24
     mappings = _clip_mappings(job)
 
+    # Scene lighting config (web/three.js backend). getattr-with-defaults keeps
+    # older saved jobs and the discovery warmup probe working unchanged.
+    web_light_preset = str(getattr(r, "web_lighting_preset", "auto") or "auto")
+    web_light_intensity = float(getattr(r, "web_lighting_intensity", 1.0) or 1.0)
+    web_respect_lights = bool(getattr(r, "web_respect_scene_lights", True))
+
     # Single-frame preview vs. full render.
     preview_frame = int(getattr(job, "preview_frame", 0) or 0)
     out_frames = [preview_frame] if preview_frame > 0 else list(range(fs, fe + 1))
@@ -259,6 +265,15 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
             info = page.evaluate("([b, bin]) => window.api.loadGLB(b, bin)", _load_args(glb))
             mat_names = set(info.get("materials", []))
             page.evaluate("(n) => window.api.useCamera(n)", job.target_camera or "")
+            # Configure scene lighting once, after the GLB + camera exist and
+            # before the frame loop. A dict serializes to the JS cfg object.
+            page.evaluate(
+                "(cfg) => window.api.setLighting(cfg)",
+                {"preset": web_light_preset, "intensity": web_light_intensity,
+                 "respectSceneLights": web_respect_lights},
+            )
+            log(f"[web] lighting: preset={web_light_preset} "
+                f"intensity={web_light_intensity} respectScene={web_respect_lights}")
             for mn, _ in mappings:
                 if mn not in mat_names:
                     log(f"[web] WARNING: material '{mn}' not found in the scene — skipped.")

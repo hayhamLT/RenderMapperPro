@@ -38,6 +38,10 @@ class RenderOptions:
     rs_gi_enabled: bool = True           # global illumination on/off (off is much faster)
     rs_gi_bounces: int = 3               # GI bounce count — fewer = faster
     rs_ray_depth: int = 6                # combined max trace depth — fewer = faster
+    # Web / three.js scene lighting (honoured only on the .glb/.gltf web path)
+    web_lighting_preset: str = "auto"        # auto | studio | outdoor | flat | none
+    web_lighting_intensity: float = 1.0      # 0.0–2.0 dimmer on env + light rig
+    web_respect_scene_lights: bool = True    # skip the rig if the .glb ships its own lights
 
 
 @dataclass
