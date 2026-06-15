@@ -19,6 +19,17 @@ def _window(tmp_path, monkeypatch):
     return app_qt, app_qt.BlenderVideoMapperQt()
 
 
+def test_properties_dialog_builds(tmp_path, monkeypatch):
+    """The extracted Properties dialog builds every tab against the live window
+    without error — catches a broken self->win reference or a missing attribute."""
+    _app_qt, w = _window(tmp_path, monkeypatch)
+    w._blender_path = ""   # avoid a `blender --version` subprocess at build time
+    from PySide6.QtWidgets import QDialog
+    monkeypatch.setattr(QDialog, "exec", lambda self: 0)   # don't block on the modal loop
+    import dialogs
+    dialogs.build_properties_dialog(w)
+
+
 def test_profile_roundtrip(tmp_path, monkeypatch):
     """State written by _profile_dict must be read back by _apply_profile_data."""
     app_qt, w = _window(tmp_path, monkeypatch)
