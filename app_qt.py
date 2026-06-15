@@ -2301,15 +2301,19 @@ class BlenderVideoMapperQt(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Update Failed", str(exc))
 
-    def _set_renderer_options(self, is_c4d: bool, detected: str = "") -> None:
+    def _set_renderer_options(self, is_c4d: bool, is_web: bool = False, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
-        loaded scene: Cinema 4D renderers for a .c4d, Blender engines otherwise."""
-        self.render_panel.set_renderer(is_c4d)   # adapt all settings to the renderer
+        loaded scene: Redshift for .c4d, three.js for .glb/.gltf, Blender else."""
+        self.render_panel.set_renderer(is_c4d, is_web)   # adapt all settings to the renderer
         combo = self.render_panel.engine_combo
-        # C4D path only supports Redshift: the video→emission mapping is a
-        # Redshift node-material feature. Standard/Physical use legacy material
-        # channels and are not wired. Blender keeps its own engines.
-        items = ["Redshift"] if is_c4d else ["CYCLES", "BLENDER_EEVEE"]
+        # C4D path only supports Redshift; web scenes render via headless three.js;
+        # Blender keeps its own engines.
+        if is_web:
+            items = ["WEB_THREEJS"]
+        elif is_c4d:
+            items = ["Redshift"]
+        else:
+            items = ["CYCLES", "BLENDER_EEVEE"]
         if self.render_panel.engine_values() == items:
             return
         cur = self.render_panel.engine_value()
@@ -2334,10 +2338,12 @@ class BlenderVideoMapperQt(QMainWindow):
         current = [a for a in current if a.material_name in set(clean_materials)]
         self.scene_panel.set_assignments(current)
 
-        # The renderer dropdown reflects the scene type: C4D renderers for a
-        # .c4d, Blender engines otherwise.
-        is_c4d = self.scene_panel.scene_edit.text().strip().lower().endswith(".c4d")
-        self._set_renderer_options(is_c4d, settings.get("renderer", "") if settings else "")
+        # The renderer dropdown reflects the scene type: Redshift for .c4d,
+        # three.js for .glb/.gltf, Blender engines otherwise.
+        scene_l = self.scene_panel.scene_edit.text().strip().lower()
+        is_c4d = scene_l.endswith(".c4d")
+        is_web = scene_l.endswith((".glb", ".gltf"))
+        self._set_renderer_options(is_c4d, is_web, settings.get("renderer", "") if settings else "")
 
         # Pull render/timeline/colour settings from the scene into the UI. Guard
         # so the per-field edits don't each fire _on_settings_changed; we sync
@@ -3732,7 +3738,11 @@ class BlenderVideoMapperQt(QMainWindow):
         # With no mappings we still preview the bare 3D model.
         self._preview_pending = False
         is_c4d = scene.lower().endswith(".c4d")
-        if is_c4d:
+        is_web = scene.lower().endswith((".glb", ".gltf"))
+        if is_web:
+            c4dpy = ""
+            blender = ""
+        elif is_c4d:
             c4dpy = self._ensure_c4dpy(interactive=True)
             if not c4dpy:
                 return
@@ -3776,7 +3786,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self.preview_dock.raise_()
         self.preview_panel.preview_frame_btn.setEnabled(False)
         self.preview_panel.caption.setText(f"Rendering preview · frame {fs}…")
-        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% engine={'C4D/Redshift' if is_c4d else 'Blender'}")
+        _eng = "three.js" if is_web else ("C4D/Redshift" if is_c4d else "Blender")
+        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% engine={_eng}")
         self._preview_thread = PreviewFrameThread(blender, worker, cfg, out_dir,
                                                   c4dpy=c4dpy, c4d_worker=c4d_worker)
         self._preview_thread.log.connect(self._append_log)

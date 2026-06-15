@@ -205,30 +205,51 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
 
     ff = _find_ffmpeg()
     r = job.render
-    width, height = int(r.width), int(r.height)
+    scale = max(1, int(getattr(r, "resolution_percentage", 100))) / 100.0
+    width = max(1, int(r.width * scale))
+    height = max(1, int(r.height * scale))
     fs, fe = int(r.frame_start), int(r.frame_end)
     fps = int(r.fps) or 24
-    total = max(1, fe - fs + 1)
     mappings = _clip_mappings(job)
+
+    # Single-frame preview vs. full render.
+    preview_frame = int(getattr(job, "preview_frame", 0) or 0)
+    out_frames = [preview_frame] if preview_frame > 0 else list(range(fs, fe + 1))
+    total = len(out_frames)
 
     work = Path(tempfile.mkdtemp(prefix="webrender_"))
     out_dir = work / "out"
     out_dir.mkdir()
 
-    # 1) Extract each unique clip to PNG frames (same idea as the C4D path).
+    # 1) Extract the clip frames we need: the whole clip for a full render, or
+    #    just the one frame for a preview. ``clip_offset`` is the timeline offset
+    #    that the extracted list's index 0 corresponds to.
     clip_frames: dict[str, list[Path]] = {}
+    clip_offset: dict[str, int] = {}
     for _, vp in mappings:
         if vp in clip_frames:
             continue
         cdir = work / f"clip_{len(clip_frames)}"
         cdir.mkdir()
-        log(f"[web] Extracting frames: {Path(vp).name}")
-        subprocess.run([ff, "-y", "-i", vp, str(cdir / "f_%05d.png")],
-                       check=True, capture_output=True,
-                       creationflags=subprocess_creation_flags())
-        clip_frames[vp] = sorted(cdir.glob("*.png"))
+        if preview_frame > 0:
+            idx = max(0, preview_frame - fs)
+            log(f"[web] Extracting preview frame from {Path(vp).name}")
+            subprocess.run([ff, "-y", "-i", vp, "-vf", f"select=eq(n\\,{idx})",
+                            "-frames:v", "1", "-fps_mode", "vfr", str(cdir / "f_00000.png")],
+                           check=True, capture_output=True, creationflags=subprocess_creation_flags())
+            got = sorted(cdir.glob("*.png"))
+            if not got:   # idx past the clip end → fall back to the first frame
+                subprocess.run([ff, "-y", "-i", vp, "-frames:v", "1", str(cdir / "f_00000.png")],
+                               check=True, capture_output=True, creationflags=subprocess_creation_flags())
+                got = sorted(cdir.glob("*.png"))
+            clip_frames[vp], clip_offset[vp] = got, idx
+        else:
+            log(f"[web] Extracting frames: {Path(vp).name}")
+            subprocess.run([ff, "-y", "-i", vp, str(cdir / "f_%05d.png")],
+                           check=True, capture_output=True, creationflags=subprocess_creation_flags())
+            clip_frames[vp], clip_offset[vp] = sorted(cdir.glob("*.png")), 0
 
-    # 2) Render frame by frame.
+    # 2) Render.
     log(f"[web] Rendering {total} frame(s) at {width}x{height} via headless three.js…")
     with sync_playwright() as pw:
         browser, page = _launch(pw, width + 40, height + 40)
@@ -244,7 +265,7 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
             canvas = page.query_selector("canvas")
             if canvas is None:
                 raise RuntimeError("web renderer produced no canvas")
-            for out_i, _frame in enumerate(range(fs, fe + 1)):
+            for out_i, frame in enumerate(out_frames):
                 if should_cancel and should_cancel():
                     log("[web] Cancelled.")
                     return 1
@@ -254,7 +275,8 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                     frames = clip_frames.get(vp) or []
                     if not frames:
                         continue
-                    ci = min(out_i, len(frames) - 1)   # hold last frame past clip end
+                    ci = (frame - fs) - clip_offset.get(vp, 0)   # index into the extracted list
+                    ci = min(max(0, ci), len(frames) - 1)        # hold last frame past clip end
                     data = base64.b64encode(frames[ci].read_bytes()).decode("ascii")
                     page.evaluate("([m, d]) => window.api.setEmissive(m, d)",
                                   [mn, f"data:image/png;base64,{data}"])
@@ -269,16 +291,22 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     if not rendered:
         raise RuntimeError("Web render produced no frames.")
 
-    # 3) Assemble (movie via ffmpeg, or copy out an image sequence).
+    # 3) Output: a single PNG for a preview, else a movie or an image sequence.
     out_path = Path(job.output_path).expanduser()
+    if preview_frame > 0:
+        dest = out_path if out_path.suffix == "" else out_path.parent
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(rendered[0], dest / f"preview_{preview_frame:05d}.png")
+        log(f"[web] Preview frame {preview_frame} ready.")
+        return 0
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm") or out_path.suffix == "":
-        movie = out_path if out_path.suffix else out_path.with_suffix(".mp4")
+    if out_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm"):
         subprocess.run(
             [ff, "-y", "-framerate", str(fps), "-i", str(out_dir / "out_%05d.png"),
-             "-pix_fmt", "yuv420p", str(movie)],
+             "-pix_fmt", "yuv420p", str(out_path)],
             check=True, capture_output=True, creationflags=subprocess_creation_flags())
-        log(f"[web] Wrote {movie}")
+        log(f"[web] Wrote {out_path}")
     else:
         seq = out_path if out_path.suffix == "" else out_path.parent
         seq.mkdir(parents=True, exist_ok=True)

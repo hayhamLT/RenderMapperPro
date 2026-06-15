@@ -1323,7 +1323,8 @@ class RenderPanel(QWidget):
 
     # Friendly renderer names in the UI; the enum value Blender/C4D expects is
     # carried as itemData so configs/profiles keep the real identifier.
-    ENGINE_LABELS = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift"}
+    ENGINE_LABELS = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
+                     "WEB_THREEJS": "three.js (WebGPU)"}
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()
@@ -1342,20 +1343,25 @@ class RenderPanel(QWidget):
     def engine_values(self) -> list[str]:
         return [str(self.engine_combo.itemData(i)) for i in range(self.engine_combo.count())]
 
-    def set_renderer(self, is_c4d: bool) -> None:
+    def set_renderer(self, is_c4d: bool, is_web: bool = False) -> None:
         """Adapt the settings to the active renderer so every visible control is
-        real. Redshift: relabel samples, hide Blender-only Device + Color
-        Management, show the Redshift optimization controls, and offer only
-        output profiles the C4D path can produce."""
+        real. Redshift relabels samples and shows its optimization controls; the
+        web/three.js backend hides the Blender-only Device + Color + alpha
+        controls (it ignores them) and offers only the outputs it can produce."""
         self.samples_label.setText("Max Samples" if is_c4d else "Cycles Samples")
         # Redshift-only sampling/GI controls.
         for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row, self.gi_box):
             w.setVisible(is_c4d)
-        # Blender-only controls.
-        self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
-        self.color_box.setVisible(not is_c4d)        # Blender color management
-        self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
-        items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
+        # Blender-only controls — also hidden for the web/three.js backend.
+        self.device_box.setVisible(not is_c4d and not is_web)   # Redshift/web are GPU-only
+        self.color_box.setVisible(not is_c4d and not is_web)    # Blender color management
+        self.transparent_cb.setVisible(not is_c4d and not is_web)
+        if is_web:
+            items = ["H264 MP4", "PNG Sequence"]
+        elif is_c4d:
+            items = ["H264 MP4", "ProRes MOV", "PNG Sequence"]
+        else:
+            items = list(OUTPUT_PROFILES.keys())
         existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
         if existing != items:
             cur = self.profile_combo.currentText()
