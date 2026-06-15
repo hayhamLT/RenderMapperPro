@@ -330,31 +330,10 @@ class RuntimeInstallThread(QThread):
     finished_install = Signal(str, str)
 
     def _download(self, url: str, dest: Path) -> None:
+        from core.download import download_with_progress
         self.log.emit(f"[runtime] Downloading {url}")
         self.log.emit("[runtime] This is a ~300–700 MB download and can take several minutes.")
-        req = urllib.request.Request(url, headers={"User-Agent": "RenderMapperPro/1.0"})
-        with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:
-            total = int(resp.headers.get("Content-Length", "0") or "0")
-            read = 0
-            last_pct = -5
-            t0 = time.monotonic()
-            mb = 1024 * 1024
-            while True:
-                chunk = resp.read(1024 * 512)
-                if not chunk:
-                    break
-                out.write(chunk)
-                read += len(chunk)
-                if total > 0:
-                    pct = int((read / total) * 100)
-                    if pct >= last_pct + 5:        # 5% steps, not one line per 512 KB
-                        last_pct = pct
-                        elapsed = max(0.001, time.monotonic() - t0)
-                        speed = read / elapsed     # bytes/s
-                        eta = (total - read) / speed if speed > 0 else 0
-                        self.log.emit(
-                            f"[runtime] Download {pct}% — {read // mb}/{total // mb} MB "
-                            f"· {speed / mb:.1f} MB/s · ~{int(eta)}s left")
+        download_with_progress(url, dest, self.log.emit)   # progress/ETA logging in core
 
     def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
         from core.archive import safe_extract_tar, safe_extract_zip
@@ -2222,7 +2201,6 @@ class BlenderVideoMapperQt(QMainWindow):
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
         def _fetch(use_token: bool):
-            import urllib.request
             headers = {"Accept": "application/vnd.github+json",
                        "X-GitHub-Api-Version": "2022-11-28",
                        "User-Agent": APP_NAME}
