@@ -2090,7 +2090,10 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _scan_scene(self) -> None:
         scene = self.scene_panel.scene_edit.text().strip()
-        if not scene or not file_exists(scene):
+        if not scene:
+            return
+        if not file_exists(scene):
+            self._show_toast(f"Scene file not found: {scene}", "warning")
             return
         is_c4d = scene.lower().endswith(".c4d")
         is_web = scene.lower().endswith((".glb", ".gltf"))
