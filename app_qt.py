@@ -4708,59 +4708,12 @@ class BlenderVideoMapperQt(QMainWindow):
             worker_path = Path(worker).expanduser().resolve()
 
             with open(job_info_path, "w") as f:
-                name_template = cfg.deadline_job_name_template or ""
-                if name_template:
-                    try:
-                        name = name_template.format(scene_name=scene_path.name, video_name=Path(cfg.video_path).name if cfg.video_path else "")
-                    except Exception:
-                        name = f"Render Mapper Pro Job - {scene_path.name}"
-                else:
-                    name = f"Render Mapper Pro Job - {scene_path.name}"
-                f.write(f"Name={name}\n")
-                f.write("Plugin=CommandLine\n")
-                f.write(f"Frames={cfg.render.frame_start}-{cfg.render.frame_end}\n")
-                f.write(f"Priority={cfg.deadline_priority}\n")
-                if cfg.deadline_pool:
-                    f.write(f"Pool={cfg.deadline_pool}\n")
-                if cfg.deadline_secondary_pool:
-                    f.write(f"SecondaryPool={cfg.deadline_secondary_pool}\n")
-                if cfg.deadline_group:
-                    f.write(f"Group={cfg.deadline_group}\n")
-                if cfg.deadline_comment:
-                    f.write(f"Comment={cfg.deadline_comment}\n")
-                if cfg.deadline_department:
-                    f.write(f"Department={cfg.deadline_department}\n")
-                from core.utils import ext_for_format
-                ext = ext_for_format(cfg.render.output_format)
-                is_video = ext != ""
-
-                chunk_size = cfg.deadline_chunk_size
-                if is_video:
-                    total_frames = max(1, cfg.render.frame_end - cfg.render.frame_start + 1)
-                    chunk_size = total_frames
-
-                if chunk_size > 1:
-                    f.write(f"ChunkSize={chunk_size}\n")
-                if cfg.deadline_suspended:
-                    f.write("InitialStatus=Suspended\n")
-                if cfg.deadline_machine_limit > 0:
-                    f.write(f"MachineLimit={cfg.deadline_machine_limit}\n")
-                if cfg.deadline_limits:
-                    f.write(f"Limits={cfg.deadline_limits}\n")
-                whitelist = getattr(cfg, 'deadline_whitelist', "").strip()
-                if whitelist:
-                    f.write(f"Whitelist={whitelist}\n")
-
-                from core.utils import ext_for_format
-                if cfg.output_path:
-                    out_path = Path(cfg.output_path)
-                    if out_path.suffix:
-                        f.write(f"OutputDirectory0={out_path.parent}\n")
-                        f.write(f"OutputFilename0={out_path.name}\n")
-                    else:
-                        f.write(f"OutputDirectory0={out_path}\n")
-                        ext = ext_for_format(cfg.render.output_format) or ".png"
-                        f.write(f"OutputFilename0=####{ext}\n")
+                # Single source of truth — same writer the farm submit uses, so
+                # exported files never drift from submitted ones.
+                from core.runner import write_commandline_job_info
+                write_commandline_job_info(
+                    f, cfg, scene_path.name,
+                    Path(cfg.video_path).name if cfg.video_path else "")
 
             scene_arg = scene_path.name if cfg.submit_scene else str(scene_path)
             worker_arg = worker_path.name

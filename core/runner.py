@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .models import JobConfig, SceneBackend, scene_backend
-from .utils import iter_process_output, subprocess_creation_flags, terminate_process
+from .utils import ext_for_format, iter_process_output, subprocess_creation_flags, terminate_process
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -28,7 +28,7 @@ def build_blender_command(
     command.extend(["--python", str(worker_path), "--", str(config_path)])
     return command
 
-def _write_job_info_common(f, job, name: str) -> None:
+def _write_job_info_common(f, job: JobConfig, name: str) -> None:
     """Write the pool/group/priority/etc. job-info fields shared by both
     backends. The caller writes Plugin, Frames and Output* lines."""
     f.write(f"Name={name}\n")
@@ -47,6 +47,47 @@ def _write_job_info_common(f, job, name: str) -> None:
         f.write(f"MachineLimit={ml}\n")
     if getattr(job, "deadline_suspended", False):
         f.write("InitialStatus=Suspended\n")
+
+
+def write_commandline_job_info(f, job: JobConfig, scene_name: str, video_name: str = "",
+                               on_log: LogCallback | None = None) -> None:
+    """Write a complete CommandLine (Blender) Deadline job-info file. The single
+    source of truth shared by farm submission AND the 'Export job files' action,
+    so the two can never drift (they had)."""
+    template = getattr(job, "deadline_job_name_template", "") or ""
+    name = f"Render Mapper Pro Job - {scene_name}"
+    if template:
+        try:
+            name = template.format(scene_name=scene_name, video_name=video_name)
+        except Exception:
+            pass
+    _write_job_info_common(f, job, name)
+    f.write("Plugin=CommandLine\n")
+    f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
+
+    ext = ext_for_format(job.render.output_format)
+    chunk = getattr(job, "deadline_chunk_size", 1)
+    frame_count = job.render.frame_end - job.render.frame_start + 1
+    if ext != "":                       # video → one indivisible chunk
+        chunk = max(1, frame_count)
+    elif chunk > frame_count:
+        # A chunk larger than the range can't be split — wastes a farm round-trip.
+        if on_log:
+            on_log(f"[deadline] Chunk size {chunk} exceeds the {frame_count}-frame "
+                   f"range; clamping to {frame_count}.")
+        chunk = frame_count
+    chunk = max(1, chunk)
+    if chunk > 1:
+        f.write(f"ChunkSize={chunk}\n")
+
+    if job.output_path:
+        out_path = Path(job.output_path)
+        if out_path.suffix:
+            f.write(f"OutputDirectory0={out_path.parent}\n")
+            f.write(f"OutputFilename0={out_path.name}\n")
+        else:
+            f.write(f"OutputDirectory0={out_path}\n")
+            f.write(f"OutputFilename0=####{ext or '.png'}\n")
 
 
 def _submit_deadline_files(job, job_info_path, plugin_info_path, on_log) -> int:
@@ -270,78 +311,9 @@ def submit_deadline_job(
     plugin_info_path = staging_dir / "plugin_info.job"
 
     with open(job_info_path, "w") as f:
-        name_template = getattr(job, 'deadline_job_name_template', "")
-        if name_template:
-            try:
-                name = name_template.format(
-                    scene_name=scene_path.name,
-                    video_name=Path(job.video_path).name if job.video_path else "",
-                )
-            except Exception:
-                name = f"Render Mapper Pro Job - {scene_path.name}"
-        else:
-            name = f"Render Mapper Pro Job - {scene_path.name}"
-
-        f.write(f"Name={name}\n")
-        f.write("Plugin=CommandLine\n")
-        f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
-        f.write(f"Priority={getattr(job, 'deadline_priority', 50)}\n")
-
-        pool = getattr(job, 'deadline_pool', "")
-        if pool:
-            f.write(f"Pool={pool}\n")
-        sec_pool = getattr(job, 'deadline_secondary_pool', "")
-        if sec_pool:
-            f.write(f"SecondaryPool={sec_pool}\n")
-        group = getattr(job, 'deadline_group', "")
-        if group:
-            f.write(f"Group={group}\n")
-        comment = getattr(job, 'deadline_comment', "")
-        if comment:
-            f.write(f"Comment={comment}\n")
-        dept = getattr(job, 'deadline_department', "")
-        if dept:
-            f.write(f"Department={dept}\n")
-
-        from .utils import ext_for_format
-        ext = ext_for_format(job.render.output_format)
-        is_video = ext != ""
-        chunk_size = getattr(job, 'deadline_chunk_size', 1)
-        frame_count = job.render.frame_end - job.render.frame_start + 1
-        if is_video:
-            chunk_size = max(1, frame_count)
-        elif chunk_size > frame_count:
-            # A chunk larger than the range yields a job Deadline can't split,
-            # wasting a farm round-trip to discover it. Clamp to the frame count.
-            if on_log:
-                on_log(f"[deadline] Chunk size {chunk_size} exceeds the {frame_count}-frame "
-                       f"range; clamping to {frame_count}.")
-            chunk_size = frame_count
-        chunk_size = max(1, chunk_size)
-        if chunk_size > 1:
-            f.write(f"ChunkSize={chunk_size}\n")
-
-        if getattr(job, 'deadline_suspended', False):
-            f.write("InitialStatus=Suspended\n")
-        machine_limit = getattr(job, 'deadline_machine_limit', 0)
-        if machine_limit > 0:
-            f.write(f"MachineLimit={machine_limit}\n")
-        limits = getattr(job, 'deadline_limits', "")
-        if limits:
-            f.write(f"Limits={limits}\n")
-        whitelist = getattr(job, 'deadline_whitelist', "").strip()
-        if whitelist:
-            f.write(f"Whitelist={whitelist}\n")
-
-        if job.output_path:
-            out_path = Path(job.output_path)
-            if out_path.suffix:
-                f.write(f"OutputDirectory0={out_path.parent}\n")
-                f.write(f"OutputFilename0={out_path.name}\n")
-            else:
-                f.write(f"OutputDirectory0={out_path}\n")
-                ext = ext_for_format(job.render.output_format) or ".png"
-                f.write(f"OutputFilename0=####{ext}\n")
+        write_commandline_job_info(
+            f, job, scene_path.name,
+            Path(job.video_path).name if job.video_path else "", on_log)
 
     # ── Plugin info file ─────────────────────────────────────────────────────
     # All paths are fully-qualified absolutes — no CWD ambiguity.
