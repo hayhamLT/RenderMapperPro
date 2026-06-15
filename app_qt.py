@@ -8,11 +8,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import urllib.request
-import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -127,7 +125,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.6.0"
+APP_VERSION: str = __import__("app_version").__version__  # single source of truth
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -355,14 +353,13 @@ class RuntimeInstallThread(QThread):
                             f"· {speed / mb:.1f} MB/s · ~{int(eta)}s left")
 
     def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
+        from core.archive import safe_extract_tar, safe_extract_zip
         name = archive_path.name.lower()
         if name.endswith(".zip"):
-            with zipfile.ZipFile(archive_path, "r") as zf:
-                zf.extractall(staging_dir)
+            safe_extract_zip(archive_path, staging_dir)   # rejects Zip-Slip members
             return
         if name.endswith(".tar.xz"):
-            with tarfile.open(archive_path, "r:xz") as tf:
-                tf.extractall(staging_dir)
+            safe_extract_tar(archive_path, staging_dir)   # 3.12 'data' filter
             return
         if name.endswith(".dmg") and sys.platform == "darwin":
             # Try hdiutil mount/copy; fall back to treating as zip if unavailable
@@ -2295,9 +2292,8 @@ class BlenderVideoMapperQt(QMainWindow):
             dest.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
-            import zipfile
-            with zipfile.ZipFile(dest) as z:
-                z.extractall(dest.parent)
+            from core.archive import safe_extract_zip
+            safe_extract_zip(dest, dest.parent)   # rejects Zip-Slip members
             reveal_in_file_manager(dest)
             QMessageBox.information(self, "Update Downloaded",
                 f"{want} was downloaded to your Downloads and unzipped.\n\n"
@@ -5544,6 +5540,10 @@ class BlenderVideoMapperQt(QMainWindow):
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
+            try:
+                os.chmod(tmp, 0o600)   # owner-only: the profile may hold a webhook secret
+            except OSError:
+                pass
             tmp.replace(PROFILE_PATH)
         except Exception as exc:
             self._append_log(f"[app] Could not save settings: {exc}")

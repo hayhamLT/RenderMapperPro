@@ -1,0 +1,7 @@
+# Runtime dependencies for Render Mapper Pro.
+# Pinned for reproducibility; see requirements-dev.txt for dev/CI tooling and
+# requirements-build.txt for the frozen-app build pins.
+PySide6==6.11.1
+# Optional — enables the headless three.js (.glb/.gltf) render backend. The
+# Chromium browser itself is downloaded on demand, not via pip.
+playwright==1.60.0

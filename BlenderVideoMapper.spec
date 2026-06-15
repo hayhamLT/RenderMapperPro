@@ -4,7 +4,18 @@ import platform
 import sys
 
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.6.0"
+
+
+def _app_version():
+    """Read the version from app_version.py (single source of truth)."""
+    import pathlib
+    import re
+    txt = pathlib.Path("app_version.py").read_text(encoding="utf-8")
+    m = re.search(r'__version__\s*=\s*"([^"]+)"', txt)
+    return m.group(1) if m else "0.0.0"
+
+
+APP_VERSION = _app_version()
 
 
 def _ffmpeg_binaries():

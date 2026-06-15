@@ -46,6 +46,28 @@ def subprocess_creation_flags() -> int:
     return 0
 
 
+def terminate_process(process, grace: float = 5.0) -> None:
+    """Stop a subprocess, escalating SIGTERM → SIGKILL so it can't orphan.
+
+    ``terminate()`` alone leaves a process that ignores SIGTERM (some renderers
+    and ffmpeg do) running forever and holding the GPU/files; wait a short grace
+    period for a clean exit, then ``kill()``. Never raises."""
+    try:
+        process.terminate()
+    except Exception:
+        return
+    try:
+        process.wait(timeout=grace)
+        return
+    except Exception:
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=grace)
+    except Exception:
+        pass
+
+
 def iter_process_output(
     process,
     *,
@@ -80,18 +102,18 @@ def iter_process_output(
         if should_cancel and should_cancel():
             if on_cancel:
                 on_cancel()
-            process.terminate()
+            terminate_process(process)
             return
         now = time.time()
         if hard_timeout > 0 and (now - started) > hard_timeout:
             if on_timeout:
                 on_timeout("hard", hard_timeout)
-            process.terminate()
+            terminate_process(process)
             return
         if idle_timeout > 0 and (now - last) > idle_timeout:
             if on_timeout:
                 on_timeout("idle", idle_timeout)
-            process.terminate()
+            terminate_process(process)
             return
         try:
             item = q.get(timeout=0.5)

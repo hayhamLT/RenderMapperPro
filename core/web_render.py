@@ -22,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .models import JobConfig
-from .utils import subprocess_creation_flags
+from .utils import subprocess_creation_flags, terminate_process
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -115,7 +115,7 @@ def ensure_web_chromium(on_log: LogCallback | None = None,
     assert proc.stdout is not None
     while True:
         if should_cancel and should_cancel():
-            proc.terminate()
+            terminate_process(proc)
             raise RuntimeError("cancelled")
         chunk = proc.stdout.read(256)
         if not chunk:

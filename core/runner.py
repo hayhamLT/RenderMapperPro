@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .models import JobConfig
-from .utils import iter_process_output, subprocess_creation_flags
+from .utils import iter_process_output, subprocess_creation_flags, terminate_process
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -63,11 +63,15 @@ def _submit_deadline_files(job, job_info_path, plugin_info_path, on_log) -> int:
         on_log("[deadline] Command: " + " ".join(cmd))
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                                creationflags=subprocess_creation_flags())
-    if process.stdout is not None:
-        for line in process.stdout:
-            if on_log:
-                on_log(line.rstrip())
-    return process.wait()
+    try:
+        if process.stdout is not None:
+            for line in process.stdout:
+                if on_log:
+                    on_log(line.rstrip())
+        return process.wait()
+    finally:
+        if process.poll() is None:
+            terminate_process(process)
 
 
 def submit_deadline_job(
@@ -447,14 +451,15 @@ def run_c4d_job(
         if process.stdout is not None:
             for line in process.stdout:
                 if should_cancel and should_cancel():
-                    process.terminate()
+                    terminate_process(process)
                     break
                 if on_log:
                     on_log(line.rstrip())
         rc = process.wait()
     finally:
         if process.poll() is None:
-            process.kill()
+            terminate_process(process)
+        config_path.unlink(missing_ok=True)   # don't leak the temp job config
 
     # c4dpy often crashes on exit after a successful render — treat the job as
     # successful if it produced output: new frames in a sequence folder, or a
@@ -508,6 +513,7 @@ def run_blender_job(
     if on_log:
         on_log("[app] Executing: " + " ".join(command))
 
+    process = None
     try:
         process = subprocess.Popen(
             command,
@@ -541,5 +547,7 @@ def run_blender_job(
 
         return process.wait()
     finally:
+        if process is not None and process.poll() is None:
+            terminate_process(process)   # ensure no orphan on cancel/timeout/error
         if config_path.exists():
             config_path.unlink(missing_ok=True)
