@@ -27,11 +27,11 @@ from core.utils import SCENE_EXTENSIONS
 from theme import active_palette
 
 # Item-data roles for the material / video lists.
-ROLE_VIDEO_PATH = Qt.UserRole          # absolute video path (existing)
-ROLE_HAS_AUDIO = Qt.UserRole + 1       # bool: clip carries an audio stream
-ROLE_MUTED = Qt.UserRole + 2           # bool: user muted this clip's audio
-ROLE_MAP_COLOR = Qt.UserRole + 3       # str hex: mapping colour, or None
-ROLE_TARGET = Qt.UserRole + 5          # bool: material is a render target
+ROLE_VIDEO_PATH = Qt.ItemDataRole.UserRole          # absolute video path (existing)
+ROLE_HAS_AUDIO = Qt.ItemDataRole.UserRole + 1       # bool: clip carries an audio stream
+ROLE_MUTED = Qt.ItemDataRole.UserRole + 2           # bool: user muted this clip's audio
+ROLE_MAP_COLOR = Qt.ItemDataRole.UserRole + 3       # str hex: mapping colour, or None
+ROLE_TARGET = Qt.ItemDataRole.UserRole + 5          # bool: material is a render target
 
 _AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
 _AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
@@ -73,8 +73,8 @@ class MappingStripeDelegate(QStyledItemDelegate):
         r = option.rect
         bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
         painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(color))
         painter.drawRoundedRect(bar, 1.5, 1.5)
         painter.restore()
@@ -101,15 +101,15 @@ class TargetStripeDelegate(MappingStripeDelegate):
     def _paint_stripe(self, painter, option, index) -> None:
         color = index.data(ROLE_MAP_COLOR)
         targeted = bool(index.data(ROLE_TARGET))
-        hovered = bool(option.state & QStyle.State_MouseOver)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         if not (color or targeted or hovered):
             return
         r = option.rect
         bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
         pal = active_palette()
         painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
         if color:                                   # clip linked → solid colour
             painter.setBrush(QColor(color))
         elif targeted:                              # target, no clip yet → dim accent
@@ -124,9 +124,9 @@ class TargetStripeDelegate(MappingStripeDelegate):
         painter.restore()
 
     def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
-        if (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
+        if (event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton
                 and (event.position().toPoint().x() - option.rect.left()) <= self._HIT_W):
-            mat = index.data(Qt.DisplayRole)
+            mat = index.data(Qt.ItemDataRole.DisplayRole)
             if mat and self._toggle:
                 self._toggle(mat)
             return True                             # swallow so the row isn't toggled-selected
@@ -158,15 +158,15 @@ class AudioBadgeDelegate(MappingStripeDelegate):
         from the indented text edge, leaving the badge floating outside it."""
         st = option.state
         pal = active_palette()
-        if st & QStyle.State_Selected:
+        if st & QStyle.StateFlag.State_Selected:
             color = QColor(pal.selection)
-        elif st & QStyle.State_MouseOver:
+        elif st & QStyle.StateFlag.State_MouseOver:
             color = QColor(pal.surface_hover)
         else:
             return
         painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawRoundedRect(option.rect, T.RADIUS_SM, T.RADIUS_SM)
         painter.restore()
@@ -195,8 +195,8 @@ class AudioBadgeDelegate(MappingStripeDelegate):
                 chip = QColor(pal.accent)
                 chip.setAlpha(60)
                 painter.save()
-                painter.setRenderHint(QPainter.Antialiasing, True)
-                painter.setPen(Qt.NoPen)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(chip)
                 painter.drawRoundedRect(badge_r.adjusted(-3, -2, 3, 2), 5, 5)
                 painter.restore()
@@ -211,17 +211,17 @@ class AudioBadgeDelegate(MappingStripeDelegate):
         # Intercept press/release/double-click on the badge so the click toggles
         # mute without the list treating it as a (de)selection of the row.
         badge_events = (
-            QEvent.MouseButtonPress,
-            QEvent.MouseButtonRelease,
-            QEvent.MouseButtonDblClick,
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick,
         )
         if (
             bool(index.data(ROLE_HAS_AUDIO))
             and event.type() in badge_events
-            and event.button() == Qt.LeftButton
+            and event.button() == Qt.MouseButton.LeftButton
             and self._badge_rect(option.rect).contains(event.position().toPoint())
         ):
-            if event.type() == QEvent.MouseButtonRelease:
+            if event.type() == QEvent.Type.MouseButtonRelease:
                 path = index.data(ROLE_VIDEO_PATH)
                 if path and self._toggle:
                     self._toggle(path)
@@ -247,7 +247,7 @@ class _ImageView(QWidget):
         painter = QPainter(self)
         if self._bg is not None:
             painter.fillRect(self.rect(), self._bg)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(0, 0, self._pm)
 
 
@@ -258,7 +258,7 @@ class VideoListWidget(QListWidget):
         super().__init__(parent)
         # Disable Qt's own drag-drop handling so external Finder drops
         # reach our custom event filter on the viewport instead.
-        self.setDragDropMode(QAbstractItemView.NoDragDrop)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setAcceptDrops(False)
         self.setMouseTracking(True)
         vp = self.viewport()
@@ -279,7 +279,7 @@ class VideoListWidget(QListWidget):
                 new_path = idx.data(ROLE_VIDEO_PATH)
         if new_path != deleg._hover_badge:
             deleg._hover_badge = new_path
-            self.viewport().setCursor(Qt.PointingHandCursor if new_path else Qt.ArrowCursor)
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if new_path else Qt.CursorShape.ArrowCursor)
             self.viewport().update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
@@ -289,7 +289,7 @@ class VideoListWidget(QListWidget):
             painter.setPen(QColor(active_palette().text_faint))
             painter.drawText(
                 self.viewport().rect().adjusted(12, 0, -12, 0),
-                Qt.AlignCenter | Qt.TextWordWrap,
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
                 "Drag & drop videos or images here\n(or click Add)",
             )
             painter.end()
@@ -427,7 +427,7 @@ class MaterialListWidget(QListWidget):
             painter.setPen(QColor(active_palette().text_faint))
             painter.drawText(
                 self.viewport().rect().adjusted(12, 0, -12, 0),
-                Qt.AlignCenter | Qt.TextWordWrap,
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
                 "Drag & drop your scene here\n(.glb, .blend, .fbx…)",
             )
             painter.end()
@@ -452,7 +452,7 @@ class HintListWidget(QListWidget):
             painter = QPainter(self.viewport())
             painter.setPen(QColor(active_palette().text_faint))
             painter.drawText(self.viewport().rect().adjusted(12, 0, -12, 0),
-                             Qt.AlignCenter | Qt.TextWordWrap, self._hint)
+                             Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self._hint)
             painter.end()
 
 
@@ -469,5 +469,5 @@ class HintTableWidget(QTableWidget):
             painter = QPainter(self.viewport())
             painter.setPen(QColor(active_palette().text_faint))
             painter.drawText(self.viewport().rect().adjusted(16, 0, -16, 0),
-                             Qt.AlignCenter | Qt.TextWordWrap, self._hint)
+                             Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self._hint)
             painter.end()

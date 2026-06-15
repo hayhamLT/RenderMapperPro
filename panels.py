@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -111,14 +113,14 @@ class ScenePanel(QWidget):
         self._hover_material: str | None = None
         self._hover_video: str | None = None
         self._watch_folder: str = ""
-        self._watch_seen: dict[str, float] = {}
+        self._watch_seen: object = {}   # last poll signature (dict sentinel or sig tuple)
         self._watch_sizes: dict[str, int] = {}   # last-seen size, for write-in-progress detection
         self._watch_scanning = False             # a background scan is in flight
         self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
         self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
         self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
         self._targets: list[str] = []            # materials marked as render targets
-        self._autorender_last = None             # last complete target version-set emitted
+        self._autorender_last: frozenset | None = None   # last target version-set emitted
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
@@ -287,7 +289,7 @@ class ScenePanel(QWidget):
         self.mat_list.itemEntered.connect(self._on_mat_entered)
         self.mat_list.viewport().installEventFilter(self)
         self.mat_list.scene_dropped.connect(self._on_scene_file_dropped)
-        self.mat_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mat_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.mat_list.customContextMenuRequested.connect(self._show_material_context_menu)
         left.addWidget(self.mat_search)
         left.addWidget(self.mat_list)
@@ -335,10 +337,10 @@ class ScenePanel(QWidget):
         self.vid_search.setPlaceholderText("Filter videos")
         self.vid_search.textChanged.connect(self._refresh_lists)
         self.vid_list = VideoListWidget()
-        self.vid_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.vid_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.vid_list.viewport().setMouseTracking(True)
         self.vid_list.setItemDelegate(AudioBadgeDelegate(self.toggle_mute, self, self.vid_list))
-        self.vid_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.vid_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.vid_list.customContextMenuRequested.connect(self._show_video_context_menu)
         self.vid_list.currentItemChanged.connect(lambda *_: self._recompute_cross_highlight())
         self.vid_list.itemEntered.connect(self._on_vid_entered)
@@ -347,8 +349,8 @@ class ScenePanel(QWidget):
 
         remove_video_action = QAction("Remove Selected", self)
         # macOS "delete" key emits Backspace; bind both so it actually fires.
-        remove_video_action.setShortcuts([QKeySequence(Qt.Key_Delete), QKeySequence(Qt.Key_Backspace)])
-        remove_video_action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        remove_video_action.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
+        remove_video_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         remove_video_action.triggered.connect(self._remove_selected_video)
         self.vid_list.addAction(remove_video_action)
         right.addWidget(right_top_w)
@@ -493,7 +495,7 @@ class ScenePanel(QWidget):
         for item in items:
             if item is None:
                 continue
-            path = item.data(Qt.UserRole) or item.text()
+            path = item.data(Qt.ItemDataRole.UserRole) or item.text()
             if str(path).startswith("__add_video__"):
                 continue
             if not os.path.isabs(path):
@@ -503,6 +505,14 @@ class ScenePanel(QWidget):
                         break
             paths.add(path)
         if not paths:
+            return
+        n = len(paths)
+        mapped = sum(1 for a in self._assignments if a.video_path in paths)
+        msg = f"Remove {n} clip{'s' if n != 1 else ''}?"
+        if mapped:
+            msg += f"\n\n{mapped} material mapping{'s' if mapped != 1 else ''} will be removed too."
+        msg += "\n\nThis can be undone with Ctrl+Z."
+        if QMessageBox.question(self, "Remove Clips", msg) != QMessageBox.StandardButton.Yes:
             return
         # Snapshot for undo: removing clips silently cascades to their mappings
         # and mute state, so it must be reversible like the other destructive actions.
@@ -536,7 +546,7 @@ class ScenePanel(QWidget):
         if mat_item is None or vid_item is None:
             return
         material = mat_item.text()
-        video = vid_item.data(Qt.UserRole) or vid_item.text()
+        video = vid_item.data(Qt.ItemDataRole.UserRole) or vid_item.text()
         if str(video).startswith("__add_video__"):
             return
         replacement = MaterialVideoAssignment(material, video, VIDEO_MAPPING_MODE_EMISSION)
@@ -560,6 +570,12 @@ class ScenePanel(QWidget):
 
     def _clear_assignments(self) -> None:
         if not self._assignments:
+            return
+        n = len(self._assignments)
+        if QMessageBox.question(
+            self, "Clear Mappings",
+            f"Remove all {n} mapping{'s' if n != 1 else ''}?\n\nThis can be undone with Ctrl+Z.",
+        ) != QMessageBox.StandardButton.Yes:
             return
         self.assignments_cleared.emit(
             [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in self._assignments])
@@ -870,7 +886,7 @@ class ScenePanel(QWidget):
             self.vid_list.addItem(item)
         if current_vid:
             for i in range(self.vid_list.count()):
-                if self.vid_list.item(i).data(Qt.UserRole) == current_vid:
+                if self.vid_list.item(i).data(Qt.ItemDataRole.UserRole) == current_vid:
                     self.vid_list.setCurrentRow(i)
                     break
         self.vid_list.blockSignals(False)
@@ -931,7 +947,7 @@ class ScenePanel(QWidget):
         item = self.vid_list.currentItem()
         if not item:
             return ""
-        return item.data(Qt.UserRole) or ""
+        return item.data(Qt.ItemDataRole.UserRole) or ""
 
     def _show_video_context_menu(self, pos) -> None:
         item = self.vid_list.itemAt(pos)
@@ -953,7 +969,7 @@ class ScenePanel(QWidget):
             self.render_requested.emit()
         elif chosen == remove_action:
             self._remove_selected_video()
-        elif mute_action is not None and chosen == mute_action:
+        elif mute_action is not None and item is not None and chosen == mute_action:
             self.toggle_mute(item.data(ROLE_VIDEO_PATH))
 
 
@@ -972,8 +988,8 @@ class RenderPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget()
         scroll.setWidget(inner)
         outer.addWidget(scroll)
@@ -998,12 +1014,12 @@ class RenderPanel(QWidget):
         self.height_edit.setToolTip("Output height in pixels.")
         self.height_edit.setPlaceholderText("H")
         x_lbl = QLabel("×")
-        x_lbl.setAlignment(Qt.AlignCenter)
+        x_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.fps_edit = QLineEdit("30")
         self.fps_edit.setToolTip("Frames per second of the output (and clip playback).")
         self.fps_edit.setPlaceholderText("FPS")
         fps_lbl = QLabel("fps")
-        fps_lbl.setAlignment(Qt.AlignVCenter)
+        fps_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         res_row.addWidget(self.width_edit, 3)
         res_row.addWidget(x_lbl)
         res_row.addWidget(self.height_edit, 3)
@@ -1090,7 +1106,7 @@ class RenderPanel(QWidget):
         self.adv_toggle.setCheckable(True)
         self.adv_toggle.setChecked(False)
         self.adv_toggle.setObjectName("SmallButton")
-        self.adv_toggle.setCursor(Qt.PointingHandCursor)
+        self.adv_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self.adv_toggle.toggled.connect(self._on_adv_toggled)
         root.addWidget(self.adv_toggle)
 
@@ -1169,11 +1185,18 @@ class RenderPanel(QWidget):
                                    "onto every frame — so reviews always know which version "
                                    "they're looking at. (Farm C4D renders: not yet.)")
         self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
+        self.safe_mode_cb = QCheckBox("Validate file paths (safe mode)")
+        self.safe_mode_cb.setChecked(True)
+        self.safe_mode_cb.setToolTip(
+            "Before rendering, check that the scene and every mapped clip exist, are "
+            "readable, and have a supported extension. Turn off only if you use "
+            "symlinks or relative paths that are valid on the render machine.")
         cb_row = QHBoxLayout()
         cb_row.setSpacing(18)
         cb_row.addWidget(self.denoise_cb)
         cb_row.addWidget(self.transparent_cb)
         cb_row.addWidget(self.burn_in_cb)
+        cb_row.addWidget(self.safe_mode_cb)
         cb_row.addStretch(1)
         adv.addLayout(cb_row)
 
@@ -1281,12 +1304,12 @@ class RenderPanel(QWidget):
             return
         self._rs_applying = True
         try:
-            self.samples_edit.setText(p["mx"])
-            self.rs_min_samples_edit.setText(p["mn"])
-            self.rs_threshold_edit.setText(p["thr"])
-            self.rs_gi_bounces_edit.setText(p["gib"])
-            self.rs_ray_depth_edit.setText(p["depth"])
-            self.rs_gi_cb.setChecked(p["gi"])
+            self.samples_edit.setText(str(p["mx"]))
+            self.rs_min_samples_edit.setText(str(p["mn"]))
+            self.rs_threshold_edit.setText(str(p["thr"]))
+            self.rs_gi_bounces_edit.setText(str(p["gib"]))
+            self.rs_ray_depth_edit.setText(str(p["depth"]))
+            self.rs_gi_cb.setChecked(bool(p["gi"]))
         finally:
             self._rs_applying = False
 
@@ -1575,8 +1598,8 @@ class DeadlinePanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget()
         scroll.setWidget(inner)
         outer.addWidget(scroll)
@@ -1628,16 +1651,18 @@ class DeadlinePanel(QWidget):
         container_layout.addWidget(section("RENDER TARGETS & POOLS"))
         pools_layout = QFormLayout()
         pools_layout.setSpacing(6)
-        pools_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        pools_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.dl_pool_combo = QComboBox()
         self.dl_pool_combo.setEditable(True)
-        self.dl_pool_combo.lineEdit().textChanged.connect(self._on_changed)
+        if (_ple := self.dl_pool_combo.lineEdit()) is not None:
+            _ple.textChanged.connect(self._on_changed)
         pools_layout.addRow("Primary Pool:", self.dl_pool_combo)
 
         self.dl_group_combo = QComboBox()
         self.dl_group_combo.setEditable(True)
-        self.dl_group_combo.lineEdit().textChanged.connect(self._on_changed)
+        if (_gle := self.dl_group_combo.lineEdit()) is not None:
+            _gle.textChanged.connect(self._on_changed)
         pools_layout.addRow("Group:", self.dl_group_combo)
 
         container_layout.addLayout(pools_layout)
@@ -1683,10 +1708,21 @@ class DeadlinePanel(QWidget):
         self.dl_prio_spin.valueChanged.connect(self._on_changed)
         ctrl_layout.addRow("Priority (0-100):", self.dl_prio_spin)
 
+        self.dl_chunk_strategy = QComboBox()
+        self.dl_chunk_strategy.addItems(
+            ["Manual", "Auto · ~5 min/task", "Auto · ~10 min/task", "Auto · ~20 min/task"])
+        self.dl_chunk_strategy.setToolTip(
+            "Auto sizes Frames Per Task from your render history so each task runs "
+            "about the chosen time. Falls back to the manual value when there's no "
+            "timing history for the scene yet.")
+        self.dl_chunk_strategy.currentIndexChanged.connect(self._on_changed)
+        ctrl_layout.addRow("Chunking:", self.dl_chunk_strategy)
+
         self.dl_chunk_spin = QSpinBox()
         self.dl_chunk_spin.setRange(1, 10000)
         self.dl_chunk_spin.setValue(1)
-        self.dl_chunk_spin.setToolTip("How many frames rendered by one machine per task")
+        self.dl_chunk_spin.setToolTip("How many frames rendered by one machine per task "
+                                      "(used directly when Chunking = Manual)")
         self.dl_chunk_spin.valueChanged.connect(self._on_changed)
         ctrl_layout.addRow("Frames Per Task:", self.dl_chunk_spin)
 
@@ -1732,22 +1768,26 @@ class DeadlinePanel(QWidget):
     def _select_all_machines(self) -> None:
         self.dl_machines_list.blockSignals(True)
         for i in range(self.dl_machines_list.count()):
-            self.dl_machines_list.item(i).setCheckState(Qt.Checked)
+            self.dl_machines_list.item(i).setCheckState(Qt.CheckState.Checked)
         self.dl_machines_list.blockSignals(False)
         self._on_changed()
 
     def _clear_all_machines(self) -> None:
         self.dl_machines_list.blockSignals(True)
         for i in range(self.dl_machines_list.count()):
-            self.dl_machines_list.item(i).setCheckState(Qt.Unchecked)
+            self.dl_machines_list.item(i).setCheckState(Qt.CheckState.Unchecked)
         self.dl_machines_list.blockSignals(False)
         self._on_changed()
+
+    def chunk_target_minutes(self) -> float:
+        """Target minutes-per-task for Auto chunking; 0.0 means Manual."""
+        return {1: 5.0, 2: 10.0, 3: 20.0}.get(self.dl_chunk_strategy.currentIndex(), 0.0)
 
     def get_selected_machines(self) -> str:
         selected = []
         for i in range(self.dl_machines_list.count()):
             item = self.dl_machines_list.item(i)
-            if item.checkState() == Qt.Checked:
+            if item.checkState() == Qt.CheckState.Checked:
                 selected.append(item.text().strip())
         return ",".join(selected)
 
@@ -1765,16 +1805,16 @@ class DeadlinePanel(QWidget):
         for name in allowed:
             if name not in existing:
                 item = QListWidgetItem(name)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 self.dl_machines_list.addItem(item)
                 existing[name] = item
 
         # Set check states
         for name, item in existing.items():
             if name in allowed:
-                item.setCheckState(Qt.Checked)
+                item.setCheckState(Qt.CheckState.Checked)
             else:
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(Qt.CheckState.Unchecked)
 
         self.dl_machines_list.blockSignals(False)
 
@@ -1796,6 +1836,8 @@ class QueuePanel(QWidget):
     show_error_requested = Signal(int)
     open_output_requested = Signal(int)
     move_job_requested = Signal(int, int)  # job_id, delta (-1 up / +1 down)
+    set_priority_requested = Signal(object)   # job_ids → window prompts for value
+    requeue_requested = Signal(object)        # job_ids → reset to idle + selected
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1837,14 +1879,16 @@ class QueuePanel(QWidget):
         self.remove_btn.clicked.connect(self.remove_selected_requested.emit)
         self.remove_btn.hide()
         self.table = HintTableWidget(
-            0, 6, "Queue is empty.\nMap a clip to a material — a job appears here automatically.")
+            0, 6, "Queue is empty.\n\n1. Choose a scene and click Scan\n"
+            "2. Add video clips\n3. Map a clip to a material\n\n"
+            "A render job then appears here automatically.")
         self.table.setHorizontalHeaderLabels(["Run", "Job", "Preset", "Status", "Progress", "Output"])
         run_header = self.table.horizontalHeaderItem(0)
         if run_header is not None:
             run_header.setToolTip("Checked jobs are included when you press Start.")
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setColumnWidth(0, 38)
         self.table.setColumnWidth(2, 112)
         self.table.setColumnWidth(3, 62)
@@ -1855,20 +1899,20 @@ class QueuePanel(QWidget):
         self.table.itemChanged.connect(self._on_item_changed)
         # Double-click the Job name to rename it inline.
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.setAlternatingRowColors(True)
         lay.addWidget(self.table)
 
         # Delete selected rows with Delete/Backspace; duplicate with Cmd/Ctrl+D.
         del_act = QAction("Delete Selected", self.table)
-        del_act.setShortcuts([QKeySequence(Qt.Key_Delete), QKeySequence(Qt.Key_Backspace)])
-        del_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        del_act.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
+        del_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         del_act.triggered.connect(self.remove_selected_requested.emit)
         self.table.addAction(del_act)
         dup_act = QAction("Duplicate Selected", self.table)
         dup_act.setShortcut(QKeySequence("Ctrl+D"))
-        dup_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        dup_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         dup_act.triggered.connect(lambda: self.duplicate_jobs_requested.emit(self._selected_row_job_ids()))
         self.table.addAction(dup_act)
 
@@ -1899,6 +1943,7 @@ class QueuePanel(QWidget):
 
     def set_jobs(self, jobs: list[RenderJob]) -> None:
         self._failed_ids = {j.id for j in jobs if j.status == "failed"}
+        self._finished_ids = {j.id for j in jobs if j.status in ("failed", "cancelled", "success")}
         pal = active_palette()
         faint = QColor(pal.text_faint)
         self.table.blockSignals(True)
@@ -1908,21 +1953,21 @@ class QueuePanel(QWidget):
             self.table.insertRow(r)
             done = j.status == "success"
             run_item = QTableWidgetItem()
-            run_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            run_item.setCheckState(Qt.Checked if j.selected else Qt.Unchecked)
-            run_item.setData(Qt.UserRole, j.id)
+            run_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            run_item.setCheckState(Qt.CheckState.Checked if j.selected else Qt.CheckState.Unchecked)
+            run_item.setData(Qt.ItemDataRole.UserRole, j.id)
             if done:
                 run_item.setToolTip("Completed — re-check to render again")
             self.table.setItem(r, 0, run_item)
             job_item = QTableWidgetItem(j.label or Path(j.video_path).name or f"Job {j.id}")
             # Only the Job-name cell is editable (double-click to rename); it
             # carries the job id so the rename can be routed back.
-            job_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
-            job_item.setData(Qt.UserRole, j.id)
+            job_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
+            job_item.setData(Qt.ItemDataRole.UserRole, j.id)
             job_item.setToolTip("Double-click to rename")
             self.table.setItem(r, 1, job_item)
             prof_item = QTableWidgetItem(j.output_profile or "H264 MP4")
-            prof_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            prof_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
             self.table.setItem(r, 2, prof_item)
             status_text = {
                 "idle": "idle",
@@ -1968,7 +2013,7 @@ class QueuePanel(QWidget):
         bar.setValue(val if job.status != "idle" else 0)
         bar.setTextVisible(True)
         bar.setFormat(label)
-        bar.setAlignment(Qt.AlignCenter)
+        bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bar.setFixedHeight(16)
         bar.setStyleSheet(
             f"QProgressBar{{background:{pal.surface_alt};border:1px solid {pal.border};"
@@ -1985,8 +2030,8 @@ class QueuePanel(QWidget):
         ids: list[int] = []
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 0)
-            if item and item.checkState() == Qt.Checked:
-                jid = item.data(Qt.UserRole)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                jid = item.data(Qt.ItemDataRole.UserRole)
                 if isinstance(jid, int):
                     ids.append(jid)
         return ids
@@ -1998,14 +2043,14 @@ class QueuePanel(QWidget):
         item = self.table.item(r, 0)
         if not item:
             return
-        jid = item.data(Qt.UserRole)
+        jid = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(jid, int):
             self.job_selected.emit(jid)
 
     def select_job(self, job_id: int) -> None:
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 0)
-            if item and item.data(Qt.UserRole) == job_id:
+            if item and item.data(Qt.ItemDataRole.UserRole) == job_id:
                 self.table.setCurrentCell(r, 1)
                 break
 
@@ -2017,11 +2062,11 @@ class QueuePanel(QWidget):
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == 0:
-            jid = item.data(Qt.UserRole)
+            jid = item.data(Qt.ItemDataRole.UserRole)
             if isinstance(jid, int):
-                self.job_run_toggled.emit(jid, item.checkState() == Qt.Checked)
+                self.job_run_toggled.emit(jid, item.checkState() == Qt.CheckState.Checked)
         elif item.column() == 1:
-            jid = item.data(Qt.UserRole)
+            jid = item.data(Qt.ItemDataRole.UserRole)
             name = item.text().strip()
             if isinstance(jid, int) and name:
                 self.job_renamed.emit(jid, name)
@@ -2032,7 +2077,7 @@ class QueuePanel(QWidget):
             item = self.table.item(idx.row(), 0)
             if not item:
                 continue
-            jid = item.data(Qt.UserRole)
+            jid = item.data(Qt.ItemDataRole.UserRole)
             if isinstance(jid, int) and jid not in ids:
                 ids.append(jid)
         return ids
@@ -2048,11 +2093,15 @@ class QueuePanel(QWidget):
         selected_ids = self._selected_row_job_ids()
         menu = QMenu(self)
         dup_action = reveal_action = open_action = up_action = down_action = delete_action = error_action = None
+        prio_action = requeue_action = None
         if selected_ids:
             first = selected_ids[0]
             dup_action = menu.addAction(f"Duplicate  ({MOD_LABEL}D)")
             if first in getattr(self, "_failed_ids", set()):
                 error_action = menu.addAction("Show Error…")
+            prio_action = menu.addAction("Set Priority…")
+            if any(i in getattr(self, "_finished_ids", set()) for i in selected_ids):
+                requeue_action = menu.addAction("Requeue (run again)")
             menu.addSeparator()
             reveal_action = menu.addAction(f"Reveal Output in {file_manager_name()}")
             open_action = menu.addAction("Open Output")
@@ -2073,6 +2122,10 @@ class QueuePanel(QWidget):
             self.duplicate_jobs_requested.emit(selected_ids)
         elif error_action is not None and action == error_action:
             self.show_error_requested.emit(first)
+        elif prio_action is not None and action == prio_action:
+            self.set_priority_requested.emit(selected_ids)
+        elif requeue_action is not None and action == requeue_action:
+            self.requeue_requested.emit(selected_ids)
         elif action == delete_action:
             self.remove_jobs_requested.emit(selected_ids)
         elif action == reveal_action:
@@ -2105,7 +2158,7 @@ class PresetBrowserPanel(QWidget):
         self.list = HintListWidget(
             "No presets yet.\nDial in render settings, then click Save to keep them as a reusable preset.")
         self.list.itemDoubleClicked.connect(self._load_current)
-        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._show_context_menu)
         lay.addWidget(self.list)
 
@@ -2139,7 +2192,7 @@ class PresetBrowserPanel(QWidget):
         self.list.clear()
         for p in preset_paths:
             item = QListWidgetItem(p.stem)
-            item.setData(Qt.UserRole, {"path": str(p), "name": p.stem})
+            item.setData(Qt.ItemDataRole.UserRole, {"path": str(p), "name": p.stem})
             self.list.addItem(item)
 
     def _load_current(self, _item: QListWidgetItem | None = None) -> None:
@@ -2199,7 +2252,7 @@ class PresetBrowserPanel(QWidget):
         item = self.list.currentItem()
         if not item:
             return None
-        return item.data(Qt.UserRole)
+        return item.data(Qt.ItemDataRole.UserRole)
 
 
 class LogsPanel(QWidget):
@@ -2224,7 +2277,7 @@ class LogsPanel(QWidget):
         self.filter_edit.setPlaceholderText("Filter logs…")
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.textChanged.connect(self._on_filter_text)
-        self._filter_icon = self.filter_edit.addAction(QIcon(), QLineEdit.LeadingPosition)
+        self._filter_icon = self.filter_edit.addAction(QIcon(), QLineEdit.ActionPosition.LeadingPosition)
         self.level_combo = QComboBox()
         self.level_combo.addItems(["All", "Warnings & errors", "Errors only"])
         self.level_combo.setToolTip("Show only lines at this level")
@@ -2249,7 +2302,7 @@ class LogsPanel(QWidget):
         self.text.setReadOnly(True)
         _mono = QFont()
         _mono.setFamilies(["Menlo", "Consolas", "DejaVu Sans Mono", "Courier New"])
-        _mono.setStyleHint(QFont.Monospace)   # guaranteed monospace fallback on any OS
+        _mono.setStyleHint(QFont.StyleHint.Monospace)   # guaranteed monospace fallback on any OS
         _mono.setPointSize(10)
         self.text.setFont(_mono)
         lay.addWidget(self.text)
@@ -2339,13 +2392,13 @@ class _PreviewImage(QLabel):
         super().__init__(text, parent)
         self._src: QPixmap | None = None
         self._scroll: QScrollArea | None = None   # set by the panel
-        self._on_toggle = None                       # callback(QPointF) on dbl-click
+        self._on_toggle: Callable | None = None      # callback(QPointF) on dbl-click
         self._pannable = False
         self._panning = False
         self._pan_anchor = None
-        self.setAlignment(Qt.AlignCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumHeight(120)
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
 
     def set_source(self, pm: QPixmap) -> None:
         self._src = pm
@@ -2370,19 +2423,19 @@ class _PreviewImage(QLabel):
     def set_pannable(self, on: bool) -> None:
         self._pannable = on
         if not self._panning:
-            self.setCursor(Qt.OpenHandCursor if on else Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.OpenHandCursor if on else Qt.CursorShape.ArrowCursor)
 
     def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
         if self._src is not None and not self._src.isNull() and self._on_toggle:
             self._on_toggle(event.position())
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        if self._pannable and event.button() == Qt.LeftButton and self._scroll is not None:
+        if self._pannable and event.button() == Qt.MouseButton.LeftButton and self._scroll is not None:
             self._panning = True
             self._pan_anchor = event.globalPosition().toPoint()
             self._h0 = self._scroll.horizontalScrollBar().value()
             self._v0 = self._scroll.verticalScrollBar().value()
-            self.setCursor(Qt.ClosedHandCursor)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
         else:
             super().mousePressEvent(event)
 
@@ -2397,7 +2450,7 @@ class _PreviewImage(QLabel):
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if self._panning:
             self._panning = False
-            self.setCursor(Qt.OpenHandCursor if self._pannable else Qt.ArrowCursor)
+            self.setCursor(Qt.CursorShape.OpenHandCursor if self._pannable else Qt.CursorShape.ArrowCursor)
         else:
             super().mouseReleaseEvent(event)
 
@@ -2405,11 +2458,11 @@ class _PreviewImage(QLabel):
         if self._src is None or self._src.isNull():
             super().paintEvent(event)   # placeholder text
             return
-        scaled = self._src.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = self._src.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         x = (self.width() - scaled.width()) // 2
         y = (self.height() - scaled.height()) // 2
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawPixmap(x, y, scaled)
         painter.end()
 
@@ -2439,20 +2492,20 @@ class PreviewPanel(QWidget):
         self.scale_combo.addItems(["Full", "1/2", "1/4", "1/8"])
         self.scale_combo.setToolTip("Preview render resolution (fraction of the output resolution)")
         self.scale_combo.setMinimumWidth(78)
-        self.scale_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.scale_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         head.addWidget(self.scale_combo)
         self.auto_btn = QPushButton()
         self.auto_btn.setObjectName("IconButton")
         self.auto_btn.setFixedSize(34, 28)
         self.auto_btn.setCheckable(True)
-        self.auto_btn.setCursor(Qt.PointingHandCursor)
+        self.auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.auto_btn.setToolTip("Auto-render: re-render the preview whenever you change a setting or scrub")
         self.auto_btn.toggled.connect(self._on_auto_toggled)
         head.addWidget(self.auto_btn)
         self.preview_frame_btn = QPushButton()
         self.preview_frame_btn.setObjectName("IconButton")
         self.preview_frame_btn.setFixedSize(34, 28)
-        self.preview_frame_btn.setCursor(Qt.PointingHandCursor)
+        self.preview_frame_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.preview_frame_btn.setToolTip("Render the selected frame with the current mappings")
         self.preview_frame_btn.clicked.connect(self.preview_frame_requested.emit)
         head.addWidget(self.preview_frame_btn)
@@ -2465,7 +2518,7 @@ class PreviewPanel(QWidget):
             b = QPushButton()
             b.setObjectName("SmallButton")
             b.setFixedSize(28, 26)
-            b.setCursor(Qt.PointingHandCursor)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setToolTip(tip)
             b.setAutoRepeat(True)
             b.clicked.connect(lambda: self._nudge_frame(delta))
@@ -2478,7 +2531,7 @@ class PreviewPanel(QWidget):
         self.frame_icon.setFixedSize(16, 16)
         self.prev_btn = _step_btn("Previous frame", -1)
         self.next_btn = _step_btn("Next frame", +1)
-        self.frame_slider = QSlider(Qt.Horizontal)
+        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(1)
         self.frame_slider.setMaximum(1)
         self.frame_slider.setToolTip("Drag to pick the frame to preview")
@@ -2487,8 +2540,8 @@ class PreviewPanel(QWidget):
         self.frame_spin.setMinimum(1)
         self.frame_spin.setMaximum(1)
         self.frame_spin.setFixedWidth(66)
-        self.frame_spin.setAlignment(Qt.AlignCenter)
-        self.frame_spin.setButtonSymbols(QSpinBox.NoButtons)
+        self.frame_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.frame_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.total_lbl = QLabel("/ 1")
         self.total_lbl.setObjectName("HintLabel")
 
@@ -2517,12 +2570,12 @@ class PreviewPanel(QWidget):
         self.image_label.setToolTip("Double-click to toggle Fit ⇄ 100% · drag to pan at 100%")
         # Scroll area lets fixed-zoom previews (100%, 200%…) pan; in Fit mode the
         # label is resized to the viewport and scaled to fit.
-        self.scroll = QScrollArea()
-        self.scroll.setWidget(self.image_label)
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setAlignment(Qt.AlignCenter)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.image_label._scroll = self.scroll
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.image_label._scroll = self.scroll_area
         self.image_label._on_toggle = self._toggle_zoom
         self._zoom_100 = False
 
@@ -2532,7 +2585,7 @@ class PreviewPanel(QWidget):
             frame_wrap = QWidget()
             fl = QVBoxLayout(frame_wrap)
             fl.setContentsMargins(0, 0, 0, 0)
-            fl.addWidget(self.scroll)
+            fl.addWidget(self.scroll_area)
             self.stack.addWidget(frame_wrap)            # index 0 — live frames
             self.video_widget = QVideoWidget()
             self.stack.addWidget(self.video_widget)     # index 1 — finished video
@@ -2544,7 +2597,7 @@ class PreviewPanel(QWidget):
             self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(self.video_widget)
             try:
-                self.player.setLoops(QMediaPlayer.Infinite)
+                self.player.setLoops(QMediaPlayer.Loops.Infinite)
             except Exception:
                 self.player.mediaStatusChanged.connect(self._loop_if_ended)
 
@@ -2555,8 +2608,8 @@ class PreviewPanel(QWidget):
             self.play_btn.clicked.connect(self._toggle_play)
             self.play_btn.setToolTip("Play/pause the rendered movie (Space)")
             space_act = QAction("Play/Pause", self)
-            space_act.setShortcut(QKeySequence(Qt.Key_Space))
-            space_act.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            space_act.setShortcut(QKeySequence(Qt.Key.Key_Space))
+            space_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             space_act.triggered.connect(self._toggle_play)
             self.addAction(space_act)
             self.mute_btn = QPushButton("Unmute")
@@ -2570,7 +2623,7 @@ class PreviewPanel(QWidget):
             self.controls.setVisible(False)
             lay.addWidget(self.controls)
         else:
-            lay.addWidget(self.scroll, 1)
+            lay.addWidget(self.scroll_area, 1)
 
         self.auto_btn.setChecked(True)   # auto-render on by default
         self.restyle(active_palette())
@@ -2644,7 +2697,7 @@ class PreviewPanel(QWidget):
 
     def _goto_fit(self) -> None:
         self._zoom_100 = False
-        self.scroll.setWidgetResizable(True)
+        self.scroll_area.setWidgetResizable(True)
         self.image_label.set_pannable(False)
         self.image_label.set_fit()
 
@@ -2664,14 +2717,14 @@ class PreviewPanel(QWidget):
             off_x, off_y = (lw - iw * fit) / 2.0, (lh - ih * fit) / 2.0
             cx = min(max((focus.x() - off_x) / fit, 0.0), iw)
             cy = min(max((focus.y() - off_y) / fit, 0.0), ih)
-        self.scroll.setWidgetResizable(False)
+        self.scroll_area.setWidgetResizable(False)
         self.image_label.set_fixed(iw, ih)
         self.image_label.set_pannable(True)
 
         def _center():
-            vp = self.scroll.viewport()
-            self.scroll.horizontalScrollBar().setValue(int(cx - vp.width() / 2))
-            self.scroll.verticalScrollBar().setValue(int(cy - vp.height() / 2))
+            vp = self.scroll_area.viewport()
+            self.scroll_area.horizontalScrollBar().setValue(int(cx - vp.width() / 2))
+            self.scroll_area.verticalScrollBar().setValue(int(cy - vp.height() / 2))
         QTimer.singleShot(0, _center)   # after the resize/layout settles
 
     def _toggle_zoom(self, focus=None) -> None:
@@ -2728,14 +2781,14 @@ class PreviewPanel(QWidget):
 
     def _loop_if_ended(self, status) -> None:
         try:
-            if status == QMediaPlayer.EndOfMedia:
+            if status == QMediaPlayer.MediaStatus.EndOfMedia:
                 self.player.setPosition(0)
                 self.player.play()
         except Exception:
             pass
 
     def _toggle_play(self) -> None:
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
             self.play_btn.setText("Play")
         else:

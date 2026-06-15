@@ -6,12 +6,33 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import bpy
 
 VIDEO_MAPPING_MODE_EMISSION = "EMISSION_FULL_BRIGHT"
 VIDEO_MAPPING_MODE_BASE_COLOR = "BASE_COLOR_ALPHA"
+
+_RENDER_TEMP_DIR: Path | None = None
+
+
+def _render_temp_dir() -> Path:
+    """Per-process local temp dir for Deadline renders. The uuid suffix avoids
+    PID-recycling collisions with a stale dir a crashed earlier task left behind."""
+    global _RENDER_TEMP_DIR
+    if _RENDER_TEMP_DIR is None:
+        _RENDER_TEMP_DIR = (
+            Path(tempfile.gettempdir()) / f"blender_render_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        )
+    return _RENDER_TEMP_DIR
+
+
+def _cleanup_render_temp() -> None:
+    """Remove the local temp dir if one was created — guaranteed cleanup, even
+    when a render fails before the copy-out step."""
+    if _RENDER_TEMP_DIR is not None:
+        shutil.rmtree(_RENDER_TEMP_DIR, ignore_errors=True)
 
 
 def _resolve_path(path_str: str) -> str:
@@ -422,15 +443,27 @@ def configure_render(config: dict) -> None:
         except (TypeError, AttributeError):
             # Blender 5.x bug: the Python property setter for file_format rejects
             # 'FFMPEG' even when the binary supports it and enum_items lists it.
-            # Only apply the ctypes workaround on affected builds.
+            # Work around it by writing the enum's integer value straight to the
+            # C-level imtype byte. The value is read dynamically from the RNA enum
+            # (never hardcoded) so it survives Blender enum/layout changes.
             blender_version = tuple(bpy.app.version[:2])
             if blender_version >= (4, 0):
+                _fmt = scene.render.image_settings
                 try:
-                    _fmt = scene.render.image_settings
-                    ctypes.c_int8.from_address(_fmt.as_pointer()).value = 24
-                    scene.render.image_settings.file_format = "FFMPEG"
-                except Exception:
-                    pass  # Fall through to the outer error handler
+                    ffmpeg_val = _fmt.bl_rna.properties["file_format"].enum_items["FFMPEG"].value
+                    ctypes.c_int8.from_address(_fmt.as_pointer()).value = ffmpeg_val
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Could not enable FFMPEG movie output on Blender "
+                        f"{'.'.join(map(str, bpy.app.version))}: {exc}") from exc
+                # Read back: the C struct must now report FFMPEG, confirming the
+                # poke took. A mismatch means the enum layout changed — fail loud
+                # instead of silently rendering to the wrong format.
+                if _fmt.file_format != "FFMPEG":
+                    raise RuntimeError(
+                        "FFMPEG movie output could not be enabled on Blender "
+                        f"{'.'.join(map(str, bpy.app.version))} (imtype byte-poke did "
+                        f"not take; file_format is {_fmt.file_format!r}).") from None
         except Exception as exc:
             current_supported_formats = {
                 item.identifier
@@ -527,7 +560,7 @@ def configure_render(config: dict) -> None:
     is_video = output_format in {"MPEG4", "QUICKTIME"}
 
     if config.get("use_deadline", False):
-        temp_dir = Path(tempfile.gettempdir()) / f"blender_render_{os.getpid()}"
+        temp_dir = _render_temp_dir()
         if is_video:
             actual_output_path = temp_dir / original_output_path.name
         else:
@@ -614,6 +647,11 @@ def main() -> None:
     config = json.loads(config_path.read_text())
     assignments = material_assignments_from_config(config)
 
+    _bv = tuple(bpy.app.version[:2])
+    if _bv < (4, 0) or _bv >= (6, 0):
+        log(f"[warn] Blender {'.'.join(map(str, bpy.app.version))} is outside the "
+            "tested range (4.0–5.x); movie output / live preview may misbehave.")
+
     if bool(config.get("safe_mode", True)) and not config.get("use_deadline", False):
         scene_path = Path(_resolve_path(config["scene_path"]))
         if not scene_path.exists():
@@ -697,7 +735,7 @@ def main() -> None:
     is_video = output_format in {"MPEG4", "QUICKTIME"}
 
     if config.get("use_deadline", False):
-        temp_dir = Path(tempfile.gettempdir()) / f"blender_render_{os.getpid()}"
+        temp_dir = _render_temp_dir()
         if is_video:
             actual_output_path = temp_dir / original_output_path.name
         else:
@@ -749,7 +787,7 @@ def main() -> None:
             log(f"ERROR: Failed to copy final render to destination '{original_output_path}': {e}")
             raise e
         finally:
-            temp_dir = Path(tempfile.gettempdir()) / f"blender_render_{os.getpid()}"
+            temp_dir = _render_temp_dir()
             try:
                 log(f"Cleaning up local temp directory: {temp_dir}")
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -763,3 +801,7 @@ if __name__ == "__main__":
     except Exception as exc:
         log(f"ERROR: {exc}")
         sys.exit(1)
+    finally:
+        # Guarantee the local temp dir is removed even if a render fails before
+        # reaching the copy-out step (which has its own cleanup on the happy path).
+        _cleanup_render_temp()

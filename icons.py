@@ -85,9 +85,9 @@ def _svg_pixmap(name: str, color: str, px: int) -> QPixmap:
     # Render at 2x for crisp HiDPI, then mark device pixel ratio.
     scale = 2
     pm = QPixmap(px * scale, px * scale)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     renderer.render(painter, QRectF(0, 0, px * scale, px * scale))
     painter.end()
     pm.setDevicePixelRatio(scale)
@@ -115,11 +115,11 @@ def app_icon() -> QIcon:
     matches the in-app icons."""
     px = 256
     pm = QPixmap(px, px)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     # rounded badge background
-    painter.setPen(Qt.NoPen)
+    painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor("#1d2027"))
     painter.drawRoundedRect(14, 14, px - 28, px - 28, 46, 46)
     painter.end()
@@ -127,7 +127,7 @@ def app_icon() -> QIcon:
     # overlay a tinted clapperboard glyph centered on the badge (brand orange)
     glyph = _svg_pixmap("clapper", "#ff6f3c", 150)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     gx = (px - glyph.width() / glyph.devicePixelRatio()) / 2
     gy = (px - glyph.height() / glyph.devicePixelRatio()) / 2
     painter.drawPixmap(int(gx), int(gy), glyph)

@@ -48,11 +48,17 @@ def reveal_in_file_manager(path) -> None:
     """Open the OS file manager with ``path`` selected (cross-platform)."""
     p = Path(path)
     if sys.platform == "darwin":
-        subprocess.Popen(["open", "-R", str(p)])
+        cmd = ["open", "-R", str(p)]
     elif os.name == "nt":
-        subprocess.Popen(["explorer", "/select,", str(p)])
+        cmd = ["explorer", "/select,", str(p)]
     else:
-        subprocess.Popen(["xdg-open", str(p.parent)])
+        cmd = ["xdg-open", str(p.parent)]
+    # These launchers hand off to the file manager and exit immediately; run()
+    # reaps them cleanly (no ResourceWarning) while the timeout guards a hang.
+    try:
+        subprocess.run(cmd, check=False, timeout=10)
+    except Exception:
+        pass
 
 
 # Common system install locations to check after PATH (GUI apps launched from
@@ -116,6 +122,87 @@ def find_ffmpeg_tool(name: str) -> str | None:
 
 def _find_ffprobe() -> str | None:
     return find_ffmpeg_tool("ffprobe")
+
+
+def evenly_spaced(items: list, n: int) -> list:
+    """Pick up to ``n`` items spread evenly across ``items`` (always the first)."""
+    if n <= 0 or not items:
+        return []
+    if len(items) <= n:
+        return list(items)
+    step = len(items) / n
+    return [items[min(int(i * step), len(items) - 1)] for i in range(n)]
+
+
+def _probe_frame_count(src: str) -> int:
+    """Best-effort frame count of a video via ffprobe (container metadata first,
+    then a full count). 0 if unavailable."""
+    ffprobe = find_ffmpeg_tool("ffprobe")
+    if not ffprobe:
+        return 0
+    from core.utils import subprocess_creation_flags
+    for args in (
+        ["-show_entries", "stream=nb_frames"],
+        ["-count_frames", "-show_entries", "stream=nb_read_frames"],
+    ):
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "v:0", *args,
+                 "-of", "default=nokey=1:noprint_wrappers=1", src],
+                capture_output=True, text=True, timeout=120,
+                creationflags=subprocess_creation_flags())
+            val = (r.stdout or "").strip().splitlines()
+            if val and val[0].isdigit() and int(val[0]) > 0:
+                return int(val[0])
+        except Exception:
+            continue
+    return 0
+
+
+def build_contact_sheet(src: str, dest: str, cols: int = 4, rows: int = 3) -> bool:
+    """Render a tiled contact-sheet PNG (``cols``×``rows``) sampling frames evenly
+    across a movie file or an image-sequence folder. Returns True on success."""
+    ffmpeg = find_ffmpeg_tool("ffmpeg")
+    if not ffmpeg:
+        return False
+    from core.utils import subprocess_creation_flags
+    cells = max(1, cols * rows)
+    p = Path(src)
+    try:
+        if p.is_dir():
+            frames = sorted(p.glob("*.png")) or sorted(p.glob("*.jpg")) \
+                or sorted(p.glob("*.jpeg"))
+            picks = evenly_spaced(frames, cells)
+            if not picks:
+                return False
+            import tempfile
+            listing = "\n".join(f"file '{f.as_posix()}'" for f in picks)
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
+                tf.write(listing)
+                list_path = tf.name
+            try:
+                r = subprocess.run(
+                    [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+                     "-vf", f"scale=320:-1,tile={cols}x{rows}", "-frames:v", "1", dest],
+                    capture_output=True, text=True, timeout=180,
+                    creationflags=subprocess_creation_flags())
+            finally:
+                Path(list_path).unlink(missing_ok=True)
+            return r.returncode == 0 and Path(dest).exists()
+        if not p.is_file():
+            return False
+        total = _probe_frame_count(src)
+        step = max(1, total // cells) if total else 24
+        r = subprocess.run(
+            [ffmpeg, "-y", "-i", src,
+             "-frames:v", "1", "-fps_mode", "vfr",
+             "-vf", f"select=not(mod(n\\,{step})),scale=320:-1,tile={cols}x{rows}",
+             dest],
+            capture_output=True, text=True, timeout=240,
+            creationflags=subprocess_creation_flags())
+        return r.returncode == 0 and Path(dest).exists()
+    except Exception:
+        return False
 
 
 def _mp4_has_audio(path: str) -> bool:
