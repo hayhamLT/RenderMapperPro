@@ -12,6 +12,8 @@ runs without it; a missing install yields a clear, actionable error.
 from __future__ import annotations
 
 import base64
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,17 +29,85 @@ CancelCheck = Callable[[], bool]
 
 WEB_SCENE_EXTS = (".glb", ".gltf")
 
+# The headless Chromium lives in a writable per-user dir, shared by the on-demand
+# install and the runtime launch. HARD-SET (not setdefault) before any Playwright
+# import: in a frozen app Playwright's _transport does
+# env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0"), which would point browsers at
+# the read-only bundle. This module is imported before any playwright import.
+WEB_RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "browsers"
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(WEB_RUNTIME_ROOT)
+
 # --enable-unsafe-swiftshader: allow Chrome's software WebGL fallback so the
-#   backend renders on GPU-less/headless machines (a real GPU is used when present).
-# --allow-file-access-from-files: let the file:// scene page fetch the local
-#   .glb/.gltf and its external textures/buffers (blocked by default).
-_CHROME_ARGS = ["--enable-unsafe-swiftshader", "--allow-file-access-from-files"]
+# backend renders on GPU-less/headless machines (a real GPU is used when present).
+_CHROME_ARGS = ["--enable-unsafe-swiftshader"]
 
 _PLAYWRIGHT_HINT = (
     "The web (three.js) backend needs Playwright. Install it with:\n"
-    "    pip install playwright\n"
-    "    python -m playwright install chromium"
+    "    pip install playwright"
 )
+
+
+def web_chromium_installed() -> bool:
+    """True if the headless Chromium shell is present in the managed dir.
+
+    Globs the shell dir rather than using ``executable_path`` — the latter
+    returns a path even when nothing is installed, and a default headless launch
+    resolves to the *headless shell*, not full Chromium."""
+    return any(WEB_RUNTIME_ROOT.glob("chromium_headless_shell-*"))
+
+
+def ensure_web_chromium(on_log: LogCallback | None = None,
+                        should_cancel: CancelCheck | None = None) -> None:
+    """Download the headless Chromium shell into ``WEB_RUNTIME_ROOT`` if missing.
+
+    Frozen-safe: shells out to Playwright's bundled node + cli.js (resolved via
+    ``compute_driver_executable``), NOT ``python -m playwright`` (there is no
+    python in a frozen .app). ``--only-shell`` fetches just the ~190 MB headless
+    shell. Progress (a ``\\r``-delimited percent bar) streams to ``on_log``."""
+    if web_chromium_installed():
+        return
+    log = on_log or (lambda *_: None)
+    try:
+        from playwright._impl._driver import compute_driver_executable, get_driver_env
+    except Exception as exc:
+        raise RuntimeError(_PLAYWRIGHT_HINT) from exc
+    WEB_RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    node, cli = compute_driver_executable()
+    env = dict(get_driver_env())
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(WEB_RUNTIME_ROOT)
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "PLAYWRIGHT_DOWNLOAD_HOST"):
+        if os.environ.get(k):
+            env[k] = os.environ[k]
+    log("[web] Downloading the web render runtime (headless Chromium, ~190 MB, one time)…")
+    proc = subprocess.Popen(
+        [str(node), str(cli), "install", "--only-shell", "chromium"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+        creationflags=subprocess_creation_flags())
+    pat = re.compile(rb"(\d{1,3})%")
+    buf, last = b"", -1
+    assert proc.stdout is not None
+    while True:
+        if should_cancel and should_cancel():
+            proc.terminate()
+            raise RuntimeError("cancelled")
+        chunk = proc.stdout.read(256)
+        if not chunk:
+            break
+        buf += chunk
+        while True:   # the progress bar uses \r, so split on \r and \n
+            i = min((j for j in (buf.find(b"\r"), buf.find(b"\n")) if j != -1), default=-1)
+            if i == -1:
+                break
+            line, buf = buf[:i], buf[i + 1:]
+            m = pat.search(line)
+            if m and int(m.group(1)) != last:
+                last = int(m.group(1))
+                log(f"[web] Chromium download {last}%")
+    if proc.wait() != 0:
+        raise RuntimeError("Chromium download failed — check your network and try again.")
+    if not web_chromium_installed():
+        raise RuntimeError("Chromium download finished but the runtime wasn't found.")
+    log("[web] Web render runtime ready.")
 
 
 def is_web_scene(scene_path: str) -> bool:
@@ -96,6 +166,7 @@ def discover_web_scene(scene_path, on_log: LogCallback | None = None):
         raise FileNotFoundError(f"Scene file not found: {glb}")
     if on_log:
         on_log(f"[web] Scanning {glb.name} via headless three.js…")
+    ensure_web_chromium(on_log)
     with sync_playwright() as pw:
         browser, page = _launch(pw, 96, 96)
         try:
@@ -130,6 +201,7 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     glb = Path(job.scene_path).expanduser().resolve()
     if not glb.exists():
         raise FileNotFoundError(f"Scene file not found: {glb}")
+    ensure_web_chromium(log, should_cancel)
 
     ff = _find_ffmpeg()
     r = job.render

@@ -5713,5 +5713,24 @@ def run_qt_app() -> None:
     sys.exit(app.exec())
 
 
+def _web_selftest(argv: list[str]) -> int:
+    """Headless self-test of the web render backend (used to validate the frozen
+    bundle): --web-selftest <scene.glb> <clip> <out.mp4>. No GUI."""
+    from core.models import JobConfig, MaterialVideoAssignment, RenderOptions
+    from core.web_render import run_web_job
+    scene, clip, out = argv[0], argv[1], argv[2]
+    job = JobConfig(
+        scene_path=scene, video_path=clip, target_material="Screen", target_camera="",
+        output_path=out,
+        render=RenderOptions(width=480, height=270, fps=24, frame_start=1, frame_end=12),
+        material_assignments=[MaterialVideoAssignment("Screen", clip)])
+    rc = run_web_job(job, on_log=print)
+    print(f"[selftest] rc={rc} out_exists={Path(out).exists()}")
+    return rc
+
+
 if __name__ == "__main__":
+    if "--web-selftest" in sys.argv:
+        i = sys.argv.index("--web-selftest")
+        raise SystemExit(_web_selftest(sys.argv[i + 1:i + 4]))
     run_qt_app()
