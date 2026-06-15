@@ -53,6 +53,7 @@ except Exception:
 
 import icons
 import theme as T
+from core.logging_setup import get_logger
 from core.models import (
     VIDEO_MAPPING_MODE_EMISSION,
     MaterialVideoAssignment,
@@ -83,6 +84,8 @@ from ui_widgets import (
     TargetStripeDelegate,
     VideoListWidget,
 )
+
+_log = get_logger(__name__)
 
 
 class ScenePanel(QWidget):
@@ -753,7 +756,7 @@ class ScenePanel(QWidget):
                                 st = e.stat()
                                 listing.append((e.path, st.st_size, st.st_mtime))
                         except OSError:
-                            pass
+                            _log.debug("watch folder: failed to stat an entry", exc_info=True)
             except OSError:
                 listing = []
             self._watch_scanned.emit(listing)   # queued → delivered on the UI thread
@@ -1460,7 +1463,7 @@ class RenderPanel(QWidget):
             else:
                 subprocess.Popen(["xdg-open", str(target)])
         except Exception:
-            pass
+            _log.warning("could not open output folder in file manager", exc_info=True)
 
     def apply_scene_settings(self, s: dict) -> None:
         """Mirror render/timeline/colour settings read from the .blend into the
@@ -1609,7 +1612,7 @@ class RenderPanel(QWidget):
             try:
                 self.scale_combo.setCurrentText(f"{int(d['resolution_percentage'])}%")
             except Exception:
-                pass
+                _log.debug("could not apply resolution_percentage setting", exc_info=True)
         if "video_quality" in d:
             self.quality_combo.setCurrentText({"LOSSLESS": "Lossless", "HIGH": "High", "MEDIUM": "Medium", "LOW": "Low", "LOWEST": "Lowest"}.get(str(d["video_quality"]).upper(), "High"))
         if "video_codec" in d:
@@ -1628,7 +1631,7 @@ class RenderPanel(QWidget):
             try:
                 self.web_light_intensity_slider.setValue(round(float(d["web_lighting_intensity"]) * 100))
             except Exception:
-                pass
+                _log.debug("could not apply web_lighting_intensity setting", exc_info=True)
         if "web_respect_scene_lights" in d:
             self.web_respect_lights_cb.setChecked(bool(d["web_respect_scene_lights"]))
 
@@ -2829,7 +2832,7 @@ class PreviewPanel(QWidget):
         try:
             self.player.stop()
         except Exception:
-            pass
+            _log.debug("preview player: stop failed", exc_info=True)
 
     def _loop_if_ended(self, status) -> None:
         try:
@@ -2837,7 +2840,7 @@ class PreviewPanel(QWidget):
                 self.player.setPosition(0)
                 self.player.play()
         except Exception:
-            pass
+            _log.debug("preview player: loop-on-end failed", exc_info=True)
 
     def _toggle_play(self) -> None:
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:

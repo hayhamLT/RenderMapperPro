@@ -18,9 +18,12 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from core.discovery import discover_scene_elements
+from core.logging_setup import get_logger
 from core.metrics import FrameTimer, summarize
 from core.models import JobConfig
 from core.runner import run_blender_job, submit_deadline_job
+
+_log = get_logger(__name__)
 
 # Progress is parsed from the renderers' stdout.
 FRAME_RE = [re.compile(r"Fra:(\d+)"), re.compile(r"Frame\s+(\d+)", re.I)]
@@ -154,7 +157,7 @@ class RenderThread(CancellableWorker):
             try:
                 Path(tmp).unlink(missing_ok=True)
             except Exception:
-                pass
+                _log.debug("failed to clean up temp tagging file", exc_info=True)
 
     def _queue_retry(self, entry: dict) -> bool:
         """Re-queue a failed job once (GPU/license hiccups are the common farm

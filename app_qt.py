@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -62,7 +61,10 @@ from PySide6.QtWidgets import (
 import app_version
 import icons
 import theme as T
+from app_window.preset_mixin import PRESETS_DIR, PresetMixin
+from app_window.queue_mixin import QueueMixin
 from core.jobs import disk_space_warnings, migrate_profile
+from core.logging_setup import get_logger
 from core.metrics import (
     auto_chunk_size,
     estimate_energy_cost,
@@ -84,7 +86,6 @@ from core.utils import (
     ext_for_format,
     file_exists,
     find_deadlinecommand,
-    resolve_output_path,
 )
 from core.utils import update_platform_key as _update_platform_key
 from core.utils import version_tuple as _version_tuple
@@ -121,11 +122,9 @@ from workers import (
 )
 
 PROFILE_PATH = Path.home() / ".blender_video_mapper" / "profile.json"
-PRESETS_DIR = Path.home() / ".blender_video_mapper" / "presets"
 HISTORY_PATH = Path.home() / ".blender_video_mapper" / "history.json"
 # Branded file extensions (JSON underneath) for user-facing Save/Open.
 PROJECT_EXT = ".rmproj"      # full project: scene, clips, mappings, queue
-PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
@@ -134,6 +133,9 @@ RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
 LOG_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+
+_log = get_logger(__name__)
+
 
 def _make_app_icon() -> QIcon:
     return icons.app_icon()
@@ -450,7 +452,7 @@ class RuntimeInstallThread(QThread):
             self.finished_install.emit("", str(exc))
 
 
-class BlenderVideoMapperQt(QMainWindow):
+class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin):
     _update_checked = Signal(object, bool)   # (manifest dict | None, was-manual)
     _delivery_log = Signal(str, str)         # (message, kind) from the delivery-copy thread
     _sheets_built = Signal(int)              # count of contact sheets generated post-render
@@ -1423,7 +1425,7 @@ class BlenderVideoMapperQt(QMainWindow):
             with LOG_PATH.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
-            pass
+            _log.warning("failed to write to the on-disk log file", exc_info=True)
 
     def _init_blender(self) -> None:
         b = _find_blender(self._blender_path)
@@ -2005,24 +2007,6 @@ class BlenderVideoMapperQt(QMainWindow):
         self._schedule_save()
         self._request_auto_preview()
 
-    def _ensure_active_job(self) -> None:
-        """If there's a scene + a mapping but no active job, create one and make
-        it active. This removes the 'floating unsaved changes' state entirely —
-        from here on edits live-save into this job (auto-draft)."""
-        if self._active_job_id is not None or self._loading_job_into_ui:
-            return
-        if not self.scene_panel.scene_edit.text().strip():
-            return
-        assignments = self.scene_panel.get_assignments()
-        if not assignments:
-            return
-        job = RenderJob(id=self._next_job_id)
-        self._next_job_id += 1
-        job.video_path = assignments[0].video_path
-        self._make_job_snapshot(job, assignments)
-        job.label = self._derive_job_label(job, f"Mapped scene ({len(assignments)} materials)")
-        self._jobs.append(job)
-        self._active_job_id = job.id
 
     def _on_target_set_ready(self, assignments: list) -> None:
         """All target screens have clips (and the set changed) — queue one
@@ -2150,144 +2134,6 @@ class BlenderVideoMapperQt(QMainWindow):
             n += 1
         return str(d / f"{p.stem}_PREVIZ_v{n:03d}.mp4")
 
-    def _sync_active_job_from_scene(self) -> None:
-        """Keep the active queued job in lock-step with the current scene
-        mappings/videos so the queue auto-updates as the user edits (silent)."""
-        if self._active_job_id is None:
-            return
-        job = next((j for j in self._jobs if j.id == self._active_job_id), None)
-        if job is None:
-            return
-        assignments = self.scene_panel.get_assignments()
-        if assignments:
-            job.video_path = assignments[0].video_path
-        self._make_job_snapshot(job, assignments)
-        fallback = (
-            f"Mapped scene ({len(job.material_assignments)} materials)"
-            if job.material_assignments else (Path(job.video_path).name or f"Job {job.id}")
-        )
-        job.label = self._derive_job_label(job, fallback)
-
-    def _derive_job_label(self, job: RenderJob, fallback: str) -> str:
-        # A hand-typed name always wins and is never auto-overwritten.
-        if getattr(job, "custom_label", False) and (job.label or "").strip():
-            return job.label
-        for raw in ((job.output_input or "").strip(), (job.output_path or "").strip()):
-            if not raw:
-                continue
-            p = Path(raw).expanduser()
-            name = p.name.strip()
-            if name:
-                return name
-        # Auto label: tag with the camera so duplicated variations of the same
-        # scene are distinguishable at a glance.
-        cam = (getattr(job, "target_camera", "") or "").strip()
-        return f"{fallback} · {cam}" if cam else fallback
-
-    def _make_job_snapshot(self, job: RenderJob, assignments: list[MaterialVideoAssignment]) -> None:
-        job.material_assignments = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
-        job.scene_path = self.scene_panel.scene_edit.text().strip()
-        job.target_camera = self.scene_panel.camera_combo.currentText()
-        job.output_input = self.render_panel.output_edit.text().strip()
-        job.output_profile = self.render_panel.profile_combo.currentText()
-        job.render_options = self.render_panel.render_options()
-        job.safe_mode = self.render_panel.safe_mode_cb.isChecked()
-        job.use_deadline = self.deadline_panel.use_dl_cb.isChecked()
-        job.deadline_pool = self.deadline_panel.dl_pool_combo.currentText().strip()
-        job.deadline_secondary_pool = self.deadline_panel.dl_sec_pool_combo.currentText().strip()
-        job.deadline_group = self.deadline_panel.dl_group_combo.currentText().strip()
-        job.deadline_priority = self.deadline_panel.dl_prio_spin.value()
-        job.deadline_comment = self._deadline_comment
-        job.deadline_department = self.deadline_panel.dl_dept_edit.text().strip()
-        job.deadline_chunk_size = self._effective_chunk_size(job)
-        job.deadline_suspended = self.deadline_panel.dl_suspended_cb.isChecked()
-        job.deadline_submit_scene = self.deadline_panel.dl_submit_scene_cb.isChecked()
-        job.deadline_job_name_template = self._deadline_job_name_template
-        job.deadline_machine_limit = self.deadline_panel.dl_machine_limit_spin.value()
-        job.deadline_limits = self.deadline_panel.dl_limits_edit.text().strip()
-        job.deadline_command_path = self._deadline_command_path
-        job.deadline_repo_path = self._deadline_repo_path
-        job.deadline_whitelist = self.deadline_panel.get_selected_machines()
-
-
-    def _sync_jobs(self) -> None:
-        assignments = self.scene_panel.get_assignments()
-        videos = self.scene_panel.get_videos()
-
-        if assignments:
-            existing = next((j for j in self._jobs if j.material_assignments), None)
-            if existing is None:
-                existing = RenderJob(id=self._next_job_id)
-                self._next_job_id += 1
-            existing.video_path = assignments[0].video_path
-            default_label = f"Mapped scene ({len(assignments)} materials)"
-            existing.label = default_label
-            self._make_job_snapshot(existing, assignments)
-            self._jobs = [existing]
-        else:
-            existing_map = {j.video_path: j for j in self._jobs if not j.material_assignments}
-            synced: list[RenderJob] = []
-            for v in videos:
-                default_label = Path(v).name
-                job = existing_map.get(v)
-                if job is None:
-                    job = RenderJob(id=self._next_job_id, video_path=v, label=default_label)
-                    self._next_job_id += 1
-                self._make_job_snapshot(job, [])
-                synced.append(job)
-            self._jobs = synced
-
-        self._refresh_job_outputs()
-        for j in self._jobs:
-            fallback = f"Mapped scene ({len(j.material_assignments)} materials)" if j.material_assignments else (Path(j.video_path).name or f"Job {j.id}")
-            j.label = self._derive_job_label(j, fallback)
-        self._refresh_queue_view()
-        self._update_progress_caption()
-
-    def _queue_current_jobs(self) -> None:
-        assignments = self.scene_panel.get_assignments()
-        videos = self.scene_panel.get_videos()
-
-        to_add: list[RenderJob] = []
-        if assignments:
-            job = RenderJob(id=self._next_job_id)
-            self._next_job_id += 1
-            job.video_path = assignments[0].video_path
-            default_label = f"Mapped scene ({len(assignments)} materials)"
-            job.label = default_label
-            self._make_job_snapshot(job, assignments)
-            job.label = self._derive_job_label(job, default_label)
-            to_add.append(job)
-        else:
-            for v in videos:
-                default_label = Path(v).name
-                job = RenderJob(id=self._next_job_id, video_path=v, label=default_label)
-                self._next_job_id += 1
-                self._make_job_snapshot(job, [])
-                job.label = self._derive_job_label(job, default_label)
-                to_add.append(job)
-
-        if not to_add:
-            QMessageBox.information(self, "Queue", "Nothing to queue. Add videos or assignments first.")
-            return
-
-        # New jobs go to the top of the queue.
-        self._jobs[:0] = to_add
-        self._refresh_job_outputs()
-        for j in to_add:
-            fallback = f"Mapped scene ({len(j.material_assignments)} materials)" if j.material_assignments else (Path(j.video_path).name or f"Job {j.id}")
-            j.label = self._derive_job_label(j, fallback)
-        self._active_job_id = to_add[0].id
-        self._refresh_queue_view()
-        self.queue_panel.select_job(self._active_job_id)
-        self._schedule_save()
-
-    def _refresh_queue_view(self) -> None:
-        self.queue_panel.set_jobs(self._jobs)
-        if self._active_job_id is not None:
-            self.queue_panel.select_job(self._active_job_id)
-        self._update_health()
-        self._update_status_bar()
 
     def _unsaved_floating_changes(self) -> bool:
         """True when the UI holds a mapped setup that isn't backed by any queued
@@ -2299,89 +2145,6 @@ class BlenderVideoMapperQt(QMainWindow):
             and bool(self.scene_panel.get_assignments())
         )
 
-    def _on_queue_job_selected(self, job_id: int) -> None:
-        if getattr(self, "_in_select_guard", False):
-            return
-        # Defensive: with auto-draft this shouldn't happen, but if any unsaved
-        # floating work exists, silently preserve it as a job before switching —
-        # never lose work, never interrupt with a dialog.
-        if self._unsaved_floating_changes():
-            self._in_select_guard = True
-            try:
-                self._ensure_active_job()
-                self._refresh_queue_view()
-            finally:
-                self._in_select_guard = False
-
-        self._active_job_id = job_id
-        job = next((j for j in self._jobs if j.id == job_id), None)
-        if not job:
-            return
-        self._loading_job_into_ui = True
-        try:
-            self.scene_panel.scene_edit.setText(job.scene_path or "")
-            if job.target_camera:
-                idx = self.scene_panel.camera_combo.findText(job.target_camera)
-                if idx >= 0:
-                    self.scene_panel.camera_combo.setCurrentIndex(idx)
-                else:
-                    if self.scene_panel.camera_combo.count() > 1:
-                        self.scene_panel.camera_combo.setCurrentIndex(1)
-                    else:
-                        self.scene_panel.camera_combo.setCurrentIndex(0)
-            else:
-                if self.scene_panel.camera_combo.count() > 1:
-                    self.scene_panel.camera_combo.setCurrentIndex(1)
-                else:
-                    self.scene_panel.camera_combo.setCurrentIndex(0)
-
-            opts = job.render_options or self.render_panel.render_options()
-            self.render_panel.width_edit.setText(str(opts.width))
-            self.deadline_panel.use_dl_cb.setChecked(getattr(job, 'use_deadline', False))
-            self.deadline_panel.dl_pool_combo.setCurrentText(getattr(job, 'deadline_pool', ""))
-            self.deadline_panel.dl_sec_pool_combo.setCurrentText(getattr(job, 'deadline_secondary_pool', ""))
-            self.deadline_panel.dl_group_combo.setCurrentText(getattr(job, 'deadline_group', ""))
-            self.deadline_panel.dl_prio_spin.setValue(getattr(job, 'deadline_priority', 50))
-            self.deadline_panel.dl_comment_edit.setText(self._deadline_comment)
-            self.deadline_panel.dl_dept_edit.setText(getattr(job, 'deadline_department', ""))
-            self.deadline_panel.dl_chunk_spin.setValue(getattr(job, 'deadline_chunk_size', 1))
-            self.deadline_panel.dl_suspended_cb.setChecked(getattr(job, 'deadline_suspended', False))
-            self.deadline_panel.dl_submit_scene_cb.setChecked(getattr(job, 'deadline_submit_scene', True))
-            self.deadline_panel.dl_name_template_edit.setText(self._deadline_job_name_template)
-            self.deadline_panel.dl_machine_limit_spin.setValue(getattr(job, 'deadline_machine_limit', 0))
-            self.deadline_panel.dl_limits_edit.setText(getattr(job, 'deadline_limits', ""))
-            self.deadline_panel.dl_cmd_edit.setText(self._deadline_command_path)
-            self.deadline_panel.dl_repo_edit.setText(self._deadline_repo_path)
-            self.deadline_panel.set_selected_machines(getattr(job, 'deadline_whitelist', ""))
-            self.render_panel.height_edit.setText(str(opts.height))
-            self.render_panel.fps_edit.setText(str(opts.fps))
-            self.render_panel.frame_start_edit.setText(str(opts.frame_start))
-            self.render_panel.frame_end_edit.setText(str(opts.frame_end))
-            self.render_panel.frame_step_edit.setText(str(opts.frame_step))
-            self.render_panel.samples_edit.setText(str(getattr(opts, "samples", 64)))
-            self.render_panel.denoise_cb.setChecked(bool(getattr(opts, "use_denoise", True)))
-            self.render_panel.view_transform_combo.setCurrentText(getattr(opts, "color_view_transform", "AgX"))
-            self.render_panel.exposure_edit.setText(str(getattr(opts, "color_exposure", 0.0)))
-            self.render_panel.gamma_edit.setText(str(getattr(opts, "color_gamma", 1.0)))
-            _dev_rev = {"AUTO": "Auto", "GPU": "GPU", "CPU": "CPU"}
-            self.render_panel.device_combo.setCurrentText(_dev_rev.get(getattr(opts, "device", "AUTO"), "Auto"))
-            self.render_panel.scale_combo.setCurrentText(f"{getattr(opts, 'resolution_percentage', 100)}%")
-            _q_rev = {"LOSSLESS": "Lossless", "HIGH": "High", "MEDIUM": "Medium", "LOW": "Low", "LOWEST": "Lowest"}
-            self.render_panel.quality_combo.setCurrentText(_q_rev.get(getattr(opts, "video_quality", "HIGH"), "High"))
-            _c_rev = {"": "Default", "H264": "H.264", "H265": "H.265"}
-            self.render_panel.codec_combo.setCurrentText(_c_rev.get(getattr(opts, "video_codec", ""), "Default"))
-            self.render_panel.transparent_cb.setChecked(bool(getattr(opts, "film_transparent", False)))
-            self.render_panel.burn_in_cb.setChecked(bool(getattr(opts, "burn_in", False)))
-
-            self.render_panel.set_engine_value(opts.engine)
-
-            pidx = self.render_panel.profile_combo.findText(job.output_profile or "H264 MP4")
-            if pidx >= 0:
-                self.render_panel.profile_combo.setCurrentIndex(pidx)
-
-            self.render_panel.output_edit.setText(job.output_input or "")
-        finally:
-            self._loading_job_into_ui = False
 
     def _on_settings_changed(self, preview: bool = True) -> None:
         # Auto-preview works off the live UI, so trigger it regardless of whether
@@ -2410,258 +2173,11 @@ class BlenderVideoMapperQt(QMainWindow):
         self._refresh_queue_view()
         self._schedule_save()
 
-    def _on_job_renamed(self, job_id: int, new_name: str) -> None:
-        job = next((j for j in self._jobs if j.id == job_id), None)
-        name = (new_name or "").strip()
-        if not job or not name or name == job.label:
-            return
-        job.label = name
-        job.custom_label = True   # never auto-overwrite a hand-typed name
-        self._refresh_queue_view()
-        self._schedule_save()
-
-    def _on_queue_job_run_toggled(self, job_id: int, selected: bool) -> None:
-        job = next((j for j in self._jobs if j.id == job_id), None)
-        if not job:
-            return
-        job.selected = selected
-        # Re-checking a completed job reactivates it for another render.
-        if selected and job.status in ("success", "failed", "cancelled"):
-            job.status = "idle"
-            job.progress = 0.0
-            job.error = ""
-            self._refresh_queue_view()
-        self._schedule_save()
-
-    def _remove_queue_jobs(self, job_ids: list[int]) -> None:
-        if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress", "Stop rendering before removing queue items.")
-            return
-        ids = {jid for jid in job_ids if isinstance(jid, int)}
-        if not ids:
-            return
-
-        import copy
-        removed = [(i, copy.deepcopy(j)) for i, j in enumerate(self._jobs) if j.id in ids]
-        prev_active = self._active_job_id
-
-        def _restore():
-            for i, j in removed:
-                self._jobs.insert(min(i, len(self._jobs)), j)
-            self._active_job_id = prev_active
-            self._refresh_queue_view()
-            self._schedule_save()
-        self._push_undo(f"Delete {len(removed)} job(s)", _restore)
-
-        self._jobs = [j for j in self._jobs if j.id not in ids]
-
-        if self._active_job_id in ids:
-            self._active_job_id = self._jobs[0].id if self._jobs else None
-
-        self._refresh_queue_view()
-        self._schedule_save()
-
-    def _remove_selected_queue_rows(self) -> None:
-        self._remove_queue_jobs(self.queue_panel.selected_row_job_ids())
-
-    def _clear_queue(self) -> None:
-        if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress", "Stop rendering before clearing the queue.")
-            return
-        if not self._jobs:
-            return
-        resp = QMessageBox.question(
-            self, "Clear Queue",
-            f"Remove all {len(self._jobs)} job(s) from the queue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
-            return
-        import copy
-        snap_jobs, snap_active = copy.deepcopy(self._jobs), self._active_job_id
-
-        def _restore():
-            self._jobs = snap_jobs
-            self._active_job_id = snap_active
-            self._refresh_queue_view()
-            self._schedule_save()
-        self._push_undo(f"Clear Queue ({len(self._jobs)} jobs)", _restore)
-        self._jobs = []
-        self._active_job_id = None
-        self._refresh_queue_view()
-        self._schedule_save()
-
-    def _job_output_target(self, job_id: int) -> Path | None:
-        job = next((j for j in self._jobs if j.id == job_id), None)
-        if not job or not (job.output_path or "").strip():
-            return None
-        p = Path(job.output_path).expanduser()
-        if not p.exists():
-            return None
-        return p
 
     @staticmethod
     def _friendly_error_hint(text: str) -> str:
         return friendly_error_hint(text)   # logic in core.reporting (UI-free, tested)
 
-    def _show_job_error(self, job_id: int) -> None:
-        job = next((j for j in self._jobs if j.id == job_id), None)
-        if job is None:
-            return
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Why This Job Failed")
-        box.setText(f"{job.label or f'Job {job.id}'} failed.")
-        info = "The last error from the renderer is below. The full output is in Live Logs."
-        hint = self._friendly_error_hint(job.error or "")
-        if hint:
-            info = f"What to try:  {hint}\n\n{info}"
-        box.setInformativeText(info)
-        box.setDetailedText(job.error or "No error text was captured — check Live Logs.")
-        box.exec()
-
-    def _reveal_job_output(self, job_id: int) -> None:
-        p = self._job_output_target(job_id)
-        if p is None:
-            self._show_toast("Output not found yet", "warning")
-            return
-        try:
-            reveal_in_file_manager(p)
-        except Exception as exc:
-            self._append_log(f"[app] Reveal failed: {exc}")
-
-    def _open_job_output(self, job_id: int) -> None:
-        p = self._job_output_target(job_id)
-        if p is None:
-            self._show_toast("Output not found yet", "warning")
-            return
-        try:
-            if sys.platform == "darwin":
-                subprocess.Popen(["open", str(p)])
-            elif os.name == "nt":
-                os.startfile(str(p))  # type: ignore[attr-defined]
-            else:
-                subprocess.Popen(["xdg-open", str(p)])
-        except Exception as exc:
-            self._append_log(f"[app] Open failed: {exc}")
-
-    def _move_job(self, job_id: int, delta: int) -> None:
-        if self._is_rendering:
-            return
-        idx = next((i for i, j in enumerate(self._jobs) if j.id == job_id), -1)
-        if idx < 0:
-            return
-        new = idx + delta
-        if new < 0 or new >= len(self._jobs):
-            return
-        self._jobs[idx], self._jobs[new] = self._jobs[new], self._jobs[idx]
-        self._active_job_id = job_id
-        self._refresh_queue_view()
-        self.queue_panel.select_job(job_id)
-        self._schedule_save()
-
-    def _set_jobs_priority(self, job_ids: object) -> None:
-        ids = [j for j in job_ids if isinstance(j, int)] if isinstance(job_ids, (list, tuple, set)) else []
-        if not ids:
-            return
-        cur = next((j.deadline_priority for j in self._jobs if j.id in ids), 50)
-        val, ok = QInputDialog.getInt(self, "Set Priority", "Deadline priority (0–100):", cur, 0, 100)
-        if not ok:
-            return
-        for j in self._jobs:
-            if j.id in ids:
-                j.deadline_priority = val
-        self._schedule_save()
-        self._show_toast(f"Priority set to {val} for {len(ids)} job(s).", "info")
-
-    def _requeue_jobs(self, job_ids: object) -> None:
-        ids = [j for j in job_ids if isinstance(j, int)] if isinstance(job_ids, (list, tuple, set)) else []
-        n = 0
-        for j in self._jobs:
-            if j.id in ids and j.status in ("failed", "cancelled", "success"):
-                j.status = "idle"
-                j.progress = 0.0
-                j.error = ""
-                j.selected = True
-                n += 1
-        if n:
-            self._refresh_queue_view()
-            self._show_toast(f"Requeued {n} job(s) — press Render to run them again.", "info")
-
-    def _duplicate_jobs(self, job_ids: object) -> None:
-        if self._is_rendering:
-            return
-        seq = job_ids if isinstance(job_ids, (list, tuple, set)) else []
-        ids = [j for j in seq if isinstance(j, int)]
-        if not ids:
-            return
-        last_new_id: int | None = None
-        # Walk a copy of the current order; insert each clone right after its source.
-        for source_id in ids:
-            idx = next((i for i, j in enumerate(self._jobs) if j.id == source_id), -1)
-            if idx < 0:
-                continue
-            src = self._jobs[idx]
-            clone = dataclasses.replace(
-                src,
-                id=self._next_job_id,
-                status="idle",
-                progress=0.0,
-                error="",
-                attempts=0,
-                material_assignments=[
-                    MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode)
-                    for a in src.material_assignments
-                ],
-                render_options=(dataclasses.replace(src.render_options) if src.render_options else None),
-            )
-            clone.label = f"{src.label} copy"
-            self._next_job_id += 1
-            last_new_id = clone.id
-            self._jobs.insert(idx + 1, clone)
-        if last_new_id is not None:
-            self._active_job_id = last_new_id
-        self._refresh_job_outputs()
-        self._refresh_queue_view()
-        if last_new_id is not None:
-            self.queue_panel.select_job(last_new_id)
-        self._schedule_save()
-
-    def _refresh_job_outputs(self) -> None:
-        batch = len(self._jobs) > 1
-        for j in self._jobs:
-            src = j.material_assignments[0].video_path if j.material_assignments else j.video_path
-            if not src:
-                continue
-            try:
-                # Resolve output_format: prefer job's own render options, fall back to profile combo
-                opts = j.render_options
-                if opts and opts.output_format:
-                    out_fmt = opts.output_format
-                else:
-                    prof = j.output_profile or self.render_panel.profile_combo.currentText()
-                    out_fmt, _ = OUTPUT_PROFILES.get(prof, ("MPEG4", "H264"))
-                w = opts.width if opts else 1920
-                h = opts.height if opts else 1080
-                extra = {
-                    "camera": j.target_camera or self.scene_panel.camera_combo.currentText(),
-                    "width": w,
-                    "height": h,
-                    "res": f"{w}x{h}",
-                    "fps": opts.fps if opts else self.render_panel.fps_edit.text().strip(),
-                }
-                j.output_path = resolve_output_path(
-                    output_input=j.output_input or self.render_panel.output_edit.text().strip(),
-                    scene_path=j.scene_path or self.scene_panel.scene_edit.text().strip(),
-                    video_path=src,
-                    is_batch=batch,
-                    job_label=j.label or Path(src).stem,
-                    output_format=out_fmt,
-                    extra_tokens=extra,
-                    create=False,   # don't make folders while drafting (esp. inside a watch folder)
-                )
-            except Exception:
-                j.output_path = ""
 
     def _preflight(self) -> list[str]:
         errs: list[str] = []
@@ -2694,10 +2210,6 @@ class BlenderVideoMapperQt(QMainWindow):
 
         return errs
 
-    @staticmethod
-    def _job_has_mapping(job: RenderJob) -> bool:
-        """A job is renderable only if a video is connected to a material."""
-        return any(a.material_name and a.video_path for a in (job.material_assignments or []))
 
     def _video_info_cached(self, path: str):
         cache = getattr(self, "_video_info_cache", None)
@@ -2948,7 +2460,7 @@ class BlenderVideoMapperQt(QMainWindow):
             try:
                 Path(self._preview_path).unlink(missing_ok=True)
             except Exception:
-                pass
+                _log.debug("could not remove stale live-preview temp file", exc_info=True)
 
         entries: list[dict] = []
         for j in pending:
@@ -2963,7 +2475,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 op = Path(j.output_path)
                 (op if op.suffix == "" else op.parent).mkdir(parents=True, exist_ok=True)
             except OSError:
-                pass
+                _log.warning("could not create the render output directory", exc_info=True)
 
             primary = asn[0] if asn else MaterialVideoAssignment("", j.video_path)
             audio_src = asn if asn else ([primary] if primary.video_path else [])
@@ -3113,7 +2625,7 @@ class BlenderVideoMapperQt(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", str(Path(info).parent)])
         except Exception:
-            pass
+            _log.debug("could not reveal exported .blend in file manager", exc_info=True)
 
     def _render_preview_frame(self) -> None:
         """Render the selected frame from the *current UI state* into the Live
@@ -3233,7 +2745,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 data = json.loads(HISTORY_PATH.read_text())
                 return data if isinstance(data, list) else []
         except Exception:
-            pass
+            _log.debug("could not read render history file", exc_info=True)
         return []
 
     def _log_eta_prediction(self, entries: list[dict]) -> None:
@@ -3306,7 +2818,7 @@ class BlenderVideoMapperQt(QMainWindow):
             hist.insert(0, entry)
             HISTORY_PATH.write_text(json.dumps(hist[:200], indent=2))
         except Exception:
-            pass
+            _log.warning("failed to save render history", exc_info=True)
 
     @staticmethod
     def _fmt_dur(seconds: float) -> str:
@@ -3463,7 +2975,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 QTimer.singleShot(1800, lambda: subprocess.Popen(
                     ["osascript", "-e", 'tell application "System Events" to sleep']))
             except Exception:
-                pass
+                _log.debug("could not schedule sleep-on-finish action", exc_info=True)
 
     def _deliver_outputs(self) -> None:
         """Copy this run's successful outputs to the delivery folder (Properties →
@@ -3531,7 +3043,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     if build_contact_sheet(src, dest):
                         built += 1
                 except Exception:
-                    pass
+                    _log.debug("contact-sheet generation failed for an output", exc_info=True)
             self._sheets_built.emit(built)
 
         self._sheet_thread = FuncThread(lambda: work(targets))
@@ -3570,9 +3082,9 @@ class BlenderVideoMapperQt(QMainWindow):
                 if hasattr(self, "_open_html_action"):
                     self._open_html_action.setEnabled(True)
             except Exception:
-                pass
+                _log.warning("failed to write the HTML render report", exc_info=True)
         except Exception:
-            pass
+            _log.warning("failed to write the run report", exc_info=True)
 
     def _build_html_report(self) -> str:
         """A standalone, shareable HTML report of the last run: per-job status,
@@ -3649,7 +3161,7 @@ class BlenderVideoMapperQt(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", path])
         except Exception:
-            pass
+            _log.debug("could not open path in the default application", exc_info=True)
 
     # ── Project save/open ────────────────────────────────────────────────
     def _save_project(self) -> None:
@@ -3783,7 +3295,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     lst.addItem(QListWidgetItem(m))
                 status.setText(f"{len(machines)} node(s) on the farm.")
             except RuntimeError:
-                pass
+                _log.debug("farm-nodes dialog closed before results arrived", exc_info=True)
 
         def fetch() -> None:
             cmd = self.deadline_panel.dl_cmd_edit.text().strip() \
@@ -3978,7 +3490,7 @@ class BlenderVideoMapperQt(QMainWindow):
             try:
                 HISTORY_PATH.write_text("[]")
             except Exception:
-                pass
+                _log.warning("failed to clear render history", exc_info=True)
             table.setRowCount(0)
 
         clear_b.clicked.connect(do_clear)
@@ -4192,52 +3704,6 @@ class BlenderVideoMapperQt(QMainWindow):
             QMessageBox.critical(self, "Export Error", f"Failed to export files:\n{exc}")
             self._append_log(f"[deadline] ERROR exporting files: {exc}")
 
-    def _save_preset(self) -> None:
-        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
-        if not ok or not name.strip():
-            return
-        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")
-        if not safe:
-            QMessageBox.warning(self, "Invalid", "Preset name is invalid.")
-            return
-        try:
-            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-            p = PRESETS_DIR / f"{safe}{PRESET_EXT}"
-            # A preset is a reusable render recipe (settings only) — not the
-            # scene/clips/queue. Use Profile → Save Project for the full setup.
-            p.write_text(json.dumps(self.render_panel.settings_dict(), indent=2))
-            self._refresh_preset_browser()
-            self._show_toast(f"Preset “{safe}” saved", "success")
-        except Exception as exc:
-            QMessageBox.warning(self, "Save Failed", str(exc))
-
-    def _load_preset(self) -> None:
-        try:
-            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        p, _ = QFileDialog.getOpenFileName(
-            self, "Load Preset", str(PRESETS_DIR),
-            f"Render Mapper Preset (*{PRESET_EXT})")
-        if not p:
-            return
-        self._load_preset_path(p)
-
-    def _load_preset_entry(self, entry: object) -> None:
-        if not isinstance(entry, dict):
-            return
-        p = str(entry.get("path", "")).strip()
-        if p:
-            self._load_preset_path(p)
-
-    def _load_preset_path(self, preset_path: str) -> None:
-        try:
-            d = json.loads(Path(preset_path).read_text())
-            self.render_panel.apply_settings(d)  # settings only — keeps current scene/clips
-            self._schedule_save()
-            self._show_toast(f"Applied preset “{Path(preset_path).stem}”", "success")
-        except Exception as exc:
-            QMessageBox.warning(self, "Load Failed", str(exc))
 
     def _delete_preset_entry(self, entry: object) -> None:
         if not isinstance(entry, dict):
@@ -4246,56 +3712,6 @@ class BlenderVideoMapperQt(QMainWindow):
         if p:
             self._delete_preset_path(p)
 
-    def _apply_preset_to_queue(self, entry: object, checked_only: bool) -> None:
-        if not isinstance(entry, dict):
-            return
-
-        target_ids = set(self.queue_panel.selected_job_ids() if checked_only else self.queue_panel.selected_row_job_ids())
-        if not target_ids:
-            QMessageBox.information(self, "Preset", "Select queue rows (or check Run) before applying a preset.")
-            return
-
-        p = str(entry.get("path", "")).strip()
-        if not p:
-            return
-        preset_dict: dict | None = None
-        try:
-            preset_dict = json.loads(Path(p).read_text())
-        except Exception as exc:
-            QMessageBox.warning(self, "Preset", f"Failed to read preset: {exc}")
-            return
-
-        def coerce(field: str, value, fallback):
-            try:
-                if isinstance(fallback, bool):
-                    return bool(value)
-                if isinstance(fallback, int):
-                    return int(str(value))
-                if isinstance(fallback, float):
-                    return float(str(value))
-                return str(value)
-            except Exception:
-                return fallback
-
-        ro_fields = RenderOptions.__dataclass_fields__
-        for j in self._jobs:
-            if j.id not in target_ids:
-                continue
-            opts = j.render_options or self.render_panel.render_options()
-            # Apply every render-recipe field present in the preset (robust).
-            kwargs = {}
-            for k in ro_fields:
-                if k in preset_dict:
-                    kwargs[k] = coerce(k, preset_dict[k], getattr(opts, k))
-            j.render_options = dataclasses.replace(opts, **kwargs)
-            if "output_profile" in preset_dict and str(preset_dict["output_profile"]).strip():
-                j.output_profile = str(preset_dict["output_profile"]).strip()
-
-        if self._active_job_id is not None:
-            self._on_queue_job_selected(self._active_job_id)
-        self._refresh_job_outputs()
-        self._refresh_queue_view()
-        self._schedule_save()
 
     def _delete_preset_path(self, preset_path: str) -> None:
         p = Path(preset_path)
@@ -4311,13 +3727,6 @@ class BlenderVideoMapperQt(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Delete Failed", str(exc))
 
-    def _refresh_preset_browser(self) -> None:
-        try:
-            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-            presets = sorted(PRESETS_DIR.glob(f"*{PRESET_EXT}"), key=lambda x: x.stem.lower())
-        except Exception:
-            presets = []
-        self.presets_panel.set_presets(presets)
 
     def _open_presets_folder(self) -> None:
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4329,7 +3738,7 @@ class BlenderVideoMapperQt(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", str(PRESETS_DIR)])
         except Exception:
-            pass
+            _log.debug("could not open the presets folder in file manager", exc_info=True)
 
     def _profile_dict(self) -> dict:
         videos = self.scene_panel.get_videos()
@@ -4434,7 +3843,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._power_watts = float(d.get("power_watts", self._power_watts))
             self._power_rate = float(d.get("power_rate", self._power_rate))
         except (TypeError, ValueError):
-            pass
+            _log.debug("invalid power/cost values in profile; using defaults", exc_info=True)
         self._notify_desktop = bool(d.get("notify_desktop", self._notify_desktop))
         self._discord_webhook = str(d.get("discord_webhook", self._discord_webhook) or "")
         if "live_preview" in d:
@@ -4565,7 +3974,7 @@ class BlenderVideoMapperQt(QMainWindow):
                             name_lookup[key] = found
                             return found
                 except Exception:
-                    pass
+                    _log.debug("scene-folder search for a moved clip failed", exc_info=True)
             return ""
 
         vids: list[str] = []
@@ -4626,7 +4035,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self.scene_panel.set_watch_options(
                 int(d.get("watch_interval_ms", 3000)), float(d.get("watch_settle", 2.0)))
         except (TypeError, ValueError):
-            pass
+            _log.debug("invalid watch-folder values in profile; using defaults", exc_info=True)
         self._autorender_enabled = bool(d.get("autorender_enabled", False))
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")
@@ -4726,13 +4135,13 @@ class BlenderVideoMapperQt(QMainWindow):
                 if self.restoreGeometry(QByteArray.fromBase64(geom_b64.encode("ascii"))):
                     self._restored_geometry = True
             except Exception:
-                pass
+                _log.debug("could not restore saved window geometry", exc_info=True)
         if state_b64:
             try:
                 self.restoreState(QByteArray.fromBase64(state_b64.encode("ascii")))
                 self._schedule_titlebar_sync()
             except Exception:
-                pass
+                _log.debug("could not restore saved dock layout", exc_info=True)
 
         # Invariant: a non-empty queue always has exactly one active job.
         self._ensure_active_selection()
@@ -4756,7 +4165,7 @@ class BlenderVideoMapperQt(QMainWindow):
         try:
             self._apply_profile_data(json.loads(PROFILE_PATH.read_text()))
         except Exception:
-            pass
+            _log.warning("failed to load saved profile; using defaults", exc_info=True)
         # Widgets were built under the default dark theme; apply a saved light
         # choice now and sync the menu checkbox without re-triggering a restyle.
         if self._theme_mode != "dark":
@@ -4812,7 +4221,7 @@ class BlenderVideoMapperQt(QMainWindow):
             try:
                 os.chmod(tmp, 0o600)   # owner-only: the profile may hold a webhook secret
             except OSError:
-                pass
+                _log.debug("could not restrict profile file permissions", exc_info=True)
             tmp.replace(PROFILE_PATH)
         except Exception as exc:
             self._append_log(f"[app] Could not save settings: {exc}")
@@ -4898,7 +4307,7 @@ def _set_macos_app_name(name: str) -> None:
                 msg(info, b"setObject:forKey:", nsstr(name), nsstr(key.decode()),
                     argtypes=[ctypes.c_void_p, ctypes.c_void_p])
     except Exception:
-        pass
+        _log.debug("could not set the macOS application name", exc_info=True)
 
 
 def _install_crash_handler(window) -> None:
@@ -4918,7 +4327,7 @@ def _install_crash_handler(window) -> None:
             with LOG_PATH.open("a", encoding="utf-8") as f:
                 f.write(f"\n[{datetime.now().isoformat()}] UNHANDLED EXCEPTION\n{text}\n")
         except Exception:
-            pass
+            _log.warning("failed to write crash traceback to the log file", exc_info=True)
         if showing["active"]:
             return
         showing["active"] = True
@@ -4941,7 +4350,7 @@ def _install_crash_handler(window) -> None:
                 try:
                     reveal_in_file_manager(LOG_PATH)
                 except Exception:
-                    pass
+                    _log.debug("could not reveal the log file in file manager", exc_info=True)
         except Exception:
             default_hook(exc_type, exc, tb)
         finally:

@@ -11,6 +11,10 @@ from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 
+from core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 
 def version_tuple(v: str) -> tuple:
     """Parse '1.4.10' → (1, 4, 10) for numeric comparison; non-numeric parts → 0."""
@@ -60,12 +64,12 @@ def terminate_process(process, grace: float = 5.0) -> None:
         process.wait(timeout=grace)
         return
     except Exception:
-        pass
+        _log.debug("process did not exit on terminate; escalating to kill", exc_info=True)
     try:
         process.kill()
         process.wait(timeout=grace)
     except Exception:
-        pass
+        _log.warning("failed to kill subprocess; it may be orphaned", exc_info=True)
 
 
 def iter_process_output(
@@ -92,7 +96,7 @@ def iter_process_output(
             for line in process.stdout:
                 q.put(line)
         except Exception:
-            pass
+            _log.debug("subprocess stdout reader stopped on error", exc_info=True)
         finally:
             q.put(None)   # sentinel: stream closed
 
@@ -311,7 +315,7 @@ def find_deadlinecommand() -> str | None:
                     if p.is_file() and os.access(p, os.X_OK):
                         return str(p)
     except Exception:
-        pass
+        _log.debug("deadlinecommand directory probe failed", exc_info=True)
 
     return None
 

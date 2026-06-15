@@ -9,8 +9,11 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from .logging_setup import get_logger
 from .models import JobConfig, SceneBackend, scene_backend
 from .utils import ext_for_format, iter_process_output, subprocess_creation_flags, terminate_process
+
+_log = get_logger(__name__)
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -60,7 +63,7 @@ def write_commandline_job_info(f, job: JobConfig, scene_name: str, video_name: s
         try:
             name = template.format(scene_name=scene_name, video_name=video_name)
         except Exception:
-            pass
+            _log.debug("deadline job-name template formatting failed; using default name", exc_info=True)
     _write_job_info_common(f, job, name)
     f.write("Plugin=CommandLine\n")
     f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")

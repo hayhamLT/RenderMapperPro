@@ -34,7 +34,7 @@ jobs:
       - name: Ruff (whole repo)
         run: ruff check .
       - name: Mypy (core + workers + UI layer)
-        run: mypy core workers.py app_qt.py panels.py icons.py ui_widgets.py media.py theme.py dialogs.py
+        run: mypy core workers.py app_qt.py panels.py icons.py ui_widgets.py media.py theme.py dialogs.py app_window
       - name: Pytest
         env:
           QT_QPA_PLATFORM: offscreen
