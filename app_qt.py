@@ -4874,55 +4874,10 @@ class BlenderVideoMapperQt(QMainWindow):
         layout_state = bytes(self.saveState().toBase64().data()).decode("ascii")
         layout_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
 
-        def _opts_dict(opts: RenderOptions | None) -> dict | None:
-            if opts is None:
-                return None
-            return dataclasses.asdict(opts)
-
-        jobs_data = [
-            {
-                "id": j.id,
-                "label": j.label,
-                "custom_label": j.custom_label,
-                "video_path": j.video_path,
-                "output_path": j.output_path,
-                "output_input": j.output_input,
-                "scene_path": j.scene_path,
-                "target_camera": j.target_camera,
-                "output_profile": j.output_profile,
-                "render_options": _opts_dict(j.render_options),
-                "safe_mode": j.safe_mode,
-                "status": j.status,
-                "progress": j.progress,
-                "selected": j.selected,
-                "use_deadline": j.use_deadline,
-                "deadline_pool": j.deadline_pool,
-                "deadline_secondary_pool": j.deadline_secondary_pool,
-                "deadline_group": j.deadline_group,
-                "deadline_priority": j.deadline_priority,
-                "deadline_comment": j.deadline_comment,
-                "deadline_department": j.deadline_department,
-                "deadline_chunk_size": j.deadline_chunk_size,
-                "deadline_suspended": j.deadline_suspended,
-                "deadline_submit_scene": getattr(j, 'deadline_submit_scene', True),
-                "deadline_job_name_template": j.deadline_job_name_template,
-                "deadline_machine_limit": j.deadline_machine_limit,
-                "deadline_limits": j.deadline_limits,
-                "deadline_command_path": j.deadline_command_path,
-                "deadline_repo_path": j.deadline_repo_path,
-                "deadline_whitelist": j.deadline_whitelist,
-                "material_assignments": [
-                    {
-                        "material_name": a.material_name,
-                        "video_path": a.video_path,
-                        "video_name": Path(a.video_path).name,
-                        "mapping_mode": a.mapping_mode,
-                    }
-                    for a in j.material_assignments
-                ],
-            }
-            for j in self._jobs
-        ]
+        # RenderJob is a dataclass — asdict() serializes every field (incl. nested
+        # render_options + material_assignments) and auto-tracks new fields, so this
+        # never drifts from the model. The loader reads fields defensively (jd.get).
+        jobs_data = [dataclasses.asdict(j) for j in self._jobs]
 
         watch_folder, watch_enabled = self.scene_panel.get_watch_folder()
         watch_interval_ms, watch_settle = self.scene_panel.get_watch_options()
@@ -5571,6 +5526,13 @@ def run_qt_app() -> None:
 
     win = BlenderVideoMapperQt()
     win._single_instance_server = server  # keep a reference alive
+    # Route stdlib logging (used by core/ modules) into the Live Logs + existing
+    # file log, and stamp a per-launch banner so sessions are easy to find. No
+    # file handler here — _append_log is the sole writer of LOG_PATH.
+    from core.logging_setup import add_callback_handler, get_logger, setup_logging
+    setup_logging(version=APP_VERSION)
+    add_callback_handler(lambda _level, msg: win._append_log(msg))
+    get_logger().info("%s %s ready on %s", APP_NAME, APP_VERSION, sys.platform)
     _install_crash_handler(win)  # friendly dialog + log on any unhandled UI-thread error
     win._init_window_geometry()  # place/size before first show to avoid an off-screen flash
 
