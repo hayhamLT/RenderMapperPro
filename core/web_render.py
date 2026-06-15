@@ -21,8 +21,11 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from .logging_setup import get_logger
 from .models import JobConfig, SceneBackend, scene_backend
 from .utils import subprocess_creation_flags, terminate_process
+
+_log = get_logger(__name__)
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
@@ -158,7 +161,7 @@ def _find_ffmpeg() -> str:
         if f:
             return f
     except Exception:
-        pass
+        _log.debug("bundled ffmpeg lookup failed; falling back to PATH", exc_info=True)
     return "ffmpeg"
 
 
@@ -203,7 +206,7 @@ def _launch(pw, viewport_w: int, viewport_h: int, on_log: LogCallback | None = N
             try:
                 browser.close()
             except Exception:
-                pass
+                _log.debug("failed to close browser during launch fallback", exc_info=True)
     raise RuntimeError(f"web scene failed to launch: {last_exc}")
 
 

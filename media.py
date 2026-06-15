@@ -16,6 +16,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 # rec.709 colour tags + faststart for movie outputs, so QuickTimes look identical
 # across players/NLEs. (c4d_worker.py mirrors this — it runs in c4dpy and can't
 # import this module.)
@@ -63,7 +67,7 @@ def reveal_in_file_manager(path) -> None:
     try:
         subprocess.run(cmd, check=False, timeout=10)
     except Exception:
-        pass
+        _log.debug("could not reveal output in file manager", exc_info=True)
 
 
 # Common system install locations to check after PATH (GUI apps launched from
@@ -108,7 +112,7 @@ def find_ffmpeg_tool(name: str) -> str | None:
             try:
                 os.chmod(c, 0o755)  # ensure the bundled binary is executable
             except Exception:
-                pass
+                _log.debug("could not chmod bundled ffmpeg binary", exc_info=True)
             resolved = str(c)
             break
 
@@ -240,7 +244,7 @@ def _mp4_has_audio(path: str) -> bool:
                     return b"soun" in body
                 pos += size
     except Exception:
-        pass
+        _log.debug("mp4 audio atom scan failed", exc_info=True)
     return False
 
 
@@ -316,7 +320,8 @@ def _parse_mp4_info(path: str) -> tuple[int, float] | None:
                 if dur > 0 and fps > 0:
                     return round(dur * fps), fps
         except Exception:
-            pass  # Fall through to hand-rolled parser
+            # Fall through to hand-rolled parser
+            _log.debug("ffprobe mp4 info probe failed; using fallback parser", exc_info=True)
 
     # ── Hand-rolled MP4/MOV atom parser ─────────────────────────────────────
     results: dict = {}

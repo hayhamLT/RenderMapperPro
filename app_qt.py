@@ -63,6 +63,7 @@ import app_version
 import icons
 import theme as T
 from core.jobs import disk_space_warnings, migrate_profile
+from core.logging_setup import get_logger
 from core.metrics import (
     auto_chunk_size,
     estimate_energy_cost,
@@ -134,6 +135,9 @@ RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
 LOG_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
+
+_log = get_logger(__name__)
+
 
 def _make_app_icon() -> QIcon:
     return icons.app_icon()
@@ -1423,7 +1427,7 @@ class BlenderVideoMapperQt(QMainWindow):
             with LOG_PATH.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
-            pass
+            _log.warning("failed to write to the on-disk log file", exc_info=True)
 
     def _init_blender(self) -> None:
         b = _find_blender(self._blender_path)
@@ -2948,7 +2952,7 @@ class BlenderVideoMapperQt(QMainWindow):
             try:
                 Path(self._preview_path).unlink(missing_ok=True)
             except Exception:
-                pass
+                _log.debug("could not remove stale live-preview temp file", exc_info=True)
 
         entries: list[dict] = []
         for j in pending:
@@ -2963,7 +2967,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 op = Path(j.output_path)
                 (op if op.suffix == "" else op.parent).mkdir(parents=True, exist_ok=True)
             except OSError:
-                pass
+                _log.warning("could not create the render output directory", exc_info=True)
 
             primary = asn[0] if asn else MaterialVideoAssignment("", j.video_path)
             audio_src = asn if asn else ([primary] if primary.video_path else [])
@@ -3113,7 +3117,7 @@ class BlenderVideoMapperQt(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", str(Path(info).parent)])
         except Exception:
-            pass
+            _log.debug("could not reveal exported .blend in file manager", exc_info=True)
 
     def _render_preview_frame(self) -> None:
         """Render the selected frame from the *current UI state* into the Live
@@ -3233,7 +3237,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 data = json.loads(HISTORY_PATH.read_text())
                 return data if isinstance(data, list) else []
         except Exception:
-            pass
+            _log.debug("could not read render history file", exc_info=True)
         return []
 
     def _log_eta_prediction(self, entries: list[dict]) -> None:
@@ -3306,7 +3310,7 @@ class BlenderVideoMapperQt(QMainWindow):
             hist.insert(0, entry)
             HISTORY_PATH.write_text(json.dumps(hist[:200], indent=2))
         except Exception:
-            pass
+            _log.warning("failed to save render history", exc_info=True)
 
     @staticmethod
     def _fmt_dur(seconds: float) -> str:
@@ -3463,7 +3467,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 QTimer.singleShot(1800, lambda: subprocess.Popen(
                     ["osascript", "-e", 'tell application "System Events" to sleep']))
             except Exception:
-                pass
+                _log.debug("could not schedule sleep-on-finish action", exc_info=True)
 
     def _deliver_outputs(self) -> None:
         """Copy this run's successful outputs to the delivery folder (Properties →
@@ -3531,7 +3535,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     if build_contact_sheet(src, dest):
                         built += 1
                 except Exception:
-                    pass
+                    _log.debug("contact-sheet generation failed for an output", exc_info=True)
             self._sheets_built.emit(built)
 
         self._sheet_thread = FuncThread(lambda: work(targets))
@@ -3570,9 +3574,9 @@ class BlenderVideoMapperQt(QMainWindow):
                 if hasattr(self, "_open_html_action"):
                     self._open_html_action.setEnabled(True)
             except Exception:
-                pass
+                _log.warning("failed to write the HTML render report", exc_info=True)
         except Exception:
-            pass
+            _log.warning("failed to write the run report", exc_info=True)
 
     def _build_html_report(self) -> str:
         """A standalone, shareable HTML report of the last run: per-job status,
@@ -3649,7 +3653,7 @@ class BlenderVideoMapperQt(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", path])
         except Exception:
-            pass
+            _log.debug("could not open path in the default application", exc_info=True)
 
     # ── Project save/open ────────────────────────────────────────────────
     def _save_project(self) -> None:
@@ -3783,7 +3787,7 @@ class BlenderVideoMapperQt(QMainWindow):
                     lst.addItem(QListWidgetItem(m))
                 status.setText(f"{len(machines)} node(s) on the farm.")
             except RuntimeError:
-                pass
+                _log.debug("farm-nodes dialog closed before results arrived", exc_info=True)
 
         def fetch() -> None:
             cmd = self.deadline_panel.dl_cmd_edit.text().strip() \
@@ -3978,7 +3982,7 @@ class BlenderVideoMapperQt(QMainWindow):
             try:
                 HISTORY_PATH.write_text("[]")
             except Exception:
-                pass
+                _log.warning("failed to clear render history", exc_info=True)
             table.setRowCount(0)
 
         clear_b.clicked.connect(do_clear)
@@ -4215,7 +4219,7 @@ class BlenderVideoMapperQt(QMainWindow):
         try:
             PRESETS_DIR.mkdir(parents=True, exist_ok=True)
         except Exception:
-            pass
+            _log.debug("could not ensure presets directory exists", exc_info=True)
         p, _ = QFileDialog.getOpenFileName(
             self, "Load Preset", str(PRESETS_DIR),
             f"Render Mapper Preset (*{PRESET_EXT})")
@@ -4329,7 +4333,7 @@ class BlenderVideoMapperQt(QMainWindow):
             else:
                 subprocess.Popen(["xdg-open", str(PRESETS_DIR)])
         except Exception:
-            pass
+            _log.debug("could not open the presets folder in file manager", exc_info=True)
 
     def _profile_dict(self) -> dict:
         videos = self.scene_panel.get_videos()
@@ -4434,7 +4438,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._power_watts = float(d.get("power_watts", self._power_watts))
             self._power_rate = float(d.get("power_rate", self._power_rate))
         except (TypeError, ValueError):
-            pass
+            _log.debug("invalid power/cost values in profile; using defaults", exc_info=True)
         self._notify_desktop = bool(d.get("notify_desktop", self._notify_desktop))
         self._discord_webhook = str(d.get("discord_webhook", self._discord_webhook) or "")
         if "live_preview" in d:
@@ -4565,7 +4569,7 @@ class BlenderVideoMapperQt(QMainWindow):
                             name_lookup[key] = found
                             return found
                 except Exception:
-                    pass
+                    _log.debug("scene-folder search for a moved clip failed", exc_info=True)
             return ""
 
         vids: list[str] = []
@@ -4626,7 +4630,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self.scene_panel.set_watch_options(
                 int(d.get("watch_interval_ms", 3000)), float(d.get("watch_settle", 2.0)))
         except (TypeError, ValueError):
-            pass
+            _log.debug("invalid watch-folder values in profile; using defaults", exc_info=True)
         self._autorender_enabled = bool(d.get("autorender_enabled", False))
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")
@@ -4726,13 +4730,13 @@ class BlenderVideoMapperQt(QMainWindow):
                 if self.restoreGeometry(QByteArray.fromBase64(geom_b64.encode("ascii"))):
                     self._restored_geometry = True
             except Exception:
-                pass
+                _log.debug("could not restore saved window geometry", exc_info=True)
         if state_b64:
             try:
                 self.restoreState(QByteArray.fromBase64(state_b64.encode("ascii")))
                 self._schedule_titlebar_sync()
             except Exception:
-                pass
+                _log.debug("could not restore saved dock layout", exc_info=True)
 
         # Invariant: a non-empty queue always has exactly one active job.
         self._ensure_active_selection()
@@ -4756,7 +4760,7 @@ class BlenderVideoMapperQt(QMainWindow):
         try:
             self._apply_profile_data(json.loads(PROFILE_PATH.read_text()))
         except Exception:
-            pass
+            _log.warning("failed to load saved profile; using defaults", exc_info=True)
         # Widgets were built under the default dark theme; apply a saved light
         # choice now and sync the menu checkbox without re-triggering a restyle.
         if self._theme_mode != "dark":
@@ -4812,7 +4816,7 @@ class BlenderVideoMapperQt(QMainWindow):
             try:
                 os.chmod(tmp, 0o600)   # owner-only: the profile may hold a webhook secret
             except OSError:
-                pass
+                _log.debug("could not restrict profile file permissions", exc_info=True)
             tmp.replace(PROFILE_PATH)
         except Exception as exc:
             self._append_log(f"[app] Could not save settings: {exc}")
@@ -4898,7 +4902,7 @@ def _set_macos_app_name(name: str) -> None:
                 msg(info, b"setObject:forKey:", nsstr(name), nsstr(key.decode()),
                     argtypes=[ctypes.c_void_p, ctypes.c_void_p])
     except Exception:
-        pass
+        _log.debug("could not set the macOS application name", exc_info=True)
 
 
 def _install_crash_handler(window) -> None:
@@ -4918,7 +4922,7 @@ def _install_crash_handler(window) -> None:
             with LOG_PATH.open("a", encoding="utf-8") as f:
                 f.write(f"\n[{datetime.now().isoformat()}] UNHANDLED EXCEPTION\n{text}\n")
         except Exception:
-            pass
+            _log.warning("failed to write crash traceback to the log file", exc_info=True)
         if showing["active"]:
             return
         showing["active"] = True
@@ -4941,7 +4945,7 @@ def _install_crash_handler(window) -> None:
                 try:
                     reveal_in_file_manager(LOG_PATH)
                 except Exception:
-                    pass
+                    _log.debug("could not reveal the log file in file manager", exc_info=True)
         except Exception:
             default_hook(exc_type, exc, tb)
         finally:
