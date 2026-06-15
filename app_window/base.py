@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
 
     from core.models import RenderJob
-    from panels import DeadlinePanel, QueuePanel, RenderPanel, ScenePanel
+    from panels import DeadlinePanel, PresetBrowserPanel, QueuePanel, RenderPanel, ScenePanel
 
     # For typing, mixins ARE a QWidget (the concrete window is a QMainWindow), so
     # `QMessageBox(self, …)` type-checks. At runtime the base is plain ``object``
@@ -42,9 +42,13 @@ class _WindowMembers(_Base):
         render_panel: RenderPanel
         deadline_panel: DeadlinePanel
         queue_panel: QueuePanel
+        presets_panel: PresetBrowserPanel
 
         # ── Methods provided by the window / other mixins ──────────────────
         def _append_log(self, line: str) -> None: ...
+        def _on_queue_job_selected(self, job_id: int) -> None: ...   # QueueMixin
+        def _refresh_job_outputs(self) -> None: ...                  # QueueMixin
+        def _refresh_queue_view(self) -> None: ...                   # QueueMixin
         def _show_toast(self, message: str, kind: str = ...) -> None: ...
         def _schedule_save(self) -> None: ...
         def _push_undo(self, desc: str, restore) -> None: ...

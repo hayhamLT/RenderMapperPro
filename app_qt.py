@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -62,6 +61,7 @@ from PySide6.QtWidgets import (
 import app_version
 import icons
 import theme as T
+from app_window.preset_mixin import PRESETS_DIR, PresetMixin
 from app_window.queue_mixin import QueueMixin
 from core.jobs import disk_space_warnings, migrate_profile
 from core.logging_setup import get_logger
@@ -122,11 +122,9 @@ from workers import (
 )
 
 PROFILE_PATH = Path.home() / ".blender_video_mapper" / "profile.json"
-PRESETS_DIR = Path.home() / ".blender_video_mapper" / "presets"
 HISTORY_PATH = Path.home() / ".blender_video_mapper" / "history.json"
 # Branded file extensions (JSON underneath) for user-facing Save/Open.
 PROJECT_EXT = ".rmproj"      # full project: scene, clips, mappings, queue
-PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
@@ -454,7 +452,7 @@ class RuntimeInstallThread(QThread):
             self.finished_install.emit("", str(exc))
 
 
-class BlenderVideoMapperQt(QMainWindow, QueueMixin):
+class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin):
     _update_checked = Signal(object, bool)   # (manifest dict | None, was-manual)
     _delivery_log = Signal(str, str)         # (message, kind) from the delivery-copy thread
     _sheets_built = Signal(int)              # count of contact sheets generated post-render
@@ -3706,52 +3704,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin):
             QMessageBox.critical(self, "Export Error", f"Failed to export files:\n{exc}")
             self._append_log(f"[deadline] ERROR exporting files: {exc}")
 
-    def _save_preset(self) -> None:
-        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
-        if not ok or not name.strip():
-            return
-        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")
-        if not safe:
-            QMessageBox.warning(self, "Invalid", "Preset name is invalid.")
-            return
-        try:
-            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-            p = PRESETS_DIR / f"{safe}{PRESET_EXT}"
-            # A preset is a reusable render recipe (settings only) — not the
-            # scene/clips/queue. Use Profile → Save Project for the full setup.
-            p.write_text(json.dumps(self.render_panel.settings_dict(), indent=2))
-            self._refresh_preset_browser()
-            self._show_toast(f"Preset “{safe}” saved", "success")
-        except Exception as exc:
-            QMessageBox.warning(self, "Save Failed", str(exc))
-
-    def _load_preset(self) -> None:
-        try:
-            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            _log.debug("could not ensure presets directory exists", exc_info=True)
-        p, _ = QFileDialog.getOpenFileName(
-            self, "Load Preset", str(PRESETS_DIR),
-            f"Render Mapper Preset (*{PRESET_EXT})")
-        if not p:
-            return
-        self._load_preset_path(p)
-
-    def _load_preset_entry(self, entry: object) -> None:
-        if not isinstance(entry, dict):
-            return
-        p = str(entry.get("path", "")).strip()
-        if p:
-            self._load_preset_path(p)
-
-    def _load_preset_path(self, preset_path: str) -> None:
-        try:
-            d = json.loads(Path(preset_path).read_text())
-            self.render_panel.apply_settings(d)  # settings only — keeps current scene/clips
-            self._schedule_save()
-            self._show_toast(f"Applied preset “{Path(preset_path).stem}”", "success")
-        except Exception as exc:
-            QMessageBox.warning(self, "Load Failed", str(exc))
 
     def _delete_preset_entry(self, entry: object) -> None:
         if not isinstance(entry, dict):
@@ -3760,56 +3712,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin):
         if p:
             self._delete_preset_path(p)
 
-    def _apply_preset_to_queue(self, entry: object, checked_only: bool) -> None:
-        if not isinstance(entry, dict):
-            return
-
-        target_ids = set(self.queue_panel.selected_job_ids() if checked_only else self.queue_panel.selected_row_job_ids())
-        if not target_ids:
-            QMessageBox.information(self, "Preset", "Select queue rows (or check Run) before applying a preset.")
-            return
-
-        p = str(entry.get("path", "")).strip()
-        if not p:
-            return
-        preset_dict: dict | None = None
-        try:
-            preset_dict = json.loads(Path(p).read_text())
-        except Exception as exc:
-            QMessageBox.warning(self, "Preset", f"Failed to read preset: {exc}")
-            return
-
-        def coerce(field: str, value, fallback):
-            try:
-                if isinstance(fallback, bool):
-                    return bool(value)
-                if isinstance(fallback, int):
-                    return int(str(value))
-                if isinstance(fallback, float):
-                    return float(str(value))
-                return str(value)
-            except Exception:
-                return fallback
-
-        ro_fields = RenderOptions.__dataclass_fields__
-        for j in self._jobs:
-            if j.id not in target_ids:
-                continue
-            opts = j.render_options or self.render_panel.render_options()
-            # Apply every render-recipe field present in the preset (robust).
-            kwargs = {}
-            for k in ro_fields:
-                if k in preset_dict:
-                    kwargs[k] = coerce(k, preset_dict[k], getattr(opts, k))
-            j.render_options = dataclasses.replace(opts, **kwargs)
-            if "output_profile" in preset_dict and str(preset_dict["output_profile"]).strip():
-                j.output_profile = str(preset_dict["output_profile"]).strip()
-
-        if self._active_job_id is not None:
-            self._on_queue_job_selected(self._active_job_id)
-        self._refresh_job_outputs()
-        self._refresh_queue_view()
-        self._schedule_save()
 
     def _delete_preset_path(self, preset_path: str) -> None:
         p = Path(preset_path)
@@ -3825,13 +3727,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin):
         except Exception as exc:
             QMessageBox.warning(self, "Delete Failed", str(exc))
 
-    def _refresh_preset_browser(self) -> None:
-        try:
-            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
-            presets = sorted(PRESETS_DIR.glob(f"*{PRESET_EXT}"), key=lambda x: x.stem.lower())
-        except Exception:
-            presets = []
-        self.presets_panel.set_presets(presets)
 
     def _open_presets_folder(self) -> None:
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
