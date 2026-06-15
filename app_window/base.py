@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
     from core.models import RenderJob
     from panels import DeadlinePanel, PresetBrowserPanel, QueuePanel, RenderPanel, ScenePanel
+    from theme import Palette
+    from workers import DeadlineQueryThread
 
     # For typing, mixins ARE a QWidget (the concrete window is a QMainWindow), so
     # `QMessageBox(self, …)` type-checks. At runtime the base is plain ``object``
@@ -38,6 +40,10 @@ class _WindowMembers(_Base):
         _deadline_command_path: str
         _deadline_comment: str
         _deadline_job_name_template: str
+        _deadline_test_thread: DeadlineQueryThread | None
+        _farm_nodes_thread: DeadlineQueryThread | None
+        _blender_path: str
+        _palette: Palette
         scene_panel: ScenePanel
         render_panel: RenderPanel
         deadline_panel: DeadlinePanel
@@ -50,6 +56,7 @@ class _WindowMembers(_Base):
         def _refresh_job_outputs(self) -> None: ...                  # QueueMixin
         def _refresh_queue_view(self) -> None: ...                   # QueueMixin
         def _show_toast(self, message: str, kind: str = ...) -> None: ...
+        def _show_properties_dialog(self, initial_tab: str | None = ...) -> None: ...
         def _schedule_save(self) -> None: ...
         def _push_undo(self, desc: str, restore) -> None: ...
         def _update_health(self) -> None: ...
