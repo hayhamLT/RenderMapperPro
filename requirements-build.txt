@@ -1,7 +1,7 @@
 # Dependencies needed to BUILD the standalone Qt app (CI uses this).
 # Pinned exactly so every CI build is reproducible — bump deliberately.
 PySide6==6.11.1
-pyinstaller==6.20.0
+pyinstaller==6.21.0
 # Web render backend (headless three.js). The pin fixes the bundled Chromium
 # revision; the browser itself is downloaded on demand, not bundled.
 playwright==1.60.0
