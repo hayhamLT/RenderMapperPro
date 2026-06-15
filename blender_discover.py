@@ -65,7 +65,7 @@ def discover_settings() -> dict:
         r = scene.render
         # Effective fps (accounts for NTSC bases like 23.976 → fps 24 / base 1.001).
         base = getattr(r, "fps_base", 1.0) or 1.0
-        s["fps"] = int(round(r.fps / base))
+        s["fps"] = round(r.fps / base)
         s["frame_start"] = int(scene.frame_start)
         s["frame_end"] = int(scene.frame_end)
         s["frame_step"] = int(getattr(scene, "frame_step", 1))

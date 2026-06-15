@@ -55,7 +55,7 @@ class MappingStripeDelegate(QStyledItemDelegate):
     def _item_key(self, index):
         if self._kind == "video":
             return index.data(ROLE_VIDEO_PATH)
-        return index.data(Qt.DisplayRole)
+        return index.data(Qt.ItemDataRole.DisplayRole)
 
     def _paint_cross_highlight(self, painter, option, index) -> None:
         panel = self._panel
@@ -200,10 +200,7 @@ class AudioBadgeDelegate(MappingStripeDelegate):
                 painter.setBrush(chip)
                 painter.drawRoundedRect(badge_r.adjusted(-3, -2, 3, 2), 5, 5)
                 painter.restore()
-            if muted:
-                color = pal.text_muted if hovered else pal.text_faint
-            else:
-                color = pal.accent
+            color = (pal.text_muted if hovered else pal.text_faint) if muted else pal.accent
             pm = icons.pixmap("volume_x" if muted else "volume", color, _AUDIO_BADGE_PX)
             painter.drawPixmap(badge_r.topLeft(), pm)
 
@@ -274,9 +271,9 @@ class VideoListWidget(QListWidget):
             return
         new_path = None
         idx = self.indexAt(pos)
-        if idx.isValid() and bool(idx.data(ROLE_HAS_AUDIO)):
-            if AudioBadgeDelegate._badge_rect(self.visualRect(idx)).contains(pos):
-                new_path = idx.data(ROLE_VIDEO_PATH)
+        if (idx.isValid() and bool(idx.data(ROLE_HAS_AUDIO))
+                and AudioBadgeDelegate._badge_rect(self.visualRect(idx)).contains(pos)):
+            new_path = idx.data(ROLE_VIDEO_PATH)
         if new_path != deleg._hover_badge:
             deleg._hover_badge = new_path
             self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if new_path else Qt.CursorShape.ArrowCursor)
@@ -320,19 +317,19 @@ class VideoListWidget(QListWidget):
             return super().eventFilter(watched, event)
         if watched is vp:
             t = event.type()
-            if t in (QEvent.DragEnter, QEvent.DragMove):
+            if t in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
                 if self._paths_from_event(event):
                     event.acceptProposedAction()
                     return True
-            elif t == QEvent.Drop:
+            elif t == QEvent.Type.Drop:
                 paths = self._paths_from_event(event)
                 if paths:
                     self.files_dropped.emit(paths)
                     event.acceptProposedAction()
                     return True
-            elif t == QEvent.MouseMove:
+            elif t == QEvent.Type.MouseMove:
                 self._update_badge_hover(event.position().toPoint())
-            elif t == QEvent.Leave:
+            elif t == QEvent.Type.Leave:
                 self._update_badge_hover(QPoint(-1, -1))
         return super().eventFilter(watched, event)
 

@@ -13,6 +13,7 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 from PySide6.QtCore import (
     QByteArray,
@@ -897,8 +898,8 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         def centered(w):
-            w.setAlignment(Qt.AlignCenter)
-            lay.addWidget(w, 0, Qt.AlignHCenter)
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(w, 0, Qt.AlignmentFlag.AlignHCenter)
             return w
 
         lay.addWidget(_ImageView(_make_app_icon().pixmap(QSize(92, 92)), pal.window),
@@ -1425,7 +1426,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._show_toast("Could not restore layout", "warning")
 
     def event(self, e):  # type: ignore[override]
-        if e.type() == QEvent.LayoutRequest:
+        if e.type() == QEvent.Type.LayoutRequest:
             self._schedule_save()
         return super().event(e)
 
@@ -2007,7 +2008,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 dp.dl_pool_combo.clear()
                 dp.dl_sec_pool_combo.clear()
                 dp.dl_pool_combo.addItems(pools)
-                dp.dl_sec_pool_combo.addItems([""] + pools)
+                dp.dl_sec_pool_combo.addItems(["", *pools])
                 if current_pool:
                     dp.dl_pool_combo.setCurrentText(current_pool)
                 if current_sec_pool:
@@ -2016,7 +2017,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 groups = res.get("groups", [])
                 current_group = dp.dl_group_combo.currentText()
                 dp.dl_group_combo.clear()
-                dp.dl_group_combo.addItems([""] + groups)
+                dp.dl_group_combo.addItems(["", *groups])
                 if current_group:
                     dp.dl_group_combo.setCurrentText(current_group)
 
@@ -2203,7 +2204,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
     # ── Updates (automatic: checks GitHub Releases with a baked-in read-only
     #    token, so a private repo updates with zero per-machine config) ────────
-    _ASSET_FOR_PLATFORM = {
+    _ASSET_FOR_PLATFORM: ClassVar = {
         "macos-arm64": "RenderMapperPro-macOS-arm64.zip",
         "macos-intel": "RenderMapperPro-macOS-intel.zip",
         "windows-x64": "RenderMapperPro-Windows-x64.zip",
@@ -3033,9 +3034,7 @@ class BlenderVideoMapperQt(QMainWindow):
             return None
         p = Path(job.output_path).expanduser()
         if not p.exists():
-            p = p if p.suffix else p
-            if not p.exists():
-                return None
+            return None
         return p
 
     @staticmethod
@@ -4275,7 +4274,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         # Down-arrow from the search box drops focus into the result list.
         def on_search_key(event):  # type: ignore[no-untyped-def]
-            if event.key() in (Qt.Key_Down, Qt.Key_Up) and lst.count():
+            if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up) and lst.count():
                 lst.setFocus()
                 return
             QLineEdit.keyPressEvent(search, event)
@@ -4613,7 +4612,7 @@ class BlenderVideoMapperQt(QMainWindow):
         dp.dl_pool_combo.clear()
         dp.dl_pool_combo.addItems(pools)
         dp.dl_sec_pool_combo.clear()
-        dp.dl_sec_pool_combo.addItems([""] + pools)
+        dp.dl_sec_pool_combo.addItems(["", *pools])
         if current_pool:
             dp.dl_pool_combo.setCurrentText(current_pool)
         if current_sec:
@@ -4621,7 +4620,7 @@ class BlenderVideoMapperQt(QMainWindow):
         if groups:
             current_group = dp.dl_group_combo.currentText()
             dp.dl_group_combo.clear()
-            dp.dl_group_combo.addItems([""] + groups)
+            dp.dl_group_combo.addItems(["", *groups])
             if current_group:
                 dp.dl_group_combo.setCurrentText(current_group)
         if machines:
@@ -5003,7 +5002,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self.deadline_panel.dl_pool_combo.clear()
             self.deadline_panel.dl_pool_combo.addItems(pools)
             self.deadline_panel.dl_sec_pool_combo.clear()
-            self.deadline_panel.dl_sec_pool_combo.addItems([""] + pools)
+            self.deadline_panel.dl_sec_pool_combo.addItems(["", *pools])
 
         groups = d.get("deadline_available_groups", [])
         if groups:
@@ -5462,15 +5461,15 @@ def _install_crash_handler(window) -> None:
         showing["active"] = True
         try:
             box = QMessageBox(window)
-            box.setIcon(QMessageBox.Critical)
+            box.setIcon(QMessageBox.Icon.Critical)
             box.setWindowTitle(f"{APP_NAME} — Unexpected Error")
             box.setText("Something went wrong. The app will keep running, but the last "
                         "action may not have completed.")
             box.setInformativeText(f"{exc_type.__name__}: {exc}")
             box.setDetailedText(text)
-            copy_btn = box.addButton("Copy Details", QMessageBox.ActionRole)
-            log_btn = box.addButton("Open Log", QMessageBox.ActionRole)
-            box.addButton(QMessageBox.Close)
+            copy_btn = box.addButton("Copy Details", QMessageBox.ButtonRole.ActionRole)
+            log_btn = box.addButton("Open Log", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Close)
             box.exec()
             clicked = box.clickedButton()
             if clicked is copy_btn:

@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
@@ -164,7 +165,7 @@ class ScenePanel(QWidget):
     def eventFilter(self, obj, event):  # type: ignore[override]
         # Clear the hovered row when the cursor leaves a list, so the
         # cross-highlight falls back to the selection.
-        if event.type() == QEvent.Leave:
+        if event.type() == QEvent.Type.Leave:
             if obj is self.mat_list.viewport() and self._hover_material is not None:
                 self._hover_material = None
                 self._recompute_cross_highlight()
@@ -458,10 +459,7 @@ class ScenePanel(QWidget):
         if p.startswith("file://"):
             q = QUrl(p)
             local = q.toLocalFile()
-            if local:
-                p = local
-            else:
-                p = p[7:]
+            p = local or p[7:]
         elif "://" in p:
             q = QUrl(p)
             local = q.toLocalFile()
@@ -901,7 +899,7 @@ class ScenePanel(QWidget):
         normalized = [str(c).strip() for c in cameras if str(c).strip()]
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
-        self.camera_combo.addItems([""] + normalized)
+        self.camera_combo.addItems(["", *normalized])
         if selected:
             idx = self.camera_combo.findText(selected)
             if idx >= 0:
@@ -1322,7 +1320,7 @@ class RenderPanel(QWidget):
         self.adv_toggle.setText(f"{arrow}  Advanced quality settings")
 
     # Redshift speed/quality presets — each fills the optimization fields.
-    _RS_PRESETS = {
+    _RS_PRESETS: ClassVar = {
         "Draft (fastest)": dict(mx="16", mn="1", thr="0.3", gib="1", depth="3", gi=False),
         "Balanced":        dict(mx="64", mn="4", thr="0.02", gib="3", depth="6", gi=True),
         "High":            dict(mx="128", mn="8", thr="0.01", gib="3", depth="8", gi=True),
@@ -1354,8 +1352,8 @@ class RenderPanel(QWidget):
 
     # Friendly renderer names in the UI; the enum value Blender/C4D expects is
     # carried as itemData so configs/profiles keep the real identifier.
-    ENGINE_LABELS = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
-                     "WEB_THREEJS": "three.js (WebGPU)"}
+    ENGINE_LABELS: ClassVar = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
+                               "WEB_THREEJS": "three.js (WebGPU)"}
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()
@@ -1628,7 +1626,7 @@ class RenderPanel(QWidget):
                  "flat": "Flat", "none": "None"}.get(str(d["web_lighting_preset"]), "Auto"))
         if "web_lighting_intensity" in d:
             try:
-                self.web_light_intensity_slider.setValue(int(round(float(d["web_lighting_intensity"]) * 100)))
+                self.web_light_intensity_slider.setValue(round(float(d["web_lighting_intensity"]) * 100))
             except Exception:
                 pass
         if "web_respect_scene_lights" in d:

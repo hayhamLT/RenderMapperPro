@@ -25,9 +25,6 @@ REC709_FASTSTART_ARGS = [
 ]
 
 
-# Modifier-key glyph for shortcut hints in menu/button text: Cmd on macOS,
-# "Ctrl+" elsewhere. Qt itself maps QKeySequence("Ctrl+D") to the right key
-# per platform; this is only for the human-readable label.
 def _ffmpeg_platform_dir() -> str:
     """Vendor sub-directory name for the running platform, e.g. 'darwin-arm64'."""
     sysn = "linux" if sys.platform.startswith("linux") else sys.platform  # darwin|win32|linux
@@ -317,7 +314,7 @@ def _parse_mp4_info(path: str) -> tuple[int, float] | None:
                 # Fallback: duration × fps
                 dur = float(s.get("duration", 0) or 0)
                 if dur > 0 and fps > 0:
-                    return int(round(dur * fps)), fps
+                    return round(dur * fps), fps
         except Exception:
             pass  # Fall through to hand-rolled parser
 
@@ -397,10 +394,10 @@ def _normalize_fps(raw: float | None, default: int = 30) -> int:
         return default
     nearest = min(_STANDARD_FPS, key=lambda s: abs(s - raw))
     if abs(nearest - raw) <= max(0.6, nearest * 0.02):
-        return int(round(nearest))
+        return round(nearest)
     # Plausible but non-standard integer rate (e.g. 12, 15) — keep it.
     if 1 <= raw <= 120 and abs(raw - round(raw)) <= 0.05:
-        return int(round(raw))
+        return round(raw)
     return default
 
 
