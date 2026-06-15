@@ -2,7 +2,7 @@
 (The render itself needs Playwright + Chromium and is verified separately via
 prototypes/web_render/verify_backend.py.)"""
 from core.models import JobConfig, MaterialVideoAssignment, RenderOptions
-from core.web_render import _clip_mappings, _is_software_renderer, is_web_scene
+from core.web_render import _clip_frame_index, _clip_mappings, _is_software_renderer, is_web_scene
 
 
 def _opts():
@@ -33,6 +33,17 @@ def test_clip_mappings_fallback_to_target():
 def test_clip_mappings_empty():
     job = JobConfig("s.glb", "", "", "", "out.mp4", _opts())
     assert _clip_mappings(job) == []
+
+
+def test_clip_frame_index_clamps():
+    # 24-frame clip, timeline starts at frame 1, no offset.
+    assert _clip_frame_index(1, 1, 0, 24) == 0       # first frame
+    assert _clip_frame_index(12, 1, 0, 24) == 11     # mid
+    assert _clip_frame_index(24, 1, 0, 24) == 23     # last
+    assert _clip_frame_index(100, 1, 0, 24) == 23    # past end → hold last
+    assert _clip_frame_index(-5, 1, 0, 24) == 0      # before start → hold first
+    # preview offset (extraction started at the preview frame).
+    assert _clip_frame_index(1050, 1, 1049, 1) == 0  # single-frame preview
 
 
 def test_is_software_renderer():

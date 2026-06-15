@@ -242,6 +242,14 @@ def _clip_mappings(job: JobConfig) -> list[tuple[str, str]]:
     return out
 
 
+def _clip_frame_index(frame: int, frame_start: int, clip_offset: int, n_frames: int) -> int:
+    """Index into the extracted clip frames for a timeline ``frame``, clamped to
+    [0, n-1] so frames before the clip hold frame 0 and frames past the clip end
+    hold the last frame."""
+    ci = (frame - frame_start) - clip_offset
+    return min(max(0, ci), n_frames - 1)
+
+
 def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                 should_cancel: CancelCheck | None = None) -> int:
     """Render a .glb/.gltf job with headless three.js. Returns 0 on success."""
@@ -343,8 +351,7 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                     frames = clip_frames.get(vp) or []
                     if not frames:
                         continue
-                    ci = (frame - fs) - clip_offset.get(vp, 0)   # index into the extracted list
-                    ci = min(max(0, ci), len(frames) - 1)        # hold last frame past clip end
+                    ci = _clip_frame_index(frame, fs, clip_offset.get(vp, 0), len(frames))
                     data = base64.b64encode(frames[ci].read_bytes()).decode("ascii")
                     page.evaluate("([m, d]) => window.api.setEmissive(m, d)",
                                   [mn, f"data:image/png;base64,{data}"])
