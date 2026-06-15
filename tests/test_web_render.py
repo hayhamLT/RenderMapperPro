@@ -2,7 +2,7 @@
 (The render itself needs Playwright + Chromium and is verified separately via
 prototypes/web_render/verify_backend.py.)"""
 from core.models import JobConfig, MaterialVideoAssignment, RenderOptions
-from core.web_render import _clip_mappings, is_web_scene
+from core.web_render import _clip_mappings, _is_software_renderer, is_web_scene
 
 
 def _opts():
@@ -33,3 +33,14 @@ def test_clip_mappings_fallback_to_target():
 def test_clip_mappings_empty():
     job = JobConfig("s.glb", "", "", "", "out.mp4", _opts())
     assert _clip_mappings(job) == []
+
+
+def test_is_software_renderer():
+    # Real GPU strings → not software (use the GPU launch).
+    assert not _is_software_renderer("ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Max)")
+    assert not _is_software_renderer("Apple M1")
+    # SwiftShader / software / empty → software (trigger the fallback).
+    assert _is_software_renderer("ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device))")
+    assert _is_software_renderer("Google SwiftShader")
+    assert _is_software_renderer("llvmpipe (software)")
+    assert _is_software_renderer("")

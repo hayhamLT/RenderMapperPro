@@ -37,9 +37,35 @@ WEB_SCENE_EXTS = (".glb", ".gltf")
 WEB_RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "browsers"
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(WEB_RUNTIME_ROOT)
 
-# --enable-unsafe-swiftshader: allow Chrome's software WebGL fallback so the
-# backend renders on GPU-less/headless machines (a real GPU is used when present).
-_CHROME_ARGS = ["--enable-unsafe-swiftshader"]
+# Prefer the real GPU. Plain headless Chrome force-disables the GPU process and
+# lands on SwiftShader (software). Running the FULL chromium in "new headless"
+# (headless=False + --headless=new — the full build, windowless) lets ANGLE bind
+# the platform GPU (Metal on macOS). The extra flags are defensive: Chrome binds
+# the GPU on its own here, but they guard against driver blocklisting.
+_GPU_LAUNCH = {"headless": False,
+               "args": ["--headless=new", "--ignore-gpu-blocklist", "--use-angle=metal"]}
+# Deliberate software fallback for GPU-less / no-GUI-session / blocklisted machines.
+# Chrome 137+ dropped the automatic SwiftShader fallback, so it must be explicit.
+_SOFTWARE_LAUNCH = {"headless": False,
+                    "args": ["--headless=new", "--enable-unsafe-swiftshader",
+                             "--use-angle=swiftshader"]}
+
+# Reads the true GL device string; "SwiftShader"/"software"/empty ⇒ no real GPU.
+_GL_PROBE_JS = """() => {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (!gl) return '';
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return (ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)
+                : gl.getParameter(gl.RENDERER)) || '';
+  } catch (e) { return ''; }
+}"""
+
+
+def _is_software_renderer(s: str) -> bool:
+    s = (s or "").lower()
+    return (not s) or ("swiftshader" in s) or ("software" in s)
 
 _PLAYWRIGHT_HINT = (
     "The web (three.js) backend needs Playwright. Install it with:\n"
@@ -48,22 +74,23 @@ _PLAYWRIGHT_HINT = (
 
 
 def web_chromium_installed() -> bool:
-    """True if the headless Chromium shell is present in the managed dir.
+    """True if the FULL Chromium build is present in the managed dir.
 
-    Globs the shell dir rather than using ``executable_path`` — the latter
-    returns a path even when nothing is installed, and a default headless launch
-    resolves to the *headless shell*, not full Chromium."""
-    return any(WEB_RUNTIME_ROOT.glob("chromium_headless_shell-*"))
+    Globs ``chromium-*`` (not ``chromium_headless_shell-*``): only the full build
+    carries the GPU/ANGLE stack, so the headless shell — which is locked to
+    SwiftShader — does not count as installed for this GPU-capable backend."""
+    return any(WEB_RUNTIME_ROOT.glob("chromium-[0-9]*"))
 
 
 def ensure_web_chromium(on_log: LogCallback | None = None,
                         should_cancel: CancelCheck | None = None) -> None:
-    """Download the headless Chromium shell into ``WEB_RUNTIME_ROOT`` if missing.
+    """Download the full Chromium build into ``WEB_RUNTIME_ROOT`` if missing.
 
     Frozen-safe: shells out to Playwright's bundled node + cli.js (resolved via
     ``compute_driver_executable``), NOT ``python -m playwright`` (there is no
-    python in a frozen .app). ``--only-shell`` fetches just the ~190 MB headless
-    shell. Progress (a ``\\r``-delimited percent bar) streams to ``on_log``."""
+    python in a frozen .app). ``--no-shell`` fetches the full ~170 MB GPU-capable
+    Chromium (NOT the SwiftShader-only headless shell, which can't reach the GPU).
+    Progress (a ``\\r``-delimited percent bar) streams to ``on_log``."""
     if web_chromium_installed():
         return
     log = on_log or (lambda *_: None)
@@ -78,9 +105,9 @@ def ensure_web_chromium(on_log: LogCallback | None = None,
     for k in ("HTTPS_PROXY", "HTTP_PROXY", "PLAYWRIGHT_DOWNLOAD_HOST"):
         if os.environ.get(k):
             env[k] = os.environ[k]
-    log("[web] Downloading the web render runtime (headless Chromium, ~190 MB, one time)…")
+    log("[web] Downloading the web render runtime (GPU-capable Chromium, ~170 MB, one time)…")
     proc = subprocess.Popen(
-        [str(node), str(cli), "install", "--only-shell", "chromium"],
+        [str(node), str(cli), "install", "--no-shell", "chromium"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
         creationflags=subprocess_creation_flags())
     pat = re.compile(rb"(\d{1,3})%")
@@ -142,16 +169,44 @@ def _load_args(glb: Path) -> list:
     return [base64.b64encode(glb.read_bytes()).decode("ascii"), glb.suffix.lower() == ".glb"]
 
 
-def _launch(pw, viewport_w: int, viewport_h: int):
-    browser = pw.chromium.launch(headless=True, args=_CHROME_ARGS)
-    page = browser.new_page(viewport={"width": viewport_w, "height": viewport_h})
-    page.goto(_resolve_scene_html().as_uri())
-    page.wait_for_function("window.__ready === true || window.__error !== ''", timeout=60000)
-    err = page.evaluate("window.__error")
-    if err:
-        browser.close()
-        raise RuntimeError(f"web scene page failed to initialize: {err}")
-    return browser, page
+def _launch(pw, viewport_w: int, viewport_h: int, on_log: LogCallback | None = None):
+    """Launch the scene page on the GPU when possible, else fall back to software.
+
+    Tries the full chromium in new-headless (GPU-capable) first and verifies via
+    UNMASKED_RENDERER that a real GPU bound; if it silently lands on SwiftShader
+    (GPU-less box, no logged-in GUI session, blocklisted driver) it relaunches in
+    explicit software mode. Returns (browser, page); logs the chosen backend."""
+    log = on_log or (lambda *_: None)
+    last_exc: Exception | None = None
+    for mode, cfg in (("gpu", _GPU_LAUNCH), ("software", _SOFTWARE_LAUNCH)):
+        try:
+            browser = pw.chromium.launch(**cfg)
+        except Exception as exc:   # full build missing / launch failure
+            last_exc = exc
+            continue
+        try:
+            page = browser.new_page(viewport={"width": viewport_w, "height": viewport_h})
+            page.goto(_resolve_scene_html().as_uri())
+            page.wait_for_function("window.__ready === true || window.__error !== ''", timeout=60000)
+            err = page.evaluate("window.__error")
+            if err:
+                raise RuntimeError(f"web scene page failed to initialize: {err}")
+            renderer = str(page.evaluate(_GL_PROBE_JS) or "")
+            if mode == "gpu" and _is_software_renderer(renderer):
+                browser.close()        # GPU path fell back to software — try explicit software
+                continue
+            if _is_software_renderer(renderer):
+                log("[web] GPU unavailable — rendering in software (SwiftShader, slow)")
+            else:
+                log(f"[web] GPU active — {renderer}")
+            return browser, page
+        except Exception as exc:
+            last_exc = exc
+            try:
+                browser.close()
+            except Exception:
+                pass
+    raise RuntimeError(f"web scene failed to launch: {last_exc}")
 
 
 def discover_web_scene(scene_path, on_log: LogCallback | None = None):
@@ -168,7 +223,7 @@ def discover_web_scene(scene_path, on_log: LogCallback | None = None):
         on_log(f"[web] Scanning {glb.name} via headless three.js…")
     ensure_web_chromium(on_log)
     with sync_playwright() as pw:
-        browser, page = _launch(pw, 96, 96)
+        browser, page = _launch(pw, 96, 96, on_log)
         try:
             page.evaluate("([w, h]) => window.api.init(w, h)", [64, 64])
             info = page.evaluate("([b, bin]) => window.api.loadGLB(b, bin)", _load_args(glb))
@@ -258,7 +313,7 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     # 2) Render.
     log(f"[web] Rendering {total} frame(s) at {width}x{height} via headless three.js…")
     with sync_playwright() as pw:
-        browser, page = _launch(pw, width + 40, height + 40)
+        browser, page = _launch(pw, width + 40, height + 40, log)
         try:
             backend = page.evaluate("([w, h]) => window.api.init(w, h)", [width, height])
             log(f"[web] renderer backend: {backend}")
