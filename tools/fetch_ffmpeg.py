@@ -42,7 +42,7 @@ def platform_dir() -> str:
 def download(url: str, dest: Path) -> None:
     print(f"  fetching {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "fetch-ffmpeg"})
-    with urllib.request.urlopen(req) as resp, open(dest, "wb") as fh:  # noqa: S310
+    with urllib.request.urlopen(req) as resp, open(dest, "wb") as fh:
         while chunk := resp.read(1 << 20):
             fh.write(chunk)
 
@@ -62,7 +62,7 @@ def main() -> int:
         url = f"{BASE}/{tool}-{platdir}"
         try:
             download(url, dest)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"WARNING: could not download {tool} ({url}): {exc}", file=sys.stderr)
             dest.unlink(missing_ok=True)
             failures += 1

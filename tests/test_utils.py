@@ -1,11 +1,14 @@
 import os
 import re
+import subprocess
+import sys
 
 from core.utils import (
     expand_output_tokens,
     ext_for_format,
     resolve_output_path,
     slugify_filename,
+    terminate_process,
 )
 
 
@@ -60,3 +63,20 @@ def test_resolve_output_png_is_directory(tmp_path):
         is_batch=False, output_format="PNG",
     )
     assert os.path.isdir(out)
+
+
+def test_terminate_process_escalates_to_kill():
+    # A child that ignores SIGTERM must still be stopped (via SIGKILL) promptly.
+    code = ("import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "time.sleep(60)\n")
+    p = subprocess.Popen([sys.executable, "-c", code])
+    terminate_process(p, grace=2.0)
+    assert p.poll() is not None   # actually dead, not orphaned
+
+
+def test_terminate_process_already_exited_is_noop():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    terminate_process(p)          # must not raise on an already-dead process
+    assert p.poll() is not None

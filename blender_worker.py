@@ -740,6 +740,7 @@ def main() -> None:
             actual_output_path = temp_dir / original_output_path.name
         else:
             actual_output_path = temp_dir / "render_output"
+            actual_output_path.mkdir(parents=True, exist_ok=True)  # match the setup block
     else:
         actual_output_path = original_output_path
 

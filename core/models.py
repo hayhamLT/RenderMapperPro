@@ -1,9 +1,47 @@
 from __future__ import annotations
 
+import enum
 from dataclasses import asdict, dataclass, field
 
 VIDEO_MAPPING_MODE_EMISSION = "EMISSION_FULL_BRIGHT"
 VIDEO_MAPPING_MODE_BASE_COLOR = "BASE_COLOR_ALPHA"
+
+WEB_SCENE_EXTS = (".glb", ".gltf")
+C4D_SCENE_EXTS = (".c4d",)
+BLENDER_SCENE_EXTS = (".blend",)
+
+
+class SceneBackend(enum.StrEnum):
+    """Which render backend a scene file dispatches to (chosen by extension).
+    The single source of truth for scene-type classification across the app."""
+
+    BLENDER = "blender"
+    C4D = "c4d"
+    WEB = "web"
+
+
+def scene_backend(scene_path: str) -> SceneBackend:
+    """Classify a scene path by extension → the backend that renders it.
+    Unknown extensions fall back to Blender (which imports many formats)."""
+    p = str(scene_path).lower()
+    if p.endswith(WEB_SCENE_EXTS):
+        return SceneBackend.WEB
+    if p.endswith(C4D_SCENE_EXTS):
+        return SceneBackend.C4D
+    return SceneBackend.BLENDER
+
+
+def is_web_scene(scene_path: str) -> bool:
+    return scene_backend(scene_path) is SceneBackend.WEB
+
+
+def is_c4d_scene(scene_path: str) -> bool:
+    return scene_backend(scene_path) is SceneBackend.C4D
+
+
+def is_blender_scene(scene_path: str) -> bool:
+    """True only for a native ``.blend`` (opened directly), not the fallback."""
+    return str(scene_path).lower().endswith(BLENDER_SCENE_EXTS)
 
 
 @dataclass
@@ -38,6 +76,10 @@ class RenderOptions:
     rs_gi_enabled: bool = True           # global illumination on/off (off is much faster)
     rs_gi_bounces: int = 3               # GI bounce count — fewer = faster
     rs_ray_depth: int = 6                # combined max trace depth — fewer = faster
+    # Web / three.js scene lighting (honoured only on the .glb/.gltf web path)
+    web_lighting_preset: str = "auto"        # auto | studio | outdoor | flat | none
+    web_lighting_intensity: float = 1.0      # 0.0–2.0 dimmer on env + light rig
+    web_respect_scene_lights: bool = True    # skip the rig if the .glb ships its own lights
 
 
 @dataclass

@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>html, body { margin: 0; background: #000; overflow: hidden; }</style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+let renderer, scene, camera, envMap = null;
+let sceneHasLights = false;            // set in loadGLB by the o.isLight pass
+let lightRig = null;                   // reusable THREE.Group; rebuilt per setLighting
+const materialsByName = {};
+const camerasByName = {};
+
+window.__ready = false;
+window.__error = '';
+
+const api = {
+  async init(w, h) {
+    renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(1);
+    renderer.setSize(w, h);
+    renderer.setClearColor(0x000000, 1);
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+    // Neutral PBR tone-map for lit geometry; emissive screens set toneMapped=false
+    // so they bypass this curve and stay full-bright. Bake a neutral studio IBL
+    // once (reused every frame). Guarded so a PMREM failure never blocks readiness
+    // or renders black — setLighting's HemisphereLight floor carries the ambient.
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    try {
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      pmrem.dispose();
+    } catch (e) {
+      envMap = null;
+    }
+    return (renderer.backend && renderer.backend.isWebGPUBackend) ? 'webgpu' : 'webgl2';
+  },
+
+  async loadGLB(b64, isBinary) {
+    // Parse from bytes (passed in) rather than fetching a file:// URL, which a
+    // file:// page can't do. .glb is binary; .gltf is JSON text.
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const loader = new GLTFLoader();
+    const gltf = await new Promise((resolve, reject) => {
+      if (isBinary) loader.parse(bytes.buffer, '', resolve, reject);
+      else loader.parse(new TextDecoder().decode(bytes), '', resolve, reject);
+    });
+    scene = gltf.scene;
+    sceneHasLights = false;
+    scene.traverse((o) => {
+      if (o.isMesh && o.material) {
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          if (m.name) materialsByName[m.name] = m;
+        }
+      }
+      if (o.isCamera && o.name) camerasByName[o.name] = o;
+      if (o.isLight) sceneHasLights = true;
+    });
+    (gltf.cameras || []).forEach((c) => { if (c.name) camerasByName[c.name] = c; });
+    return { materials: Object.keys(materialsByName), cameras: Object.keys(camerasByName) };
+  },
+
+  // Universal lighting so a .glb with no lights still renders (today: black).
+  // cfg = { preset: auto|studio|outdoor|flat|none, intensity: 0..2, respectSceneLights: bool }.
+  // Emissive screen materials are unaffected in every branch: their value is
+  // emissiveMap×emissive(white) (additive, independent of lights/IBL) and
+  // toneMapped=false exempts them from the tone-map curve.
+  setLighting(cfg) {
+    cfg = cfg || {};
+    const preset = String(cfg.preset || 'auto').toLowerCase();
+    const k = (typeof cfg.intensity === 'number' && isFinite(cfg.intensity))
+      ? Math.min(Math.max(cfg.intensity, 0), 4) : 1.0;
+    const respect = (cfg.respectSceneLights !== false);   // default true
+    if (!scene) return { applied: 'no-scene' };
+
+    // Tear down any rig from a previous call (idempotent for preview re-renders).
+    if (lightRig && lightRig.parent) lightRig.parent.remove(lightRig);
+    lightRig = null;
+
+    // 'none' → assign nothing (preserves the exact pre-change output as a baseline).
+    if (preset === 'none') { scene.environment = null; return { applied: 'none' }; }
+
+    // RESPECT author lighting: gentle IBL fill only, no competing rig.
+    if (respect && sceneHasLights) {
+      scene.environment = envMap || null;
+      if (envMap) scene.environmentIntensity = Math.min(0.25 * k, 0.4);
+      const rig = new THREE.Group(); rig.name = '__lightRig'; lightRig = rig;
+      if (!envMap) rig.add(new THREE.HemisphereLight(0xbfd4ff, 0x404040, 0.15 * k));
+      if (rig.children.length) scene.add(rig);
+      return { applied: 'scene-lights', env: !!envMap };
+    }
+    // respect=false → strip the file's own lights so the preset fully governs.
+    if (sceneHasLights && !respect) {
+      const kill = []; scene.traverse((o) => { if (o.isLight) kill.push(o); });
+      kill.forEach((l) => l.parent && l.parent.remove(l));
+      sceneHasLights = false;
+    }
+
+    // [envI, keyS, fillS, rimS, hemiI, hemiSky, hemiGround, keyColor]
+    const P = {
+      auto:    [1.0, 1.0, 0.0,  0.0,  0.35, 0xbfcad6, 0x3a3a40, 0xffffff],
+      studio:  [0.9, 1.3, 0.5,  0.7,  0.2,  0xffffff, 0x202024, 0xffffff],
+      outdoor: [1.0, 1.5, 0.0,  0.0,  0.7,  0x87b6ff, 0x4a4030, 0xfff4e6],
+      flat:    [1.3, 0.0, 0.0,  0.0,  1.0,  0xffffff, 0xffffff, 0xffffff],
+    };
+    const [envI, keyS, fillS, rimS, hemiI, hemiSky, hemiGround, keyCol] = (P[preset] || P.auto);
+
+    // Bbox → size-invariant light placement + aim (DirectionalLight intensity is
+    // distance-independent, so this only fixes direction/target, never brightness).
+    const box = new THREE.Box3().setFromObject(scene);
+    const center = box.getCenter(new THREE.Vector3());
+    let radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+    if (!isFinite(radius) || radius <= 0) radius = 1;
+    const D = radius * 3;
+
+    const rig = new THREE.Group(); rig.name = '__lightRig'; lightRig = rig;
+    const addDir = (color, s, dx, dy, dz) => {
+      const L = new THREE.DirectionalLight(color, s * k);
+      L.position.copy(center).add(new THREE.Vector3(dx, dy, dz).normalize().multiplyScalar(D));
+      L.target.position.copy(center);
+      rig.add(L); rig.add(L.target);
+    };
+
+    // IBL fill (the universal base). Clamp so a maxed slider can't flood bezels.
+    if (envMap) {
+      scene.environment = envMap;
+      scene.environmentIntensity = Math.min(envI * k, 2.5);
+    } else {
+      scene.environment = null;  // hemisphere floor below carries the ambient
+    }
+
+    // Always-on HemisphereLight floor → scene is never black, even if PMREM failed.
+    if (hemiI > 0) rig.add(new THREE.HemisphereLight(hemiSky, hemiGround, hemiI * k));
+    if (preset === 'flat') rig.add(new THREE.AmbientLight(0xffffff, 0.5 * k));
+    if (keyS  > 0) addDir(keyCol,   keyS,  0.6, 1.0,  0.8);   // key
+    if (fillS > 0) addDir(0xffffff, fillS, -0.8, 0.4, -0.6);  // fill
+    if (rimS  > 0) addDir(0xffffff, rimS,  -0.2, 0.8, -0.9);  // rim
+
+    if (rig.children.length) scene.add(rig);
+    return { applied: preset, env: !!envMap, intensity: k };
+  },
+
+  useCamera(name) {
+    const cw = renderer ? renderer.domElement.width : 640;
+    const ch = renderer ? renderer.domElement.height : 360;
+    if (name && camerasByName[name]) {
+      camera = camerasByName[name];
+    } else {
+      // No camera named → frame the whole scene with a default one.
+      const box = new THREE.Box3().setFromObject(scene);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+      camera = new THREE.PerspectiveCamera(45, cw / ch, maxDim / 1000, maxDim * 100);
+      camera.position.copy(center).add(new THREE.Vector3(0, 0, maxDim * 2.2));
+      camera.lookAt(center);
+    }
+    if (camera.isPerspectiveCamera) {
+      camera.aspect = cw / ch;
+      camera.updateProjectionMatrix();
+    }
+  },
+
+  async setEmissive(materialName, dataUrl) {
+    const m = materialsByName[materialName];
+    if (!m) return false;
+    const img = new Image();
+    await new Promise((res, rej) => {
+      img.onload = res; img.onerror = () => rej(new Error('image decode failed')); img.src = dataUrl;
+    });
+    let tex = m.__videoTex;
+    if (!tex) { tex = new THREE.Texture(); tex.colorSpace = THREE.SRGBColorSpace; m.__videoTex = tex; }
+    tex.image = img; tex.needsUpdate = true;
+    // Full-bright video: emissive map at white, no tone mapping (matches the
+    // "emission full-bright" mapping the Blender/Redshift paths use).
+    m.emissiveMap = tex;
+    if (m.emissive && m.emissive.setRGB) m.emissive.setRGB(1, 1, 1);
+    if ('emissiveIntensity' in m) m.emissiveIntensity = 1.0;
+    m.toneMapped = false;
+    m.needsUpdate = true;
+    return true;
+  },
+
+  async render() {
+    await renderer.renderAsync(scene, camera);
+  },
+};
+
+window.api = api;
+window.__ready = true;
+</script>
+</body>
+</html>

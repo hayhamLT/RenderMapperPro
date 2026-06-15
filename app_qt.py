@@ -8,13 +8,12 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import urllib.request
-import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 from PySide6.QtCore import (
     QByteArray,
@@ -32,7 +31,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDockWidget,
@@ -61,12 +59,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import app_version
 import icons
 import theme as T
+from core.jobs import disk_space_warnings, migrate_profile
 from core.metrics import (
     auto_chunk_size,
     estimate_energy_cost,
-    estimate_output_bytes,
     predict_total_seconds,
 )
 from core.models import (
@@ -75,7 +74,10 @@ from core.models import (
     MaterialVideoAssignment,
     RenderJob,
     RenderOptions,
+    is_c4d_scene,
+    is_web_scene,
 )
+from core.reporting import format_duration, friendly_error_hint
 from core.utils import (
     OUTPUT_PROFILES,
     VIDEO_EXTENSIONS,
@@ -127,7 +129,7 @@ PRESET_EXT = ".rmpreset"     # reusable render-settings recipe
 REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.6.0"
+APP_VERSION: str = app_version.__version__  # single source of truth (see app_version.py)
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
 BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
@@ -328,41 +330,19 @@ class RuntimeInstallThread(QThread):
     finished_install = Signal(str, str)
 
     def _download(self, url: str, dest: Path) -> None:
+        from core.download import download_with_progress
         self.log.emit(f"[runtime] Downloading {url}")
         self.log.emit("[runtime] This is a ~300–700 MB download and can take several minutes.")
-        req = urllib.request.Request(url, headers={"User-Agent": "RenderMapperPro/1.0"})
-        with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:
-            total = int(resp.headers.get("Content-Length", "0") or "0")
-            read = 0
-            last_pct = -5
-            t0 = time.monotonic()
-            mb = 1024 * 1024
-            while True:
-                chunk = resp.read(1024 * 512)
-                if not chunk:
-                    break
-                out.write(chunk)
-                read += len(chunk)
-                if total > 0:
-                    pct = int((read / total) * 100)
-                    if pct >= last_pct + 5:        # 5% steps, not one line per 512 KB
-                        last_pct = pct
-                        elapsed = max(0.001, time.monotonic() - t0)
-                        speed = read / elapsed     # bytes/s
-                        eta = (total - read) / speed if speed > 0 else 0
-                        self.log.emit(
-                            f"[runtime] Download {pct}% — {read // mb}/{total // mb} MB "
-                            f"· {speed / mb:.1f} MB/s · ~{int(eta)}s left")
+        download_with_progress(url, dest, self.log.emit)   # progress/ETA logging in core
 
     def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
+        from core.archive import safe_extract_tar, safe_extract_zip
         name = archive_path.name.lower()
         if name.endswith(".zip"):
-            with zipfile.ZipFile(archive_path, "r") as zf:
-                zf.extractall(staging_dir)
+            safe_extract_zip(archive_path, staging_dir)   # rejects Zip-Slip members
             return
         if name.endswith(".tar.xz"):
-            with tarfile.open(archive_path, "r:xz") as tf:
-                tf.extractall(staging_dir)
+            safe_extract_tar(archive_path, staging_dir)   # 3.12 'data' filter
             return
         if name.endswith(".dmg") and sys.platform == "darwin":
             # Try hdiutil mount/copy; fall back to treating as zip if unavailable
@@ -897,8 +877,8 @@ class BlenderVideoMapperQt(QMainWindow):
         lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         def centered(w):
-            w.setAlignment(Qt.AlignCenter)
-            lay.addWidget(w, 0, Qt.AlignHCenter)
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lay.addWidget(w, 0, Qt.AlignmentFlag.AlignHCenter)
             return w
 
         lay.addWidget(_ImageView(_make_app_icon().pixmap(QSize(92, 92)), pal.window),
@@ -1040,6 +1020,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         self.render_panel.profile_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed(preview=False))
         self.scene_panel.scene_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.scene_panel.scene_edit.textChanged.connect(lambda _v: self._update_renderer_for_scene())
         self.scene_panel.camera_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
 
         self.queue_panel.queue_requested.connect(self._queue_current_jobs)
@@ -1424,7 +1405,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self._show_toast("Could not restore layout", "warning")
 
     def event(self, e):  # type: ignore[override]
-        if e.type() == QEvent.LayoutRequest:
+        if e.type() == QEvent.Type.LayoutRequest:
             self._schedule_save()
         return super().event(e)
 
@@ -1560,523 +1541,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self._test_deadline_connection(interactive=False)
 
     def _show_properties_dialog(self, initial_tab: str | None = None) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Properties & Settings")
-        dlg.setMinimumWidth(720)
-        dlg.setMinimumHeight(460)
-        root = QVBoxLayout(dlg)
-        tabs = QTabWidget()
-        root.addWidget(tabs)
-
-        def section_title(text: str) -> QLabel:
-            lbl = QLabel(text)
-            lbl.setObjectName("DialogSection")
-            return lbl
-
-        def _tab(title: str) -> QVBoxLayout:
-            page = QWidget()
-            v = QVBoxLayout(page)
-            v.setSpacing(10)
-            tabs.addTab(page, title)
-            return v
-
-        def _open_path(target) -> None:
-            target = Path(target)
-            try:
-                target.mkdir(parents=True, exist_ok=True)
-                if sys.platform == "darwin":
-                    subprocess.Popen(["open", str(target)])
-                elif os.name == "nt":
-                    os.startfile(str(target))  # type: ignore[attr-defined]
-                else:
-                    subprocess.Popen(["xdg-open", str(target)])
-            except Exception:
-                pass
-
-        def hint(text: str) -> QLabel:
-            lbl = QLabel(text)
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
-            return lbl
-
-        # ── General ──────────────────────────────────────────────────────
-        lay = _tab("General")
-        lay.addWidget(section_title("WHEN A RENDER FINISHES"))
-        behave_row = QHBoxLayout()
-        behave_row.addWidget(QLabel("Then:"))
-        when_combo = QComboBox()
-        _when_opts = [("Do nothing", "nothing"), ("Quit the app", "quit"), ("Sleep the computer", "sleep")]
-        when_combo.addItems([lbl for lbl, _ in _when_opts])
-        _vals = [v for _, v in _when_opts]
-        when_combo.setCurrentIndex(_vals.index(self._when_done) if self._when_done in _vals else 0)
-        behave_row.addWidget(when_combo)
-        behave_row.addStretch()
-        lay.addLayout(behave_row)
-
-        lay.addWidget(section_title("PREVIEW"))
-        preview_cb = QCheckBox("Show a live frame preview while rendering")
-        preview_cb.setChecked(self._preview_enabled)
-        lay.addWidget(preview_cb)
-        lay.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
-                           "Turn off for a small speed-up on heavy scenes."))
-        lay.addStretch()
-
-        # ── Render Engines ───────────────────────────────────────────────
-        lay = _tab("Render Engines")
-        lay.addWidget(hint("Scenes route to a renderer automatically by type — Blender for "
-                           ".blend / .fbx / .usd / .obj…, and Cinema 4D + Redshift for .c4d."))
-
-        lay.addWidget(section_title("BLENDER"))
-        blender_row = QHBoxLayout()
-        blender_edit = QLineEdit(self._blender_path)
-        blender_edit.setPlaceholderText("Path to the Blender executable")
-        blender_locate = QPushButton("Locate")
-        blender_row.addWidget(QLabel("Executable:"))
-        blender_row.addWidget(blender_edit, 1)
-        blender_row.addWidget(blender_locate)
-        lay.addLayout(blender_row)
-
-        def do_locate_blender() -> None:
-            if sys.platform == "darwin":
-                chosen = QFileDialog.getExistingDirectory(dlg, "Select Blender.app", "/Applications")
-            else:
-                chosen, _ = QFileDialog.getOpenFileName(dlg, "Select Blender executable")
-            if chosen:
-                resolved = _norm_blender(chosen)
-                if resolved:
-                    blender_edit.setText(resolved)
-                else:
-                    QMessageBox.warning(
-                        dlg, "Not a Blender App",
-                        "That location doesn't contain Blender. Pick the Blender app itself "
-                        "(e.g. /Applications/Blender.app) or its executable.")
-        blender_locate.clicked.connect(do_locate_blender)
-
-        detect_row = QHBoxLayout()
-        detect_btn = QPushButton("Auto-detect")
-        detect_btn.setToolTip("Search the usual install locations for Blender")
-        install_btn = QPushButton("Install Managed Blender…")
-        install_btn.setToolTip(f"Download a self-contained Blender {BLENDER_RUNTIME_VERSION} runtime")
-        detect_row.addWidget(detect_btn)
-        detect_row.addWidget(install_btn)
-        detect_row.addStretch()
-        lay.addLayout(detect_row)
-        blender_ver_lbl = hint("")
-        lay.addWidget(blender_ver_lbl)
-
-        def do_check_version() -> None:
-            exe = blender_edit.text().strip()
-            if not exe or not Path(exe).exists():
-                blender_ver_lbl.setText("No valid Blender path set.")
-                return
-            try:
-                out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15)
-                text = (out.stdout or out.stderr).strip()
-                first = text.splitlines()[0] if text else ""
-                blender_ver_lbl.setText(
-                    _blender_version_status(first) if first else "Could not read Blender version.")
-            except Exception as exc:
-                blender_ver_lbl.setText(f"Version check failed: {exc}")
-
-        def do_autodetect() -> None:
-            found = _find_blender(blender_edit.text().strip())
-            if found:
-                blender_edit.setText(found)
-                do_check_version()
-            else:
-                blender_ver_lbl.setText(
-                    "No Blender found in the usual locations. Use “Locate” to pick it "
-                    "manually, or set the BLENDER_PATH environment variable.")
-
-        detect_btn.clicked.connect(do_autodetect)
-        install_btn.clicked.connect(self._install_managed_runtime)
-        blender_edit.editingFinished.connect(do_check_version)
-        do_check_version()
-
-        lay.addWidget(section_title("CINEMA 4D + REDSHIFT"))
-        c4d_row = QHBoxLayout()
-        c4dpy_edit = QLineEdit(self._c4dpy_path)
-        c4dpy_edit.setPlaceholderText("Path to c4dpy (Cinema 4D's headless Python)")
-        c4d_locate = QPushButton("Locate")
-        c4d_row.addWidget(QLabel("c4dpy:"))
-        c4d_row.addWidget(c4dpy_edit, 1)
-        c4d_row.addWidget(c4d_locate)
-        lay.addLayout(c4d_row)
-        c4d_detect_row = QHBoxLayout()
-        c4d_detect_btn = QPushButton("Auto-detect")
-        c4d_detect_btn.setToolTip("Search the usual install locations for Cinema 4D's c4dpy")
-        c4d_detect_row.addWidget(c4d_detect_btn)
-        c4d_detect_row.addStretch()
-        lay.addLayout(c4d_detect_row)
-        c4d_status_lbl = hint("")
-
-        def _c4d_refresh() -> None:
-            p = c4dpy_edit.text().strip()
-            if p and Path(p).exists():
-                c4d_status_lbl.setText(f"✓ Cinema 4D detected — {Path(p).name}")
-            else:
-                c4d_status_lbl.setText("Not set — only needed for Cinema 4D (.c4d) scenes. Redshift renders use this.")
-
-        def do_locate_c4d() -> None:
-            chosen, _ = QFileDialog.getOpenFileName(dlg, "Select c4dpy executable", c4dpy_edit.text() or "")
-            if chosen:
-                c4dpy_edit.setText(chosen)
-                _c4d_refresh()
-
-        def do_detect_c4d() -> None:
-            found = _find_c4dpy()
-            if found:
-                c4dpy_edit.setText(found)
-            _c4d_refresh()
-
-        c4d_locate.clicked.connect(do_locate_c4d)
-        c4d_detect_btn.clicked.connect(do_detect_c4d)
-        c4dpy_edit.editingFinished.connect(_c4d_refresh)
-        lay.addWidget(c4d_status_lbl)
-        _c4d_refresh()
-        lay.addStretch()
-
-        # ── Watch & Auto-render ──────────────────────────────────────────
-        lay = _tab("Watch && Auto-render")
-        lay.addWidget(section_title("WATCH FOLDER"))
-        lay.addWidget(hint("Drop clips into a watch folder and they import + map by name "
-                           "automatically (latest version wins)."))
-        _wi, _ws = self.scene_panel.get_watch_options()
-        watch_row = QHBoxLayout()
-        watch_interval_edit = QLineEdit(f"{_wi / 1000:g}")
-        watch_interval_edit.setFixedWidth(70)
-        watch_interval_edit.setToolTip("How often the watch folder is polled, in seconds.")
-        watch_settle_edit = QLineEdit(f"{_ws:g}")
-        watch_settle_edit.setFixedWidth(70)
-        watch_settle_edit.setToolTip("How long a file's size must stay steady before it's imported "
-                                     "(guards against half-copied files).")
-        watch_row.addWidget(QLabel("Poll interval (s):"))
-        watch_row.addWidget(watch_interval_edit)
-        watch_row.addSpacing(16)
-        watch_row.addWidget(QLabel("Stability window (s):"))
-        watch_row.addWidget(watch_settle_edit)
-        watch_row.addStretch()
-        lay.addLayout(watch_row)
-
-        lay.addWidget(section_title("AUTO-RENDER"))
-        ar_enable_cb = QCheckBox("Auto-render once every render-target screen has a clip")
-        ar_enable_cb.setChecked(self._autorender_enabled)
-        ar_enable_cb.setToolTip("Mark screens as render targets (right-click a material, or click its "
-                                "left stripe). When every target has a clip — or newer versions arrive — "
-                                "a single render covering all targets is queued (debounced).")
-        lay.addWidget(ar_enable_cb)
-        lay.addWidget(hint("Mark targets by right-clicking a material → Set as Render Target, or click the "
-                           "stripe on its left. Linking a clip also targets it. The render waits until "
-                           "every target has a clip."))
-        ar_start_cb = QCheckBox("Start it automatically (otherwise just add it to the queue)")
-        ar_start_cb.setChecked(self._autorender_start)
-        lay.addWidget(ar_start_cb)
-        ar_out_row = QHBoxLayout()
-        ar_out_edit = QLineEdit(self._autorender_output)
-        ar_out_edit.setPlaceholderText("Output folder (blank = a PREVIZ subfolder of the watch folder)")
-        ar_out_browse = QPushButton("Browse")
-        def _pick_ar_out() -> None:
-            d = QFileDialog.getExistingDirectory(dlg, "Auto-render output folder", ar_out_edit.text() or str(Path.home()))
-            if d:
-                ar_out_edit.setText(d)
-        ar_out_browse.clicked.connect(_pick_ar_out)
-        ar_out_row.addWidget(QLabel("Output:"))
-        ar_out_row.addWidget(ar_out_edit, 1)
-        ar_out_row.addWidget(ar_out_browse)
-        lay.addLayout(ar_out_row)
-        ar_pat_row = QHBoxLayout()
-        ar_pat_edit = QLineEdit(self._autorender_pattern)
-        ar_pat_edit.setToolTip("Output filename. Tokens: {clip} (first mapped clip), {scene}, {date}.")
-        ar_pat_row.addWidget(QLabel("Name:"))
-        ar_pat_row.addWidget(ar_pat_edit, 1)
-        ar_pat_hint = QLabel("tokens: {clip} {scene} {date}")
-        ar_pat_hint.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
-        ar_pat_row.addWidget(ar_pat_hint)
-        lay.addLayout(ar_pat_row)
-
-        lay.addWidget(section_title("DELIVERY"))
-        lay.addWidget(hint("After a render finishes, copy the output(s) into this folder "
-                           "automatically — e.g. a synced delivery/review folder. Blank = off."))
-        dlv_row = QHBoxLayout()
-        dlv_edit = QLineEdit(self._deliver_dir)
-        dlv_edit.setPlaceholderText("Delivery folder (blank = no copy)")
-        dlv_browse = QPushButton("Browse")
-        def _pick_dlv() -> None:
-            d2 = QFileDialog.getExistingDirectory(dlg, "Delivery folder", dlv_edit.text() or str(Path.home()))
-            if d2:
-                dlv_edit.setText(d2)
-        dlv_browse.clicked.connect(_pick_dlv)
-        dlv_row.addWidget(QLabel("Copy to:"))
-        dlv_row.addWidget(dlv_edit, 1)
-        dlv_row.addWidget(dlv_browse)
-        lay.addLayout(dlv_row)
-        lay.addStretch()
-
-        # ── Updates ──────────────────────────────────────────────────────
-        lay = _tab("Updates")
-        lay.addWidget(section_title("SOFTWARE UPDATES"))
-        lay.addWidget(hint("Updates are automatic — the app checks for a newer release on launch "
-                           "and offers a one-click download. Nothing to configure."))
-        upd_status = QLabel(f"This build is v{APP_VERSION}.")
-        upd_status.setStyleSheet(f"color:{self._palette.text_muted}; font-size:12px;")
-        lay.addWidget(upd_status)
-        upd_check_btn = QPushButton("Check for Updates Now")
-        upd_check_btn.clicked.connect(lambda: self._check_for_updates(manual=True))
-        upd_row = QHBoxLayout()
-        upd_row.addWidget(upd_check_btn)
-        upd_row.addStretch()
-        lay.addLayout(upd_row)
-        if not _update_token():
-            lay.addWidget(hint("This build has no update token baked in, so automatic checks are off."))
-        lay.addStretch()
-
-        # ── Deadline ─────────────────────────────────────────────────────
-        lay = _tab("Deadline")
-        lay.addWidget(hint("Submit Blender and Cinema 4D jobs to a Thinkbox Deadline farm. "
-                           "Leave blank to render locally."))
-        lay.addWidget(section_title("CONFIGURATION"))
-
-        # Repo Path
-        repo_row = QHBoxLayout()
-        repo_edit = QLineEdit(self._deadline_repo_path)
-        repo_edit.setPlaceholderText("Default repository (or browse path)")
-        repo_locate = QPushButton("Locate")
-        repo_row.addWidget(QLabel("Repository Path:"))
-        repo_row.addWidget(repo_edit, 1)
-        repo_row.addWidget(repo_locate)
-        lay.addLayout(repo_row)
-
-        def do_locate_repo() -> None:
-            chosen = QFileDialog.getExistingDirectory(dlg, "Select Deadline Repository Path", repo_edit.text() or "")
-            if chosen:
-                repo_edit.setText(chosen)
-        repo_locate.clicked.connect(do_locate_repo)
-
-        # Command Path
-        cmd_row = QHBoxLayout()
-        cmd_edit = QLineEdit(self._deadline_command_path)
-        cmd_edit.setPlaceholderText("Path to deadlinecommand executable (optional)")
-        cmd_locate = QPushButton("Locate")
-        cmd_row.addWidget(QLabel("Command Path:   "))
-        cmd_row.addWidget(cmd_edit, 1)
-        cmd_row.addWidget(cmd_locate)
-        lay.addLayout(cmd_row)
-
-        def do_locate_cmd() -> None:
-            chosen, _ = QFileDialog.getOpenFileName(dlg, "Select deadlinecommand executable", cmd_edit.text() or "")
-            if chosen:
-                cmd_edit.setText(chosen)
-        cmd_locate.clicked.connect(do_locate_cmd)
-
-        repo_help = QLabel(
-            "Repository Path is your Deadline repository folder — e.g. "
-            "/opt/Thinkbox/Deadline/repository, or \\\\server\\DeadlineRepository on "
-            "Windows. Leave it blank to use this machine's configured default. "
-            "Command Path is auto-detected; set it only if deadlinecommand isn't found. "
-            "Use Test Connection to verify — any failure shows full details in Live Logs.")
-        repo_help.setWordWrap(True)
-        repo_help.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
-        lay.addWidget(repo_help)
-
-        # Name Template
-        template_row = QHBoxLayout()
-        template_edit = QLineEdit(self._deadline_job_name_template)
-        template_edit.setPlaceholderText("e.g. Render Mapper Pro Job - {scene_name}")
-        template_row.addWidget(QLabel("Name Template:  "))
-        template_row.addWidget(template_edit, 1)
-        lay.addLayout(template_row)
-
-        # Comment
-        comment_row = QHBoxLayout()
-        comment_edit = QLineEdit(self._deadline_comment)
-        comment_edit.setPlaceholderText("Optional job comment")
-        comment_row.addWidget(QLabel("Job Comment:    "))
-        comment_row.addWidget(comment_edit, 1)
-        lay.addLayout(comment_row)
-
-        lay.addWidget(section_title("CONNECTION"))
-
-        status_lbl = QLabel("Connection status: Not tested")
-        status_lbl.setStyleSheet(f"color: {self._palette.text_faint}; font-size: 11px; font-weight: bold;")
-        lay.addWidget(status_lbl)
-
-        # Buttons Row
-        diag_btn_layout = QHBoxLayout()
-        test_conn_btn = QPushButton("Test Connection")
-        export_files_btn = QPushButton("Export Job Files")
-        diag_btn_layout.addWidget(test_conn_btn)
-        diag_btn_layout.addWidget(export_files_btn)
-        diag_btn_layout.addStretch()
-        lay.addLayout(diag_btn_layout)
-        lay.addStretch()
-
-        # ── Diagnostics ──────────────────────────────────────────────────
-        lay = _tab("Diagnostics")
-        lay.addWidget(section_title("BUNDLED TOOLS"))
-        ff_lbl = QLabel(f"ffmpeg:   {find_ffmpeg_tool('ffmpeg') or 'not found'}\n"
-                        f"ffprobe:  {_find_ffprobe() or 'not found'}")
-        ff_lbl.setStyleSheet(f"color:{self._palette.text_muted}; font-size:11px;")
-        ff_lbl.setWordWrap(True)
-        lay.addWidget(ff_lbl)
-
-        lay.addWidget(section_title("FILES & LOGS"))
-        data_dir = PROFILE_PATH.parent
-        data_row = QHBoxLayout()
-        data_row.addWidget(QLabel("App data folder:"))
-        data_path = QLineEdit(str(data_dir))
-        data_path.setReadOnly(True)
-        data_row.addWidget(data_path, 1)
-        open_data_btn = QPushButton("Open")
-        open_data_btn.clicked.connect(lambda: _open_path(data_dir))
-        data_row.addWidget(open_data_btn)
-        lay.addLayout(data_row)
-        diag_tools = QHBoxLayout()
-        open_log_btn = QPushButton("Open Logs Folder")
-        open_log_btn.clicked.connect(lambda: _open_path(LOG_PATH.parent))
-        copy_diag_btn = QPushButton("Copy Diagnostics")
-        copy_diag_btn.clicked.connect(self._copy_diagnostics)
-        diag_tools.addWidget(open_log_btn)
-        diag_tools.addWidget(copy_diag_btn)
-        diag_tools.addStretch()
-        lay.addLayout(diag_tools)
-        lay.addStretch()
-
-        # Dialog buttons live below the tabs.
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        root.addWidget(btns)
-
-        # Handle Ok/Cancel
-        def on_accept() -> None:
-            self._blender_path = blender_edit.text().strip()
-            self._c4dpy_path = c4dpy_edit.text().strip()
-            self._deadline_repo_path = repo_edit.text().strip()
-            self._deadline_command_path = cmd_edit.text().strip()
-            self._deadline_job_name_template = template_edit.text().strip()
-            self._deadline_comment = comment_edit.text().strip()
-
-            # Sync hidden widgets in panel if needed
-            self.deadline_panel.dl_cmd_edit.setText(self._deadline_command_path)
-            self.deadline_panel.dl_repo_edit.setText(self._deadline_repo_path)
-            self.deadline_panel.dl_name_template_edit.setText(self._deadline_job_name_template)
-            self.deadline_panel.dl_comment_edit.setText(self._deadline_comment)
-
-            # Behaviour
-            self._when_done = _vals[when_combo.currentIndex()]
-            _menu_label = {"nothing": "Do Nothing", "quit": "Quit App", "sleep": "Sleep Computer"}.get(self._when_done)
-            if _menu_label and hasattr(self, "_when_actions") and _menu_label in self._when_actions:
-                self._when_actions[_menu_label].setChecked(True)
-            if hasattr(self, "preview_action"):
-                self.preview_action.setChecked(preview_cb.isChecked())
-            else:
-                self._preview_enabled = preview_cb.isChecked()
-
-            # Watch / ingest options
-            def _to_float(s, d):
-                try:
-                    return float(s)
-                except ValueError:
-                    return d
-            interval_ms = int(max(1.0, _to_float(watch_interval_edit.text().strip(), 3.0)) * 1000)
-            settle_s = max(0.0, _to_float(watch_settle_edit.text().strip(), 2.0))
-            self.scene_panel.set_watch_options(interval_ms, settle_s)
-
-            # Auto-render (targets)
-            self._autorender_enabled = ar_enable_cb.isChecked()
-            self._autorender_start = ar_start_cb.isChecked()
-            self._autorender_output = ar_out_edit.text().strip()
-            self._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
-            self._deliver_dir = dlv_edit.text().strip()
-
-            self._save_profile()    # persist immediately so settings survive a quick quit
-            dlg.accept()
-
-        btns.accepted.connect(on_accept)
-        btns.rejected.connect(dlg.reject)
-
-        # Handle testing connection and exporting files inside dialog. The query
-        # runs off-thread (DeadlineQueryThread) so the dialog never freezes — the
-        # modal event loop still delivers the result signal while it's open.
-        def _apply_props_test_result(res: dict) -> None:
-            ok = bool(res.get("ok"))
-            dp = self.deadline_panel
-            if ok:
-                pools = res.get("pools", [])
-                current_pool = dp.dl_pool_combo.currentText()
-                current_sec_pool = dp.dl_sec_pool_combo.currentText()
-                dp.dl_pool_combo.clear()
-                dp.dl_sec_pool_combo.clear()
-                dp.dl_pool_combo.addItems(pools)
-                dp.dl_sec_pool_combo.addItems([""] + pools)
-                if current_pool:
-                    dp.dl_pool_combo.setCurrentText(current_pool)
-                if current_sec_pool:
-                    dp.dl_sec_pool_combo.setCurrentText(current_sec_pool)
-
-                groups = res.get("groups", [])
-                current_group = dp.dl_group_combo.currentText()
-                dp.dl_group_combo.clear()
-                dp.dl_group_combo.addItems([""] + groups)
-                if current_group:
-                    dp.dl_group_combo.setCurrentText(current_group)
-
-                machines = res.get("machines", [])
-                dp.dl_machines_list.blockSignals(True)
-                currently_checked = {
-                    dp.dl_machines_list.item(i).text().strip()
-                    for i in range(dp.dl_machines_list.count())
-                    if dp.dl_machines_list.item(i).checkState() == Qt.CheckState.Checked
-                }
-                dp.dl_machines_list.clear()
-                for m in machines:
-                    item = QListWidgetItem(m)
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setCheckState(
-                        Qt.CheckState.Checked if (m in currently_checked or not currently_checked)
-                        else Qt.CheckState.Unchecked)
-                    dp.dl_machines_list.addItem(item)
-                dp.dl_machines_list.blockSignals(False)
-
-            # Dialog feedback — guarded, since the dialog may be closed mid-test.
-            try:
-                test_conn_btn.setEnabled(True)
-                if ok:
-                    status_lbl.setText("Connection status: Connected")
-                    status_lbl.setStyleSheet(f"color: {self._palette.success}; font-size: 11px; font-weight: bold;")
-                    QMessageBox.information(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
-                else:
-                    status_lbl.setText("Connection status: Connection failed")
-                    status_lbl.setStyleSheet(f"color: {self._palette.danger}; font-size: 11px; font-weight: bold;")
-                    QMessageBox.warning(dlg, "Deadline Warning",
-                                        res.get("error", "") or "deadlinecommand failed.")
-            except RuntimeError:
-                pass   # dialog already closed
-
-        def run_test_connection() -> None:
-            cmd = cmd_edit.text().strip() or find_deadlinecommand() or "deadlinecommand"
-            status_lbl.setText("Connection status: Testing...")
-            status_lbl.setStyleSheet(f"color: {self._palette.warning}; font-size: 11px; font-weight: bold;")
-            if not Path(cmd).exists() and not shutil.which(cmd):
-                status_lbl.setText("Connection status: deadlinecommand not found")
-                status_lbl.setStyleSheet(f"color: {self._palette.danger}; font-size: 11px; font-weight: bold;")
-                QMessageBox.critical(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
-                return
-            if self._props_deadline_thread is not None and self._props_deadline_thread.isRunning():
-                return
-            test_conn_btn.setEnabled(False)
-            self._props_deadline_thread = DeadlineQueryThread(cmd, repo_edit.text().strip())
-            self._props_deadline_thread.result.connect(_apply_props_test_result)
-            self._props_deadline_thread.start()
-
-        test_conn_btn.clicked.connect(run_test_connection)
-        export_files_btn.clicked.connect(self._export_deadline_files)
-
-        if initial_tab:
-            for i in range(tabs.count()):
-                if tabs.tabText(i) == initial_tab:
-                    tabs.setCurrentIndex(i)
-                    break
-
-        dlg.exec()
+        from dialogs import build_properties_dialog
+        build_properties_dialog(self, initial_tab)
 
     def _add_recent_scene(self, path: str) -> None:
         p = str(Path(os.path.expanduser(path.strip())))
@@ -2089,11 +1555,18 @@ class BlenderVideoMapperQt(QMainWindow):
 
     def _scan_scene(self) -> None:
         scene = self.scene_panel.scene_edit.text().strip()
-        if not scene or not file_exists(scene):
+        if not scene:
             return
-        is_c4d = scene.lower().endswith(".c4d")
-        # Cinema 4D scenes need c4dpy; everything else needs Blender.
-        if is_c4d:
+        if not file_exists(scene):
+            self._show_toast(f"Scene file not found: {scene}", "warning")
+            return
+        is_c4d = is_c4d_scene(scene)
+        is_web = is_web_scene(scene)
+        # Cinema 4D scenes need c4dpy; web (.glb/.gltf) renders in-browser and
+        # needs neither Blender nor c4dpy; everything else needs Blender.
+        if is_web:
+            blender = ""
+        elif is_c4d:
             c4dpy = self._ensure_c4dpy(interactive=True)
             if not c4dpy:
                 return
@@ -2195,7 +1668,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
     # ── Updates (automatic: checks GitHub Releases with a baked-in read-only
     #    token, so a private repo updates with zero per-machine config) ────────
-    _ASSET_FOR_PLATFORM = {
+    _ASSET_FOR_PLATFORM: ClassVar = {
         "macos-arm64": "RenderMapperPro-macOS-arm64.zip",
         "macos-intel": "RenderMapperPro-macOS-intel.zip",
         "windows-x64": "RenderMapperPro-Windows-x64.zip",
@@ -2213,7 +1686,6 @@ class BlenderVideoMapperQt(QMainWindow):
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
         def _fetch(use_token: bool):
-            import urllib.request
             headers = {"Accept": "application/vnd.github+json",
                        "X-GitHub-Api-Version": "2022-11-28",
                        "User-Agent": APP_NAME}
@@ -2287,9 +1759,8 @@ class BlenderVideoMapperQt(QMainWindow):
             dest.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
-            import zipfile
-            with zipfile.ZipFile(dest) as z:
-                z.extractall(dest.parent)
+            from core.archive import safe_extract_zip
+            safe_extract_zip(dest, dest.parent)   # rejects Zip-Slip members
             reveal_in_file_manager(dest)
             QMessageBox.information(self, "Update Downloaded",
                 f"{want} was downloaded to your Downloads and unzipped.\n\n"
@@ -2297,15 +1768,28 @@ class BlenderVideoMapperQt(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Update Failed", str(exc))
 
-    def _set_renderer_options(self, is_c4d: bool, detected: str = "") -> None:
+    def _update_renderer_for_scene(self) -> None:
+        """Reflect the scene type in the renderer dropdown the moment a scene is
+        picked — Redshift for .c4d, three.js for .glb/.gltf, Blender otherwise —
+        without waiting for a Scan."""
+        s = self.scene_panel.scene_edit.text().strip().lower()
+        if not s:
+            return
+        self._set_renderer_options(is_c4d_scene(s), is_web_scene(s))
+
+    def _set_renderer_options(self, is_c4d: bool, is_web: bool = False, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
-        loaded scene: Cinema 4D renderers for a .c4d, Blender engines otherwise."""
-        self.render_panel.set_renderer(is_c4d)   # adapt all settings to the renderer
+        loaded scene: Redshift for .c4d, three.js for .glb/.gltf, Blender else."""
+        self.render_panel.set_renderer(is_c4d, is_web)   # adapt all settings to the renderer
         combo = self.render_panel.engine_combo
-        # C4D path only supports Redshift: the video→emission mapping is a
-        # Redshift node-material feature. Standard/Physical use legacy material
-        # channels and are not wired. Blender keeps its own engines.
-        items = ["Redshift"] if is_c4d else ["CYCLES", "BLENDER_EEVEE"]
+        # C4D path only supports Redshift; web scenes render via headless three.js;
+        # Blender keeps its own engines.
+        if is_web:
+            items = ["WEB_THREEJS"]
+        elif is_c4d:
+            items = ["Redshift"]
+        else:
+            items = ["CYCLES", "BLENDER_EEVEE"]
         if self.render_panel.engine_values() == items:
             return
         cur = self.render_panel.engine_value()
@@ -2330,10 +1814,12 @@ class BlenderVideoMapperQt(QMainWindow):
         current = [a for a in current if a.material_name in set(clean_materials)]
         self.scene_panel.set_assignments(current)
 
-        # The renderer dropdown reflects the scene type: C4D renderers for a
-        # .c4d, Blender engines otherwise.
-        is_c4d = self.scene_panel.scene_edit.text().strip().lower().endswith(".c4d")
-        self._set_renderer_options(is_c4d, settings.get("renderer", "") if settings else "")
+        # The renderer dropdown reflects the scene type: Redshift for .c4d,
+        # three.js for .glb/.gltf, Blender engines otherwise.
+        scene_l = self.scene_panel.scene_edit.text().strip().lower()
+        is_c4d = is_c4d_scene(scene_l)
+        is_web = is_web_scene(scene_l)
+        self._set_renderer_options(is_c4d, is_web, settings.get("renderer", "") if settings else "")
 
         # Pull render/timeline/colour settings from the scene into the UI. Guard
         # so the per-field edits don't each fire _on_settings_changed; we sync
@@ -3011,51 +2497,12 @@ class BlenderVideoMapperQt(QMainWindow):
             return None
         p = Path(job.output_path).expanduser()
         if not p.exists():
-            p = p if p.suffix else p
-            if not p.exists():
-                return None
+            return None
         return p
 
     @staticmethod
     def _friendly_error_hint(text: str) -> str:
-        """Map common renderer failures to a plain-language 'what to try' line.
-        Returns "" when nothing matches (the raw error is always shown anyway)."""
-        t = (text or "").lower()
-        rules = [
-            (("out of memory", "cuda error: out of memory", "memoryerror", "vram",
-              "cuda_error_out_of_memory", "out of gpu memory"),
-             "The GPU or system ran out of memory. Lower the resolution or sample "
-             "count, or set Device to CPU in Render settings."),
-            (("no space left", "errno 28", "disk full"),
-             "The output disk is full. Free up space or pick a different output folder."),
-            (("permission denied", "errno 13", "access is denied"),
-             "Permission denied writing the output. Choose a different output folder "
-             "or check its permissions."),
-            (("no such file", "filenotfounderror", "cannot read", "unable to open",
-              "could not open", "errno 2"),
-             "A scene or media file couldn't be found — it may have moved or still be "
-             "syncing. Re-locate it, then try again."),
-            (("unknown encoder", "codec", "ffmpeg", "unsupported pixel format",
-              "no video stream"),
-             "The video codec/format isn't available. Try a different codec or output "
-             "format (e.g. H.264 MP4)."),
-            (("created in a newer", "blend file format", "version mismatch",
-              "unsupported .blend", "blender version"),
-             "The scene may be from a newer Blender/Cinema 4D version than the one "
-             "configured. Open it once in the matching app, or point Properties at a "
-             "newer build."),
-            (("material not found", "no material named", "cannot find material",
-              "unknown material"),
-             "A material referenced by the mapping wasn't found in the scene. Re-scan "
-             "the scene and check the mappings."),
-            (("license", "maxon app"),
-             "Cinema 4D licensing failed — make sure you're signed in to the Maxon app "
-             "on this machine."),
-        ]
-        for needles, hint in rules:
-            if any(n in t for n in needles):
-                return hint
-        return ""
+        return friendly_error_hint(text)   # logic in core.reporting (UI-free, tested)
 
     def _show_job_error(self, job_id: int) -> None:
         job = next((j for j in self._jobs if j.id == job_id), None)
@@ -3282,49 +2729,8 @@ class BlenderVideoMapperQt(QMainWindow):
                     )
         return warns
 
-    def _estimate_job_bytes(self, job: RenderJob) -> int:
-        opts = job.render_options
-        if not opts:
-            return 0
-        from core.utils import ext_for_format
-        is_video = bool(ext_for_format(opts.output_format))
-        step = max(1, getattr(opts, "frame_step", 1))
-        frames = max(1, (opts.frame_end - opts.frame_start) // step + 1)
-        return estimate_output_bytes(
-            opts.width, opts.height, frames,
-            is_video=is_video, quality=getattr(opts, "video_quality", "HIGH"),
-            image_format=opts.output_format,
-            scale_percent=getattr(opts, "resolution_percentage", 100))
-
     def _disk_space_warnings(self, pending: list[RenderJob]) -> list[str]:
-        warns: list[str] = []
-        by_dir: dict[str, int] = {}
-        dpaths: dict[str, Path] = {}
-        for j in pending:
-            out = (j.output_path or "").strip()
-            if not out:
-                continue
-            d = Path(out).expanduser().parent
-            while not d.exists() and d.parent != d:
-                d = d.parent
-            if not d.exists():
-                continue
-            key = str(d)
-            dpaths[key] = d
-            by_dir[key] = by_dir.get(key, 0) + self._estimate_job_bytes(j)
-        for key, est in by_dir.items():
-            try:
-                free = shutil.disk_usage(key).free
-            except Exception:
-                continue
-            gb = 1024 ** 3
-            if est and free < est * 1.15:
-                warns.append(
-                    f"“{dpaths[key]}” may run out of room: ~{est / gb:.1f} GB estimated, "
-                    f"only {free / gb:.1f} GB free.")
-            elif free < 2 * gb:
-                warns.append(f"Low disk space on “{dpaths[key]}”: {free / gb:.1f} GB free.")
-        return warns
+        return disk_space_warnings(pending)   # logic in core.jobs (UI-free, tested)
 
     def _recent_spf_for_scene(self, scene_path: str) -> float:
         """Most-recent measured sec/frame for this scene, from history (0 if none)."""
@@ -3465,10 +2871,15 @@ class BlenderVideoMapperQt(QMainWindow):
             )
             return
 
-        # Cinema 4D scenes render via c4dpy/Redshift; others via Blender.
+        # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) renders in a
+        # headless browser (no Blender/c4dpy); everything else via Blender.
         _scene_now = self.scene_panel.scene_edit.text().strip()
-        _is_c4d = _scene_now.lower().endswith(".c4d")
-        if _is_c4d:
+        _is_c4d = is_c4d_scene(_scene_now)
+        _is_web = is_web_scene(_scene_now)
+        if _is_web:
+            c4dpy = ""
+            blender = ""
+        elif _is_c4d:
             c4dpy = self._ensure_c4dpy(interactive=True)
             if not c4dpy:
                 return
@@ -3583,7 +2994,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 preview_path=self._preview_path if not j.use_deadline else "",
                 audio_paths=self._audio_paths_for(audio_src),
                 material_assignments=asn,
-                ffmpeg_path=(_ffmpeg if str(j.scene_path).lower().endswith(".c4d") else ""),
+                ffmpeg_path=(_ffmpeg if is_c4d_scene(j.scene_path) else ""),
                 force_submit=self._c4d_force_submit,
             )
             entries.append({"id": j.id, "label": j.label, "cfg": cfg})
@@ -3722,8 +3133,12 @@ class BlenderVideoMapperQt(QMainWindow):
             return  # no scene yet — nothing to preview
         # With no mappings we still preview the bare 3D model.
         self._preview_pending = False
-        is_c4d = scene.lower().endswith(".c4d")
-        if is_c4d:
+        is_c4d = is_c4d_scene(scene)
+        is_web = is_web_scene(scene)
+        if is_web:
+            c4dpy = ""
+            blender = ""
+        elif is_c4d:
             c4dpy = self._ensure_c4dpy(interactive=True)
             if not c4dpy:
                 return
@@ -3767,7 +3182,8 @@ class BlenderVideoMapperQt(QMainWindow):
         self.preview_dock.raise_()
         self.preview_panel.preview_frame_btn.setEnabled(False)
         self.preview_panel.caption.setText(f"Rendering preview · frame {fs}…")
-        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% engine={'C4D/Redshift' if is_c4d else 'Blender'}")
+        _eng = "three.js" if is_web else ("C4D/Redshift" if is_c4d else "Blender")
+        self._append_log(f"[app] Preview: frame={fs} camera={camera!r} scale={pct}% engine={_eng}")
         self._preview_thread = PreviewFrameThread(blender, worker, cfg, out_dir,
                                                   c4dpy=c4dpy, c4d_worker=c4d_worker)
         self._preview_thread.log.connect(self._append_log)
@@ -3894,14 +3310,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
     @staticmethod
     def _fmt_dur(seconds: float) -> str:
-        seconds = int(max(0, seconds))
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        if h:
-            return f"{h}h{m:02d}m"
-        if m:
-            return f"{m}m{s:02d}s"
-        return f"{s}s"
+        return format_duration(seconds)   # logic in core.reporting (UI-free, tested)
 
     def _update_progress_caption(self) -> None:
         if not hasattr(self, "queue_panel"):
@@ -4328,7 +3737,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         # Down-arrow from the search box drops focus into the result list.
         def on_search_key(event):  # type: ignore[no-untyped-def]
-            if event.key() in (Qt.Key_Down, Qt.Key_Up) and lst.count():
+            if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up) and lst.count():
                 lst.setFocus()
                 return
             QLineEdit.keyPressEvent(search, event)
@@ -4666,7 +4075,7 @@ class BlenderVideoMapperQt(QMainWindow):
         dp.dl_pool_combo.clear()
         dp.dl_pool_combo.addItems(pools)
         dp.dl_sec_pool_combo.clear()
-        dp.dl_sec_pool_combo.addItems([""] + pools)
+        dp.dl_sec_pool_combo.addItems(["", *pools])
         if current_pool:
             dp.dl_pool_combo.setCurrentText(current_pool)
         if current_sec:
@@ -4674,7 +4083,7 @@ class BlenderVideoMapperQt(QMainWindow):
         if groups:
             current_group = dp.dl_group_combo.currentText()
             dp.dl_group_combo.clear()
-            dp.dl_group_combo.addItems([""] + groups)
+            dp.dl_group_combo.addItems(["", *groups])
             if current_group:
                 dp.dl_group_combo.setCurrentText(current_group)
         if machines:
@@ -4761,59 +4170,12 @@ class BlenderVideoMapperQt(QMainWindow):
             worker_path = Path(worker).expanduser().resolve()
 
             with open(job_info_path, "w") as f:
-                name_template = cfg.deadline_job_name_template or ""
-                if name_template:
-                    try:
-                        name = name_template.format(scene_name=scene_path.name, video_name=Path(cfg.video_path).name if cfg.video_path else "")
-                    except Exception:
-                        name = f"Render Mapper Pro Job - {scene_path.name}"
-                else:
-                    name = f"Render Mapper Pro Job - {scene_path.name}"
-                f.write(f"Name={name}\n")
-                f.write("Plugin=CommandLine\n")
-                f.write(f"Frames={cfg.render.frame_start}-{cfg.render.frame_end}\n")
-                f.write(f"Priority={cfg.deadline_priority}\n")
-                if cfg.deadline_pool:
-                    f.write(f"Pool={cfg.deadline_pool}\n")
-                if cfg.deadline_secondary_pool:
-                    f.write(f"SecondaryPool={cfg.deadline_secondary_pool}\n")
-                if cfg.deadline_group:
-                    f.write(f"Group={cfg.deadline_group}\n")
-                if cfg.deadline_comment:
-                    f.write(f"Comment={cfg.deadline_comment}\n")
-                if cfg.deadline_department:
-                    f.write(f"Department={cfg.deadline_department}\n")
-                from core.utils import ext_for_format
-                ext = ext_for_format(cfg.render.output_format)
-                is_video = ext != ""
-
-                chunk_size = cfg.deadline_chunk_size
-                if is_video:
-                    total_frames = max(1, cfg.render.frame_end - cfg.render.frame_start + 1)
-                    chunk_size = total_frames
-
-                if chunk_size > 1:
-                    f.write(f"ChunkSize={chunk_size}\n")
-                if cfg.deadline_suspended:
-                    f.write("InitialStatus=Suspended\n")
-                if cfg.deadline_machine_limit > 0:
-                    f.write(f"MachineLimit={cfg.deadline_machine_limit}\n")
-                if cfg.deadline_limits:
-                    f.write(f"Limits={cfg.deadline_limits}\n")
-                whitelist = getattr(cfg, 'deadline_whitelist', "").strip()
-                if whitelist:
-                    f.write(f"Whitelist={whitelist}\n")
-
-                from core.utils import ext_for_format
-                if cfg.output_path:
-                    out_path = Path(cfg.output_path)
-                    if out_path.suffix:
-                        f.write(f"OutputDirectory0={out_path.parent}\n")
-                        f.write(f"OutputFilename0={out_path.name}\n")
-                    else:
-                        f.write(f"OutputDirectory0={out_path}\n")
-                        ext = ext_for_format(cfg.render.output_format) or ".png"
-                        f.write(f"OutputFilename0=####{ext}\n")
+                # Single source of truth — same writer the farm submit uses, so
+                # exported files never drift from submitted ones.
+                from core.runner import write_commandline_job_info
+                write_commandline_job_info(
+                    f, cfg, scene_path.name,
+                    Path(cfg.video_path).name if cfg.video_path else "")
 
             scene_arg = scene_path.name if cfg.submit_scene else str(scene_path)
             worker_arg = worker_path.name
@@ -4974,55 +4336,10 @@ class BlenderVideoMapperQt(QMainWindow):
         layout_state = bytes(self.saveState().toBase64().data()).decode("ascii")
         layout_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
 
-        def _opts_dict(opts: RenderOptions | None) -> dict | None:
-            if opts is None:
-                return None
-            return dataclasses.asdict(opts)
-
-        jobs_data = [
-            {
-                "id": j.id,
-                "label": j.label,
-                "custom_label": j.custom_label,
-                "video_path": j.video_path,
-                "output_path": j.output_path,
-                "output_input": j.output_input,
-                "scene_path": j.scene_path,
-                "target_camera": j.target_camera,
-                "output_profile": j.output_profile,
-                "render_options": _opts_dict(j.render_options),
-                "safe_mode": j.safe_mode,
-                "status": j.status,
-                "progress": j.progress,
-                "selected": j.selected,
-                "use_deadline": j.use_deadline,
-                "deadline_pool": j.deadline_pool,
-                "deadline_secondary_pool": j.deadline_secondary_pool,
-                "deadline_group": j.deadline_group,
-                "deadline_priority": j.deadline_priority,
-                "deadline_comment": j.deadline_comment,
-                "deadline_department": j.deadline_department,
-                "deadline_chunk_size": j.deadline_chunk_size,
-                "deadline_suspended": j.deadline_suspended,
-                "deadline_submit_scene": getattr(j, 'deadline_submit_scene', True),
-                "deadline_job_name_template": j.deadline_job_name_template,
-                "deadline_machine_limit": j.deadline_machine_limit,
-                "deadline_limits": j.deadline_limits,
-                "deadline_command_path": j.deadline_command_path,
-                "deadline_repo_path": j.deadline_repo_path,
-                "deadline_whitelist": j.deadline_whitelist,
-                "material_assignments": [
-                    {
-                        "material_name": a.material_name,
-                        "video_path": a.video_path,
-                        "video_name": Path(a.video_path).name,
-                        "mapping_mode": a.mapping_mode,
-                    }
-                    for a in j.material_assignments
-                ],
-            }
-            for j in self._jobs
-        ]
+        # RenderJob is a dataclass — asdict() serializes every field (incl. nested
+        # render_options + material_assignments) and auto-tracks new fields, so this
+        # never drifts from the model. The loader reads fields defensively (jd.get).
+        jobs_data = [dataclasses.asdict(j) for j in self._jobs]
 
         watch_folder, watch_enabled = self.scene_panel.get_watch_folder()
         watch_interval_ms, watch_settle = self.scene_panel.get_watch_options()
@@ -5105,26 +4422,7 @@ class BlenderVideoMapperQt(QMainWindow):
         }
 
     def _migrate_profile(self, d: dict) -> dict:
-        """Bring an older saved profile up to the current schema. A newer-than-
-        current profile is loaded as-is (best effort) so a downgrade never wipes
-        state. This is the scaffold to hang real field migrations on."""
-        try:
-            ver = int(d.get("version", 1))
-        except (TypeError, ValueError):
-            ver = 1
-        if ver > PROFILE_VERSION:
-            self._append_log(
-                f"[app] Settings are from a newer build (v{ver} > v{PROFILE_VERSION}); "
-                "loading what's compatible.")
-            return d
-        if ver == PROFILE_VERSION:
-            return d
-        migrated = dict(d)
-        # Forward migrations go here, smallest version first, e.g.:
-        #   if ver < 4: migrated = self._migrate_v3_to_v4(migrated)
-        migrated["version"] = PROFILE_VERSION
-        self._append_log(f"[app] Migrated settings from v{ver} to v{PROFILE_VERSION}.")
-        return migrated
+        return migrate_profile(d, PROFILE_VERSION, self._append_log)   # logic in core.jobs
 
     def _apply_profile_data(self, d: dict) -> None:
         d = self._migrate_profile(d)
@@ -5167,7 +4465,7 @@ class BlenderVideoMapperQt(QMainWindow):
             self.deadline_panel.dl_pool_combo.clear()
             self.deadline_panel.dl_pool_combo.addItems(pools)
             self.deadline_panel.dl_sec_pool_combo.clear()
-            self.deadline_panel.dl_sec_pool_combo.addItems([""] + pools)
+            self.deadline_panel.dl_sec_pool_combo.addItems(["", *pools])
 
         groups = d.get("deadline_available_groups", [])
         if groups:
@@ -5511,6 +4809,10 @@ class BlenderVideoMapperQt(QMainWindow):
                 f.write(data)
                 f.flush()
                 os.fsync(f.fileno())
+            try:
+                os.chmod(tmp, 0o600)   # owner-only: the profile may hold a webhook secret
+            except OSError:
+                pass
             tmp.replace(PROFILE_PATH)
         except Exception as exc:
             self._append_log(f"[app] Could not save settings: {exc}")
@@ -5622,15 +4924,15 @@ def _install_crash_handler(window) -> None:
         showing["active"] = True
         try:
             box = QMessageBox(window)
-            box.setIcon(QMessageBox.Critical)
+            box.setIcon(QMessageBox.Icon.Critical)
             box.setWindowTitle(f"{APP_NAME} — Unexpected Error")
             box.setText("Something went wrong. The app will keep running, but the last "
                         "action may not have completed.")
             box.setInformativeText(f"{exc_type.__name__}: {exc}")
             box.setDetailedText(text)
-            copy_btn = box.addButton("Copy Details", QMessageBox.ActionRole)
-            log_btn = box.addButton("Open Log", QMessageBox.ActionRole)
-            box.addButton(QMessageBox.Close)
+            copy_btn = box.addButton("Copy Details", QMessageBox.ButtonRole.ActionRole)
+            log_btn = box.addButton("Open Log", QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Close)
             box.exec()
             clicked = box.clickedButton()
             if clicked is copy_btn:
@@ -5686,6 +4988,13 @@ def run_qt_app() -> None:
 
     win = BlenderVideoMapperQt()
     win._single_instance_server = server  # keep a reference alive
+    # Route stdlib logging (used by core/ modules) into the Live Logs + existing
+    # file log, and stamp a per-launch banner so sessions are easy to find. No
+    # file handler here — _append_log is the sole writer of LOG_PATH.
+    from core.logging_setup import add_callback_handler, get_logger, setup_logging
+    setup_logging(version=APP_VERSION)
+    add_callback_handler(lambda _level, msg: win._append_log(msg))
+    get_logger().info("%s %s ready on %s", APP_NAME, APP_VERSION, sys.platform)
     _install_crash_handler(win)  # friendly dialog + log on any unhandled UI-thread error
     win._init_window_geometry()  # place/size before first show to avoid an off-screen flash
 
@@ -5704,5 +5013,24 @@ def run_qt_app() -> None:
     sys.exit(app.exec())
 
 
+def _web_selftest(argv: list[str]) -> int:
+    """Headless self-test of the web render backend (used to validate the frozen
+    bundle): --web-selftest <scene.glb> <clip> <out.mp4>. No GUI."""
+    from core.models import JobConfig, MaterialVideoAssignment, RenderOptions
+    from core.web_render import run_web_job
+    scene, clip, out = argv[0], argv[1], argv[2]
+    job = JobConfig(
+        scene_path=scene, video_path=clip, target_material="Screen", target_camera="",
+        output_path=out,
+        render=RenderOptions(width=480, height=270, fps=24, frame_start=1, frame_end=12),
+        material_assignments=[MaterialVideoAssignment("Screen", clip)])
+    rc = run_web_job(job, on_log=print)
+    print(f"[selftest] rc={rc} out_exists={Path(out).exists()}")
+    return rc
+
+
 if __name__ == "__main__":
+    if "--web-selftest" in sys.argv:
+        i = sys.argv.index("--web-selftest")
+        raise SystemExit(_web_selftest(sys.argv[i + 1:i + 4]))
     run_qt_app()

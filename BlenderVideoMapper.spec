@@ -4,7 +4,18 @@ import platform
 import sys
 
 APP_NAME = "Render Mapper Pro"
-APP_VERSION = "1.6.0"
+
+
+def _app_version():
+    """Read the version from app_version.py (single source of truth)."""
+    import pathlib
+    import re
+    txt = pathlib.Path("app_version.py").read_text(encoding="utf-8")
+    m = re.search(r'__version__\s*=\s*"([^"]+)"', txt)
+    return m.group(1) if m else "0.0.0"
+
+
+APP_VERSION = _app_version()
 
 
 def _ffmpeg_binaries():
@@ -27,10 +38,41 @@ def _ffmpeg_binaries():
     return out
 
 
+def _playwright_driver():
+    """Bundle Playwright's node driver so the frozen app can run the browser
+    installer + the runtime. ``node`` ships via binaries (preserves the +x bit;
+    datas strip it); the rest of driver/ as datas. Browsers are NOT bundled —
+    they're downloaded on demand into a per-user dir. Returns (binaries, datas)."""
+    try:
+        import playwright
+    except Exception:
+        print("[spec] WARNING: playwright not installed — web render backend won't be bundled")
+        return [], []
+    pw_root = os.path.dirname(playwright.__file__)
+    driver = os.path.join(pw_root, "driver")
+    node_name = "node.exe" if os.name == "nt" else "node"
+    bins, datas = [], []
+    for root, _dirs, files in os.walk(driver):
+        for f in files:
+            src = os.path.join(root, f)
+            dest = os.path.join("playwright", os.path.relpath(root, pw_root))
+            (bins if f == node_name else datas).append((src, dest))
+    return bins, datas
+
+
+_pw_bins, _pw_datas = _playwright_driver()
+
+try:
+    from PyInstaller.utils.hooks import collect_submodules
+    _pw_hidden = collect_submodules("playwright") + ["greenlet", "pyee"]
+except Exception:
+    _pw_hidden = []
+
+
 a = Analysis(
     ['app_qt.py'],
     pathex=[],
-    binaries=_ffmpeg_binaries(),
+    binaries=_ffmpeg_binaries() + _pw_bins,
     # Scripts run by Blender as subprocesses (not imported), plus bundled assets
     # (app .icns lives here too, referenced by the BUNDLE icon below).
     datas=[
@@ -40,11 +82,11 @@ a = Analysis(
         ('c4d_discover.py', '.'),
         ('assets', 'assets'),
         ('THIRD_PARTY_LICENSES.md', '.'),   # GPL/LGPL notices for bundled ffmpeg + Qt
-    ],
-    hiddenimports=[],
+    ] + _pw_datas,
+    hiddenimports=_pw_hidden,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['pw_runtime_hook.py'],
     excludes=[],
     noarchive=False,
     optimize=0,
@@ -79,7 +121,7 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=['node', 'node.exe'],   # UPX can corrupt the 120MB Playwright node Mach-O
     name=APP_NAME,
 )
 # BUNDLE only does anything on macOS (it wraps COLLECT into a .app). On

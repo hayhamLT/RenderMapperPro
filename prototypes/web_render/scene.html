@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>html, body { margin: 0; background: #000; }</style>
+  <!-- three.js WebGPU build (auto-falls back to WebGL2 when WebGPU is unavailable). -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+    }
+  }
+  </script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+
+const W = 640, H = 360;
+let renderer, scene, camera, texture, mesh;
+window.__ready = false;
+window.__backend = 'unknown';
+window.__error = '';
+
+async function setup() {
+  // WebGPURenderer picks WebGPU when present, else a WebGL2 backend.
+  renderer = new THREE.WebGPURenderer({ antialias: true });
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H);
+  renderer.setClearColor(0x101015, 1);
+  document.body.appendChild(renderer.domElement);
+  await renderer.init();
+  window.__backend = (renderer.backend && renderer.backend.isWebGPUBackend) ? 'webgpu' : 'webgl2';
+
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
+  camera.position.set(0, 0, 3.4);
+
+  texture = new THREE.Texture();
+  texture.colorSpace = THREE.SRGBColorSpace;
+
+  // Unlit material = full-bright "emission" (matches the Blender/Redshift mapping).
+  const mat = new THREE.MeshBasicNodeMaterial({ map: texture });
+  mesh = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 1.8), mat);
+  scene.add(mesh);
+  window.__ready = true;
+}
+
+// Called once per output frame: swap in the clip frame, rotate a touch (to prove
+// animation), render, and leave the result composited on the canvas for capture.
+window.renderFrame = async (dataUrl, angleDeg) => {
+  const img = new Image();
+  await new Promise((res, rej) => {
+    img.onload = res;
+    img.onerror = () => rej(new Error('image decode failed'));
+    img.src = dataUrl;
+  });
+  texture.image = img;
+  texture.needsUpdate = true;
+  mesh.rotation.y = (angleDeg || 0) * Math.PI / 180;
+  await renderer.renderAsync(scene, camera);
+};
+
+setup().catch((e) => { window.__error = String(e && e.stack || e); });
+</script>
+</body>
+</html>

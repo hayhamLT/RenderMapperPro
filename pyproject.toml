@@ -1,6 +1,16 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# A global per-test timeout turns a hang (e.g. the Qt global-state deadlock) into
+# a failed test instead of a stuck CI job.
+addopts = "--timeout=120"
+
+[tool.coverage.run]
+source = ["core"]
+omit = ["*/deadline/*"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.ruff]
 line-length = 120
@@ -10,10 +20,19 @@ target-version = "py312"
 extend-exclude = ["vendor", "dist", "build", ".venv", "deadline"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
-ignore = ["E501", "B008"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501", "B008",
+    # Intentional typography in user-facing strings/comments (curly quotes, em-dashes).
+    "RUF001", "RUF002", "RUF003",
+    # try/except/pass is fine and clearer than contextlib.suppress in hot paths.
+    "SIM105",
+]
 
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
+# Type-check the bodies of un-annotated functions too — catches deprecated Qt
+# enum accesses (Qt.AlignCenter → Qt.AlignmentFlag.AlignCenter) that hide there.
+check_untyped_defs = true
 exclude = ["build/", "dist/", "vendor/"]

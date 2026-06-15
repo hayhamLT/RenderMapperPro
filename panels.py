@@ -14,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
@@ -164,7 +165,7 @@ class ScenePanel(QWidget):
     def eventFilter(self, obj, event):  # type: ignore[override]
         # Clear the hovered row when the cursor leaves a list, so the
         # cross-highlight falls back to the selection.
-        if event.type() == QEvent.Leave:
+        if event.type() == QEvent.Type.Leave:
             if obj is self.mat_list.viewport() and self._hover_material is not None:
                 self._hover_material = None
                 self._recompute_cross_highlight()
@@ -458,10 +459,7 @@ class ScenePanel(QWidget):
         if p.startswith("file://"):
             q = QUrl(p)
             local = q.toLocalFile()
-            if local:
-                p = local
-            else:
-                p = p[7:]
+            p = local or p[7:]
         elif "://" in p:
             q = QUrl(p)
             local = q.toLocalFile()
@@ -901,7 +899,7 @@ class ScenePanel(QWidget):
         normalized = [str(c).strip() for c in cameras if str(c).strip()]
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
-        self.camera_combo.addItems([""] + normalized)
+        self.camera_combo.addItems(["", *normalized])
         if selected:
             idx = self.camera_combo.findText(selected)
             if idx >= 0:
@@ -1270,6 +1268,37 @@ class RenderPanel(QWidget):
         ))
         adv.addWidget(self.color_box)
 
+        # ── Scene lighting (web / three.js only) ─────────────────────────
+        self.web_light_box = QWidget()
+        wl = QVBoxLayout(self.web_light_box)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(10)
+        wl.addWidget(section("SCENE LIGHTING"))
+        self.web_light_preset_combo = QComboBox()
+        self.web_light_preset_combo.addItems(["Auto", "Studio", "Outdoor", "Flat", "None"])
+        self.web_light_preset_combo.setToolTip(
+            "Auto = neutral studio (recommended); Studio = crisp product shot; "
+            "Outdoor = warm daylight; Flat = even/shadowless; None = unlit (emissive only).")
+        self.web_light_intensity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.web_light_intensity_slider.setRange(0, 200)   # 0.0–2.0x
+        self.web_light_intensity_slider.setValue(100)
+        self.web_light_intensity_val = QLabel("1.0x")
+        self.web_light_intensity_slider.valueChanged.connect(
+            lambda v: self.web_light_intensity_val.setText(f"{v / 100:.1f}x"))
+        self.web_respect_lights_cb = QCheckBox("Use lights already in the file")
+        self.web_respect_lights_cb.setChecked(True)
+        self.web_respect_lights_cb.setToolTip(
+            "If the .glb ships its own lights, keep the artist's lighting and skip the preset rig.")
+        intensity_col = labeled("Intensity", self.web_light_intensity_slider)
+        intensity_col.addWidget(self.web_light_intensity_val)
+        web_light_row = QHBoxLayout()
+        web_light_row.setSpacing(10)
+        web_light_row.addLayout(labeled("Preset", self.web_light_preset_combo), 1)
+        web_light_row.addLayout(intensity_col, 1)
+        wl.addLayout(web_light_row)
+        wl.addWidget(self.web_respect_lights_cb)
+        adv.addWidget(self.web_light_box)
+
         # Preset wiring + initial renderer state (Blender layout by default).
         self._rs_applying = False
         self.rs_preset_combo.currentTextChanged.connect(self._apply_rs_preset)
@@ -1291,7 +1320,7 @@ class RenderPanel(QWidget):
         self.adv_toggle.setText(f"{arrow}  Advanced quality settings")
 
     # Redshift speed/quality presets — each fills the optimization fields.
-    _RS_PRESETS = {
+    _RS_PRESETS: ClassVar = {
         "Draft (fastest)": dict(mx="16", mn="1", thr="0.3", gib="1", depth="3", gi=False),
         "Balanced":        dict(mx="64", mn="4", thr="0.02", gib="3", depth="6", gi=True),
         "High":            dict(mx="128", mn="8", thr="0.01", gib="3", depth="8", gi=True),
@@ -1323,7 +1352,8 @@ class RenderPanel(QWidget):
 
     # Friendly renderer names in the UI; the enum value Blender/C4D expects is
     # carried as itemData so configs/profiles keep the real identifier.
-    ENGINE_LABELS = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift"}
+    ENGINE_LABELS: ClassVar = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
+                               "WEB_THREEJS": "three.js (WebGPU)"}
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()
@@ -1342,20 +1372,26 @@ class RenderPanel(QWidget):
     def engine_values(self) -> list[str]:
         return [str(self.engine_combo.itemData(i)) for i in range(self.engine_combo.count())]
 
-    def set_renderer(self, is_c4d: bool) -> None:
+    def set_renderer(self, is_c4d: bool, is_web: bool = False) -> None:
         """Adapt the settings to the active renderer so every visible control is
-        real. Redshift: relabel samples, hide Blender-only Device + Color
-        Management, show the Redshift optimization controls, and offer only
-        output profiles the C4D path can produce."""
+        real. Redshift relabels samples and shows its optimization controls; the
+        web/three.js backend hides the Blender-only Device + Color + alpha
+        controls (it ignores them) and offers only the outputs it can produce."""
         self.samples_label.setText("Max Samples" if is_c4d else "Cycles Samples")
         # Redshift-only sampling/GI controls.
         for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row, self.gi_box):
             w.setVisible(is_c4d)
-        # Blender-only controls.
-        self.device_box.setVisible(not is_c4d)       # Redshift is GPU-only
-        self.color_box.setVisible(not is_c4d)        # Blender color management
-        self.transparent_cb.setVisible(not is_c4d)   # alpha not wired for the C4D path
-        items = ["H264 MP4", "ProRes MOV", "PNG Sequence"] if is_c4d else list(OUTPUT_PROFILES.keys())
+        # Blender-only controls — also hidden for the web/three.js backend.
+        self.device_box.setVisible(not is_c4d and not is_web)   # Redshift/web are GPU-only
+        self.color_box.setVisible(not is_c4d and not is_web)    # Blender color management
+        self.transparent_cb.setVisible(not is_c4d and not is_web)
+        self.web_light_box.setVisible(is_web)                    # three.js scene lighting
+        if is_web:
+            items = ["H264 MP4", "PNG Sequence"]
+        elif is_c4d:
+            items = ["H264 MP4", "ProRes MOV", "PNG Sequence"]
+        else:
+            items = list(OUTPUT_PROFILES.keys())
         existing = [self.profile_combo.itemText(i) for i in range(self.profile_combo.count())]
         if existing != items:
             cur = self.profile_combo.currentText()
@@ -1518,6 +1554,11 @@ class RenderPanel(QWidget):
             rs_gi_enabled=self.rs_gi_cb.isChecked(),
             rs_gi_bounces=to_int(self.rs_gi_bounces_edit.text(), 3),
             rs_ray_depth=to_int(self.rs_ray_depth_edit.text(), 6),
+            web_lighting_preset={"Auto": "auto", "Studio": "studio", "Outdoor": "outdoor",
+                                 "Flat": "flat", "None": "none"}.get(
+                self.web_light_preset_combo.currentText(), "auto"),
+            web_lighting_intensity=self.web_light_intensity_slider.value() / 100.0,
+            web_respect_scene_lights=self.web_respect_lights_cb.isChecked(),
         )
 
     def settings_dict(self) -> dict:
@@ -1579,6 +1620,17 @@ class RenderPanel(QWidget):
         setnum(self.rs_ray_depth_edit, "rs_ray_depth")
         if "rs_gi_enabled" in d:
             self.rs_gi_cb.setChecked(bool(d["rs_gi_enabled"]))
+        if "web_lighting_preset" in d:
+            self.web_light_preset_combo.setCurrentText(
+                {"auto": "Auto", "studio": "Studio", "outdoor": "Outdoor",
+                 "flat": "Flat", "none": "None"}.get(str(d["web_lighting_preset"]), "Auto"))
+        if "web_lighting_intensity" in d:
+            try:
+                self.web_light_intensity_slider.setValue(round(float(d["web_lighting_intensity"]) * 100))
+            except Exception:
+                pass
+        if "web_respect_scene_lights" in d:
+            self.web_respect_lights_cb.setChecked(bool(d["web_respect_scene_lights"]))
 
 
 class DeadlinePanel(QWidget):

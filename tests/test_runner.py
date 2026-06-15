@@ -1,7 +1,9 @@
+import io
+
 import pytest
 
 from core.models import JobConfig, MaterialVideoAssignment, RenderOptions
-from core.runner import build_blender_command, submit_deadline_job
+from core.runner import build_blender_command, submit_deadline_job, write_commandline_job_info
 
 
 def test_blend_scene_is_passed_positionally():
@@ -62,3 +64,24 @@ def test_blender_deadline_still_uses_commandline(tmp_path):
     assert "Executable=/b/blender" in plugin_info
     # Per-task frame range so Deadline can chunk instead of every task rendering all.
     assert "<STARTFRAME> <ENDFRAME>" in plugin_info
+
+
+def test_write_commandline_job_info_unifies_common_and_clamps_chunk(tmp_path):
+    """The shared writer used by both submit and export: includes the common
+    pool/priority fields AND the chunk-exceeds-range clamp (which the export
+    path lacked before unification)."""
+    opts = RenderOptions(width=2, height=2, fps=30, frame_start=1, frame_end=240, output_format="PNG")
+    job = JobConfig(scene_path="/x/Studio.blend", video_path="/v/clip.mp4", target_material="",
+                    target_camera="", output_path=str(tmp_path / "seq"), render=opts,
+                    deadline_pool="render", deadline_priority=70, deadline_chunk_size=1000)
+    buf = io.StringIO()
+    logs: list[str] = []
+    write_commandline_job_info(buf, job, "Studio.blend", "clip.mp4", logs.append)
+    out = buf.getvalue()
+    assert "Plugin=CommandLine" in out
+    assert "Priority=70" in out          # common field
+    assert "Pool=render" in out          # common field
+    assert "Frames=1-240" in out
+    assert "ChunkSize=240" in out        # 1000 clamped to the 240-frame range
+    assert any("clamping" in m for m in logs)
+    assert "OutputDirectory0=" in out

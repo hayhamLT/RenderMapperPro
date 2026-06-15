@@ -53,7 +53,7 @@ if [[ ! -x "$BUILD_PYTHON" ]]; then
 fi
 
 echo "Using build virtualenv: $BUILD_VENV_DIR"
-"$BUILD_PYTHON" -m pip install -r requirements.txt
+"$BUILD_PYTHON" -m pip install -r requirements-build.txt
 
 "$BUILD_PYTHON" -m PyInstaller \
   --noconfirm \
