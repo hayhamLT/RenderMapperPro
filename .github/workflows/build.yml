@@ -38,7 +38,10 @@ jobs:
       - name: Pytest
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest -q
+        # test_smoke_ui runs in its own process via the ui-smoke job — running it
+        # in the same pytest process as the other UI tests deadlocks Qt's global
+        # state (each passes in isolation).
+        run: pytest -q --ignore=tests/test_smoke_ui.py
 
   # Construct the whole Qt window headlessly and exercise key wiring, so UI
   # regressions are caught even though app_qt.py isn't fully unit-tested.
