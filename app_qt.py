@@ -1040,6 +1040,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
         self.render_panel.profile_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed(preview=False))
         self.scene_panel.scene_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.scene_panel.scene_edit.textChanged.connect(lambda _v: self._update_renderer_for_scene())
         self.scene_panel.camera_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
 
         self.queue_panel.queue_requested.connect(self._queue_current_jobs)
@@ -2300,6 +2301,15 @@ class BlenderVideoMapperQt(QMainWindow):
                 f"Quit {APP_NAME} and replace it with the new build, then reopen.")
         except Exception as exc:
             QMessageBox.warning(self, "Update Failed", str(exc))
+
+    def _update_renderer_for_scene(self) -> None:
+        """Reflect the scene type in the renderer dropdown the moment a scene is
+        picked — Redshift for .c4d, three.js for .glb/.gltf, Blender otherwise —
+        without waiting for a Scan."""
+        s = self.scene_panel.scene_edit.text().strip().lower()
+        if not s:
+            return
+        self._set_renderer_options(s.endswith(".c4d"), s.endswith((".glb", ".gltf")))
 
     def _set_renderer_options(self, is_c4d: bool, is_web: bool = False, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
