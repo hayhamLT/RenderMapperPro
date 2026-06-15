@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from .models import JobConfig
+from .models import JobConfig, SceneBackend, scene_backend
 from .utils import iter_process_output, subprocess_creation_flags, terminate_process
 
 LogCallback = Callable[[str], None]
@@ -402,7 +402,7 @@ C4D_LICENSE_INPUT = "1\n"   # selects "Maxon App" at c4dpy's license-method prom
 
 
 def is_c4d_scene(scene_path: str) -> bool:
-    return str(scene_path).lower().endswith(".c4d")
+    return scene_backend(scene_path) is SceneBackend.C4D
 
 
 def run_c4d_job(

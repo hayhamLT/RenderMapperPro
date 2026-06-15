@@ -1,9 +1,47 @@
 from __future__ import annotations
 
+import enum
 from dataclasses import asdict, dataclass, field
 
 VIDEO_MAPPING_MODE_EMISSION = "EMISSION_FULL_BRIGHT"
 VIDEO_MAPPING_MODE_BASE_COLOR = "BASE_COLOR_ALPHA"
+
+WEB_SCENE_EXTS = (".glb", ".gltf")
+C4D_SCENE_EXTS = (".c4d",)
+BLENDER_SCENE_EXTS = (".blend",)
+
+
+class SceneBackend(enum.StrEnum):
+    """Which render backend a scene file dispatches to (chosen by extension).
+    The single source of truth for scene-type classification across the app."""
+
+    BLENDER = "blender"
+    C4D = "c4d"
+    WEB = "web"
+
+
+def scene_backend(scene_path: str) -> SceneBackend:
+    """Classify a scene path by extension → the backend that renders it.
+    Unknown extensions fall back to Blender (which imports many formats)."""
+    p = str(scene_path).lower()
+    if p.endswith(WEB_SCENE_EXTS):
+        return SceneBackend.WEB
+    if p.endswith(C4D_SCENE_EXTS):
+        return SceneBackend.C4D
+    return SceneBackend.BLENDER
+
+
+def is_web_scene(scene_path: str) -> bool:
+    return scene_backend(scene_path) is SceneBackend.WEB
+
+
+def is_c4d_scene(scene_path: str) -> bool:
+    return scene_backend(scene_path) is SceneBackend.C4D
+
+
+def is_blender_scene(scene_path: str) -> bool:
+    """True only for a native ``.blend`` (opened directly), not the fallback."""
+    return str(scene_path).lower().endswith(BLENDER_SCENE_EXTS)
 
 
 @dataclass

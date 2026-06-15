@@ -1,4 +1,13 @@
-from core.models import JobConfig, MaterialVideoAssignment, RenderOptions
+from core.models import (
+    JobConfig,
+    MaterialVideoAssignment,
+    RenderOptions,
+    SceneBackend,
+    is_blender_scene,
+    is_c4d_scene,
+    is_web_scene,
+    scene_backend,
+)
 
 
 def _opts() -> RenderOptions:
@@ -44,3 +53,19 @@ def test_explicit_assignments_preserved():
     d = job.to_json_dict()
     assert d["material_assignments"][0]["material_name"] == "Screen"
     assert d["material_assignments"][0]["mapping_mode"] == "BASE_COLOR_ALPHA"
+
+
+def test_scene_backend_classifies_by_extension():
+    assert scene_backend("/x/tv.glb") is SceneBackend.WEB
+    assert scene_backend("/x/Scene.GLTF") is SceneBackend.WEB
+    assert scene_backend("/x/studio.c4d") is SceneBackend.C4D
+    assert scene_backend("/x/Venue.blend") is SceneBackend.BLENDER
+    assert scene_backend("/x/unknown.xyz") is SceneBackend.BLENDER   # fallback
+
+
+def test_scene_backend_predicates():
+    assert is_web_scene("a.glb") and not is_web_scene("a.blend")
+    assert is_c4d_scene("a.c4d") and not is_c4d_scene("a.glb")
+    assert is_blender_scene("a.blend") and not is_blender_scene("a.glb")
+    # SceneBackend is a StrEnum — values are usable as plain strings.
+    assert SceneBackend.WEB == "web"

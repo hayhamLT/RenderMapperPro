@@ -21,13 +21,11 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from .models import JobConfig
+from .models import JobConfig, SceneBackend, scene_backend
 from .utils import subprocess_creation_flags, terminate_process
 
 LogCallback = Callable[[str], None]
 CancelCheck = Callable[[], bool]
-
-WEB_SCENE_EXTS = (".glb", ".gltf")
 
 # The headless Chromium lives in a writable per-user dir, shared by the on-demand
 # install and the runtime launch. HARD-SET (not setdefault) before any Playwright
@@ -138,7 +136,7 @@ def ensure_web_chromium(on_log: LogCallback | None = None,
 
 
 def is_web_scene(scene_path: str) -> bool:
-    return str(scene_path).lower().endswith(WEB_SCENE_EXTS)
+    return scene_backend(scene_path) is SceneBackend.WEB
 
 
 def _resolve_scene_html() -> Path:

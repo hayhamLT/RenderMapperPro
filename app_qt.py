@@ -73,6 +73,8 @@ from core.models import (
     MaterialVideoAssignment,
     RenderJob,
     RenderOptions,
+    is_c4d_scene,
+    is_web_scene,
 )
 from core.utils import (
     OUTPUT_PROFILES,
@@ -2092,8 +2094,8 @@ class BlenderVideoMapperQt(QMainWindow):
         if not file_exists(scene):
             self._show_toast(f"Scene file not found: {scene}", "warning")
             return
-        is_c4d = scene.lower().endswith(".c4d")
-        is_web = scene.lower().endswith((".glb", ".gltf"))
+        is_c4d = is_c4d_scene(scene)
+        is_web = is_web_scene(scene)
         # Cinema 4D scenes need c4dpy; web (.glb/.gltf) renders in-browser and
         # needs neither Blender nor c4dpy; everything else needs Blender.
         if is_web:
@@ -2308,7 +2310,7 @@ class BlenderVideoMapperQt(QMainWindow):
         s = self.scene_panel.scene_edit.text().strip().lower()
         if not s:
             return
-        self._set_renderer_options(s.endswith(".c4d"), s.endswith((".glb", ".gltf")))
+        self._set_renderer_options(is_c4d_scene(s), is_web_scene(s))
 
     def _set_renderer_options(self, is_c4d: bool, is_web: bool = False, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
@@ -2350,8 +2352,8 @@ class BlenderVideoMapperQt(QMainWindow):
         # The renderer dropdown reflects the scene type: Redshift for .c4d,
         # three.js for .glb/.gltf, Blender engines otherwise.
         scene_l = self.scene_panel.scene_edit.text().strip().lower()
-        is_c4d = scene_l.endswith(".c4d")
-        is_web = scene_l.endswith((".glb", ".gltf"))
+        is_c4d = is_c4d_scene(scene_l)
+        is_web = is_web_scene(scene_l)
         self._set_renderer_options(is_c4d, is_web, settings.get("renderer", "") if settings else "")
 
         # Pull render/timeline/colour settings from the scene into the UI. Guard
@@ -3487,8 +3489,8 @@ class BlenderVideoMapperQt(QMainWindow):
         # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) renders in a
         # headless browser (no Blender/c4dpy); everything else via Blender.
         _scene_now = self.scene_panel.scene_edit.text().strip()
-        _is_c4d = _scene_now.lower().endswith(".c4d")
-        _is_web = _scene_now.lower().endswith((".glb", ".gltf"))
+        _is_c4d = is_c4d_scene(_scene_now)
+        _is_web = is_web_scene(_scene_now)
         if _is_web:
             c4dpy = ""
             blender = ""
@@ -3607,7 +3609,7 @@ class BlenderVideoMapperQt(QMainWindow):
                 preview_path=self._preview_path if not j.use_deadline else "",
                 audio_paths=self._audio_paths_for(audio_src),
                 material_assignments=asn,
-                ffmpeg_path=(_ffmpeg if str(j.scene_path).lower().endswith(".c4d") else ""),
+                ffmpeg_path=(_ffmpeg if is_c4d_scene(j.scene_path) else ""),
                 force_submit=self._c4d_force_submit,
             )
             entries.append({"id": j.id, "label": j.label, "cfg": cfg})
@@ -3746,8 +3748,8 @@ class BlenderVideoMapperQt(QMainWindow):
             return  # no scene yet — nothing to preview
         # With no mappings we still preview the bare 3D model.
         self._preview_pending = False
-        is_c4d = scene.lower().endswith(".c4d")
-        is_web = scene.lower().endswith((".glb", ".gltf"))
+        is_c4d = is_c4d_scene(scene)
+        is_web = is_web_scene(scene)
         if is_web:
             c4dpy = ""
             blender = ""

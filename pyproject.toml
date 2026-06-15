@@ -1,6 +1,16 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# A global per-test timeout turns a hang (e.g. the Qt global-state deadlock) into
+# a failed test instead of a stuck CI job.
+addopts = "--timeout=120"
+
+[tool.coverage.run]
+source = ["core"]
+omit = ["*/deadline/*"]
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.ruff]
 line-length = 120
