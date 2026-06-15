@@ -16,6 +16,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# rec.709 colour tags + faststart for movie outputs, so QuickTimes look identical
+# across players/NLEs. (c4d_worker.py mirrors this — it runs in c4dpy and can't
+# import this module.)
+REC709_FASTSTART_ARGS = [
+    "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+    "-movflags", "+faststart",
+]
+
 
 # Modifier-key glyph for shortcut hints in menu/button text: Cmd on macOS,
 # "Ctrl+" elsewhere. Qt itself maps QKeySequence("Ctrl+D") to the right key

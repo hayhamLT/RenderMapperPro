@@ -45,18 +45,6 @@ def test_profile_migration(tmp_path, monkeypatch):
     assert w._migrate_profile({})["version"] == cur                 # missing → migrate
 
 
-def test_estimate_job_bytes(tmp_path, monkeypatch):
-    app_qt, w = _window(tmp_path, monkeypatch)
-    from core.models import RenderOptions
-    job = app_qt.RenderJob(id=1)
-    job.output_path = "/out/movie.mp4"
-    job.render_options = RenderOptions(width=1920, height=1080, fps=24,
-                                       frame_start=1, frame_end=240, output_format="MPEG4")
-    assert w._estimate_job_bytes(job) > 0
-    job.render_options = None
-    assert w._estimate_job_bytes(job) == 0
-
-
 def test_deadline_warnings(tmp_path, monkeypatch):
     app_qt, w = _window(tmp_path, monkeypatch)
     w.deadline_panel.dl_pool_combo.addItems(["render_pool"])

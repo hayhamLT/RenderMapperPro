@@ -138,12 +138,11 @@ class RenderThread(CancellableWorker):
         import subprocess
 
         from core.utils import subprocess_creation_flags
+        from media import REC709_FASTSTART_ARGS
         tmp = str(Path(out).with_suffix(".tagging" + Path(out).suffix))
         try:
             r = subprocess.run(
-                [ffmpeg, "-y", "-i", out, "-c", "copy",
-                 "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
-                 "-movflags", "+faststart", tmp],
+                [ffmpeg, "-y", "-i", out, "-c", "copy", *REC709_FASTSTART_ARGS, tmp],
                 capture_output=True, text=True, timeout=300,
                 creationflags=subprocess_creation_flags())
             if r.returncode == 0 and os.path.getsize(tmp) > 0:

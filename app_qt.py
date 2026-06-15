@@ -61,10 +61,10 @@ from PySide6.QtWidgets import (
 
 import icons
 import theme as T
+from core.jobs import disk_space_warnings, migrate_profile
 from core.metrics import (
     auto_chunk_size,
     estimate_energy_cost,
-    estimate_output_bytes,
     predict_total_seconds,
 )
 from core.models import (
@@ -76,6 +76,7 @@ from core.models import (
     is_c4d_scene,
     is_web_scene,
 )
+from core.reporting import format_duration, friendly_error_hint
 from core.utils import (
     OUTPUT_PROFILES,
     VIDEO_EXTENSIONS,
@@ -3039,44 +3040,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
     @staticmethod
     def _friendly_error_hint(text: str) -> str:
-        """Map common renderer failures to a plain-language 'what to try' line.
-        Returns "" when nothing matches (the raw error is always shown anyway)."""
-        t = (text or "").lower()
-        rules = [
-            (("out of memory", "cuda error: out of memory", "memoryerror", "vram",
-              "cuda_error_out_of_memory", "out of gpu memory"),
-             "The GPU or system ran out of memory. Lower the resolution or sample "
-             "count, or set Device to CPU in Render settings."),
-            (("no space left", "errno 28", "disk full"),
-             "The output disk is full. Free up space or pick a different output folder."),
-            (("permission denied", "errno 13", "access is denied"),
-             "Permission denied writing the output. Choose a different output folder "
-             "or check its permissions."),
-            (("no such file", "filenotfounderror", "cannot read", "unable to open",
-              "could not open", "errno 2"),
-             "A scene or media file couldn't be found — it may have moved or still be "
-             "syncing. Re-locate it, then try again."),
-            (("unknown encoder", "codec", "ffmpeg", "unsupported pixel format",
-              "no video stream"),
-             "The video codec/format isn't available. Try a different codec or output "
-             "format (e.g. H.264 MP4)."),
-            (("created in a newer", "blend file format", "version mismatch",
-              "unsupported .blend", "blender version"),
-             "The scene may be from a newer Blender/Cinema 4D version than the one "
-             "configured. Open it once in the matching app, or point Properties at a "
-             "newer build."),
-            (("material not found", "no material named", "cannot find material",
-              "unknown material"),
-             "A material referenced by the mapping wasn't found in the scene. Re-scan "
-             "the scene and check the mappings."),
-            (("license", "maxon app"),
-             "Cinema 4D licensing failed — make sure you're signed in to the Maxon app "
-             "on this machine."),
-        ]
-        for needles, hint in rules:
-            if any(n in t for n in needles):
-                return hint
-        return ""
+        return friendly_error_hint(text)   # logic in core.reporting (UI-free, tested)
 
     def _show_job_error(self, job_id: int) -> None:
         job = next((j for j in self._jobs if j.id == job_id), None)
@@ -3303,49 +3267,8 @@ class BlenderVideoMapperQt(QMainWindow):
                     )
         return warns
 
-    def _estimate_job_bytes(self, job: RenderJob) -> int:
-        opts = job.render_options
-        if not opts:
-            return 0
-        from core.utils import ext_for_format
-        is_video = bool(ext_for_format(opts.output_format))
-        step = max(1, getattr(opts, "frame_step", 1))
-        frames = max(1, (opts.frame_end - opts.frame_start) // step + 1)
-        return estimate_output_bytes(
-            opts.width, opts.height, frames,
-            is_video=is_video, quality=getattr(opts, "video_quality", "HIGH"),
-            image_format=opts.output_format,
-            scale_percent=getattr(opts, "resolution_percentage", 100))
-
     def _disk_space_warnings(self, pending: list[RenderJob]) -> list[str]:
-        warns: list[str] = []
-        by_dir: dict[str, int] = {}
-        dpaths: dict[str, Path] = {}
-        for j in pending:
-            out = (j.output_path or "").strip()
-            if not out:
-                continue
-            d = Path(out).expanduser().parent
-            while not d.exists() and d.parent != d:
-                d = d.parent
-            if not d.exists():
-                continue
-            key = str(d)
-            dpaths[key] = d
-            by_dir[key] = by_dir.get(key, 0) + self._estimate_job_bytes(j)
-        for key, est in by_dir.items():
-            try:
-                free = shutil.disk_usage(key).free
-            except Exception:
-                continue
-            gb = 1024 ** 3
-            if est and free < est * 1.15:
-                warns.append(
-                    f"“{dpaths[key]}” may run out of room: ~{est / gb:.1f} GB estimated, "
-                    f"only {free / gb:.1f} GB free.")
-            elif free < 2 * gb:
-                warns.append(f"Low disk space on “{dpaths[key]}”: {free / gb:.1f} GB free.")
-        return warns
+        return disk_space_warnings(pending)   # logic in core.jobs (UI-free, tested)
 
     def _recent_spf_for_scene(self, scene_path: str) -> float:
         """Most-recent measured sec/frame for this scene, from history (0 if none)."""
@@ -3925,14 +3848,7 @@ class BlenderVideoMapperQt(QMainWindow):
 
     @staticmethod
     def _fmt_dur(seconds: float) -> str:
-        seconds = int(max(0, seconds))
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        if h:
-            return f"{h}h{m:02d}m"
-        if m:
-            return f"{m}m{s:02d}s"
-        return f"{s}s"
+        return format_duration(seconds)   # logic in core.reporting (UI-free, tested)
 
     def _update_progress_caption(self) -> None:
         if not hasattr(self, "queue_panel"):
@@ -5136,26 +5052,7 @@ class BlenderVideoMapperQt(QMainWindow):
         }
 
     def _migrate_profile(self, d: dict) -> dict:
-        """Bring an older saved profile up to the current schema. A newer-than-
-        current profile is loaded as-is (best effort) so a downgrade never wipes
-        state. This is the scaffold to hang real field migrations on."""
-        try:
-            ver = int(d.get("version", 1))
-        except (TypeError, ValueError):
-            ver = 1
-        if ver > PROFILE_VERSION:
-            self._append_log(
-                f"[app] Settings are from a newer build (v{ver} > v{PROFILE_VERSION}); "
-                "loading what's compatible.")
-            return d
-        if ver == PROFILE_VERSION:
-            return d
-        migrated = dict(d)
-        # Forward migrations go here, smallest version first, e.g.:
-        #   if ver < 4: migrated = self._migrate_v3_to_v4(migrated)
-        migrated["version"] = PROFILE_VERSION
-        self._append_log(f"[app] Migrated settings from v{ver} to v{PROFILE_VERSION}.")
-        return migrated
+        return migrate_profile(d, PROFILE_VERSION, self._append_log)   # logic in core.jobs
 
     def _apply_profile_data(self, d: dict) -> None:
         d = self._migrate_profile(d)
