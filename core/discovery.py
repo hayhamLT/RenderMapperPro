@@ -67,6 +67,11 @@ def discover_scene_elements(
     c4dpy_executable: str = "",
     c4d_discover_script: str = "",
 ) -> tuple[list[str], list[str], dict]:
+    # Route web-native scenes (.glb/.gltf) to the headless three.js backend.
+    if str(scene_path).lower().endswith((".glb", ".gltf")):
+        from .web_render import discover_web_scene
+        return discover_web_scene(Path(scene_path).expanduser().resolve(), on_log)
+
     # Route Cinema 4D scenes to the C4D discovery backend.
     if str(scene_path).lower().endswith(".c4d") and c4dpy_executable and c4d_discover_script:
         return _run_c4d_discovery(c4dpy_executable, c4d_discover_script,

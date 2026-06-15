@@ -478,6 +478,11 @@ def run_blender_job(
     c4dpy_executable: str = "",
     c4d_worker_script: str = "",
 ) -> int:
+    # Route web-native scenes (.glb/.gltf) to the headless three.js backend.
+    from .web_render import is_web_scene, run_web_job
+    if is_web_scene(job.scene_path):
+        return run_web_job(job, on_log, should_cancel)
+
     # Route Cinema 4D scenes to the C4D/Redshift backend.
     if is_c4d_scene(job.scene_path) and c4dpy_executable and c4d_worker_script:
         return run_c4d_job(c4dpy_executable, c4d_worker_script, job, on_log, should_cancel)

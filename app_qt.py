@@ -2092,8 +2092,12 @@ class BlenderVideoMapperQt(QMainWindow):
         if not scene or not file_exists(scene):
             return
         is_c4d = scene.lower().endswith(".c4d")
-        # Cinema 4D scenes need c4dpy; everything else needs Blender.
-        if is_c4d:
+        is_web = scene.lower().endswith((".glb", ".gltf"))
+        # Cinema 4D scenes need c4dpy; web (.glb/.gltf) renders in-browser and
+        # needs neither Blender nor c4dpy; everything else needs Blender.
+        if is_web:
+            blender = ""
+        elif is_c4d:
             c4dpy = self._ensure_c4dpy(interactive=True)
             if not c4dpy:
                 return
@@ -3465,10 +3469,15 @@ class BlenderVideoMapperQt(QMainWindow):
             )
             return
 
-        # Cinema 4D scenes render via c4dpy/Redshift; others via Blender.
+        # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) renders in a
+        # headless browser (no Blender/c4dpy); everything else via Blender.
         _scene_now = self.scene_panel.scene_edit.text().strip()
         _is_c4d = _scene_now.lower().endswith(".c4d")
-        if _is_c4d:
+        _is_web = _scene_now.lower().endswith((".glb", ".gltf"))
+        if _is_web:
+            c4dpy = ""
+            blender = ""
+        elif _is_c4d:
             c4dpy = self._ensure_c4dpy(interactive=True)
             if not c4dpy:
                 return
