@@ -1734,7 +1734,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 f"This release has no build for your platform ({_update_platform_key()}).")
             return
         token = _update_token()
+        tag = str(info.get("tag_name", "") or "update").lstrip("v") or "update"
         dest = Path.home() / "Downloads" / want
+        # Extract into a NEW, versioned folder — NEVER over the running install.
+        # The app is often run straight from Downloads/Render Mapper Pro/, and an
+        # OS won't let you overwrite a running executable (Windows: Errno 13 on
+        # the locked .exe). A separate folder side-steps that entirely.
+        extract_dir = Path.home() / "Downloads" / f"{APP_NAME} {tag}"
         try:
             import urllib.request
             req = urllib.request.Request(asset["url"], headers={
@@ -1744,11 +1750,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
             from core.archive import safe_extract_zip
-            safe_extract_zip(dest, dest.parent)   # rejects Zip-Slip members
-            reveal_in_file_manager(dest)
+            if extract_dir.exists():     # clear a prior attempt (staging, not the running app)
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            safe_extract_zip(dest, extract_dir)   # Zip-Slip-safe; into the versioned dir
+            reveal_in_file_manager(extract_dir)
             QMessageBox.information(self, "Update Downloaded",
-                f"{want} was downloaded to your Downloads and unzipped.\n\n"
-                f"Quit {APP_NAME} and replace it with the new build, then reopen.")
+                f"{APP_NAME} {tag} was unzipped to:\n\n{extract_dir}\n\n"
+                f"Quit {APP_NAME}, then move the new build out of that folder to replace "
+                f"your current copy (an app can't overwrite itself while running).")
         except Exception as exc:
             QMessageBox.warning(self, "Update Failed", str(exc))
 
