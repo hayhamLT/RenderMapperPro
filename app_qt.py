@@ -800,6 +800,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self.view_menu.addAction(self.preview_action)
 
         help_menu = mb.addMenu("Help")
+        help_menu.addAction("User Guide", self._show_user_guide)
         help_menu.addAction("Quick Start", self._show_quick_start)
         help_menu.addAction("Keyboard Shortcuts", self._show_shortcuts_help)
         help_menu.addAction("Check for Updates…", lambda: self._check_for_updates(manual=True))
@@ -888,6 +889,254 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             f"td.fname{{color:{p.accent}; font-weight:700; white-space:nowrap; padding-right:16px;}}"
             f"</style>"
         )
+
+    def _show_user_guide(self) -> None:
+        """A tabbed, click-through User Guide — one tab per panel/area. The
+        ``action:`` links jump straight to the relevant settings dialog, so the
+        guide is interactive, not just a wall of text."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{APP_NAME} — User Guide")
+        dlg.setMinimumSize(800, 660)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        pal = self._palette
+        css = self._help_css()
+        for title, body in self._guide_sections():
+            browser = QTextBrowser()
+            browser.setOpenLinks(False)
+            browser.setStyleSheet(
+                f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 20px 26px; }}")
+            browser.setHtml(css + body)
+            browser.anchorClicked.connect(lambda url, d=dlg: self._on_help_anchor(url, d))
+            tabs.addTab(browser, title.replace("&", "&&"))   # && → literal & (not a mnemonic)
+        lay.addWidget(tabs)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.setContentsMargins(10, 8, 10, 8)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        dlg.exec()
+
+    @staticmethod
+    def _guide_sections() -> list[tuple[str, str]]:
+        """(tab title, HTML body) for each User Guide page. Static HTML — the
+        only dynamic bits are ``action:`` links, resolved by _on_help_anchor."""
+        return [
+            ("Getting Started", """
+        <h2>Welcome</h2>
+        <p class="lead">Render Mapper Pro maps your videos onto a 3D scene's
+        materials and renders them — on your machine or a render farm. Each tab
+        above covers one part of the app; here's the whole flow first.</p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td><b>Add a scene</b> — drag a 3D
+              file onto the <b>Scene</b> box, then click <b>Scan Scene</b>. See the
+              <b>Scene &amp; Clips</b> tab.</td></tr>
+          <tr><td class="num">2</td><td><b>Add clips</b> — drag your videos into the
+              Videos list and pick a <b>Camera</b>.</td></tr>
+          <tr><td class="num">3</td><td><b>Link them</b> — click <b>Auto-map</b> to
+              match clips to materials by name, or link a selected pair by hand.</td></tr>
+          <tr><td class="num">4</td><td><b>Set the output</b> — see the <b>Render
+              Settings</b> tab for resolution, range, format and quality.</td></tr>
+          <tr><td class="num">5</td><td><b>Queue &amp; render</b> — press <b>Start</b>
+              (<kbd>⌘R</kbd>) and watch the <b>Live Preview</b>, or send it to a
+              <b>Render Farm</b>.</td></tr>
+        </table>
+        <h3>The workspace</h3>
+        <p class="muted">Panels float and dock freely — drag a panel's tab to
+        rearrange, tab, or float it, pick a preset from <i>View → Layout</i>, and
+        show/hide panels from <i>View</i>. Press <kbd>⌘K</kbd> for the command
+        palette, and switch light/dark in <i>View</i>. First, point the app at
+        Blender (or let it fetch one) in <a href="action:properties/Render Engines">Properties</a>.</p>
+        """),
+            ("Scene & Clips", """
+        <h2>Scene &amp; Clips</h2>
+        <p class="lead">Load a 3D scene, add your videos, and connect each clip to
+        the material (screen) it should play on.</p>
+        <h3>Loading a scene</h3>
+        <p class="muted"><b>Drag &amp; drop</b> a file onto the Scene box, click
+        <b>Browse</b>, or pick from <b>recent</b> (the ▾ button). Supported:
+        Blender <code>.blend</code> / <code>.fbx</code> / <code>.obj</code> /
+        <code>.usd</code> / <code>.abc</code>, Cinema&nbsp;4D <code>.c4d</code>, and
+        glTF <code>.glb</code> / <code>.gltf</code>. Then <b>Scan Scene</b> reads
+        its materials + cameras and pulls the scene's own render settings (fps,
+        range, resolution, engine) into the UI.</p>
+        <h3>Materials &amp; videos</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Filter</td><td>Type in the search boxes to narrow long
+              material or video lists.</td></tr>
+          <tr><td class="fname">Add clips</td><td>Drag videos in or click <b>Add</b>.
+              A clip with sound shows a <b>speaker</b> badge — click it to mute that
+              clip (the rest are mixed into the render).</td></tr>
+          <tr><td class="fname">Render target</td><td>Right-click a material →
+              <b>Mark as Render Target</b> (or click the stripe on its left) to flag
+              the screens an auto-render must cover.</td></tr>
+        </table>
+        <h3>Linking a clip to a material</h3>
+        <p class="muted"><b>Auto-map</b> is easiest: it links by name, so a
+        <code>Screen</code> material grabs <code>Screen_v3.mp4</code> — it only fills
+        empty materials and never overwrites a manual link. To link by hand, select
+        one material + one video and click the <b>link</b> button between the lists.
+        A colored <b>stripe</b> marks each pair; hover or select either side to light
+        up its partner.</p>
+        <h3>Watch folder</h3>
+        <p class="muted">Turn on the <b>watch folder</b> (clock button under the
+        clips) and any clip dropped there imports + maps itself. It's version-aware
+        — <code>Screen_v1</code>/<code>v2</code>/<code>_3</code> are one clip and the
+        <b>latest wins</b>. Tune it in <a href="action:properties/Watch">Properties →
+        Watch &amp; Auto-render</a>.</p>
+        """),
+            ("Render Settings", """
+        <h2>Render Settings</h2>
+        <p class="lead">Resolution, range, renderer, output, and the quality knobs —
+        most are pulled from the scene on Scan, then yours to tweak.</p>
+        <h3>Basics</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Resolution / FPS</td><td>Output width × height and
+              frame rate.</td></tr>
+          <tr><td class="fname">Frame range</td><td><b>Start</b>, <b>End</b> and
+              <b>Step</b> (render every Nth frame).</td></tr>
+          <tr><td class="fname">Renderer</td><td>Auto-picked by scene type —
+              <b>Cycles</b>/<b>EEVEE</b> for Blender, <b>Redshift</b> for .c4d,
+              <b>three.js</b> for .glb. Set the engine paths in
+              <a href="action:properties/Render Engines">Properties → Render Engines</a>.</td></tr>
+          <tr><td class="fname">Output</td><td>Profile — <b>H.264 MP4</b> (review),
+              <b>ProRes MOV</b> (editorial), or <b>PNG/EXR sequence</b> (comp). The
+              <b>Output path</b> accepts tokens: <code>{scene}</code>
+              <code>{camera}</code> <code>{date}</code>.</td></tr>
+        </table>
+        <h3>Advanced quality</h3>
+        <p class="muted">The collapsible <b>Advanced</b> panel adapts to the active
+        renderer so every control is real:</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Blender</td><td>Samples, denoise, device (CPU/GPU),
+              colour transform / exposure / gamma, transparent film.</td></tr>
+          <tr><td class="fname">Redshift</td><td>Speed Preset (Draft→Final), Max/Min
+              samples, adaptive Noise Threshold, denoise, GI bounces, Max Ray Depth.</td></tr>
+          <tr><td class="fname">three.js</td><td>Lighting preset (auto/studio/outdoor/
+              flat), intensity, and whether to respect the file's own lights.</td></tr>
+        </table>
+        <p class="muted">Plus a render <b>scale&nbsp;%</b> and an optional
+        <b>burn-in</b> overlay (clip/version/frame/camera/date on every frame).</p>
+        """),
+            ("Live Preview", """
+        <h2>Live Preview</h2>
+        <p class="lead">Render a single frame from your current settings — no queue
+        needed — to check framing and mapping before committing to a full render.</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Frame picker</td><td>Choose a frame with the
+              <b>scrubber</b> (prev/next, slider, frame field).</td></tr>
+          <tr><td class="fname">Render</td><td>Click the <b>camera</b> button to
+              render that frame. A thin <b>progress bar</b> under the image shows it
+              working.</td></tr>
+          <tr><td class="fname">Scale</td><td><b>Full / ½ / ¼ / ⅛</b> — render at a
+              fraction for a fast preview on heavy scenes.</td></tr>
+          <tr><td class="fname">Auto</td><td>Re-renders the preview whenever you
+              change the camera, resolution, frame or mapping (debounced).</td></tr>
+          <tr><td class="fname">Zoom &amp; pan</td><td><b>Double-click</b> toggles
+              Fit ⇄ 100% (centred on the click); <b>grab to pan</b> at 100%.</td></tr>
+          <tr><td class="fname">Playback</td><td>After a full render the finished
+              movie plays (looped) here — <kbd>Space</kbd> play/pauses.</td></tr>
+        </table>
+        """),
+            ("Queue & Render", """
+        <h2>Queue &amp; Render</h2>
+        <p class="lead">The moment you map a clip it becomes a live job. Tick the
+        ones to render, press Start, and track them here.</p>
+        <h3>The columns</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Run</td><td>Checked jobs render when you press Start.</td></tr>
+          <tr><td class="fname">Job</td><td><b>Double-click to rename</b>.</td></tr>
+          <tr><td class="fname">Status / ETA</td><td>Live state, plus estimated time —
+              remaining for the running job, or a prediction from past runs.</td></tr>
+          <tr><td class="fname">Progress / Output</td><td>Per-row progress and the
+              destination file.</td></tr>
+        </table>
+        <h3>Running &amp; managing</h3>
+        <p class="muted"><b>Start</b> ticked jobs with <kbd>⌘R</kbd> (or all with
+        <kbd>⌘⇧R</kbd>), <b>Stop</b> with <kbd>⌘.</kbd>. Duplicate with
+        <kbd>⌘D</kbd>, delete with <kbd>⌫</kbd>, or right-click for <b>Set
+        Priority</b>, <b>Requeue</b>, <b>Reveal</b>, <b>Open</b>, <b>Move</b>, and
+        <b>Clear Queue</b>. A failed job <b>auto-retries once</b> after the others.
+        Overall progress + ETA show below the queue, and every step is in the
+        Live&nbsp;Logs.</p>
+        """),
+            ("Render Farm", """
+        <h2>Render Farm (Deadline)</h2>
+        <p class="lead">Submit Blender <i>and</i> Cinema&nbsp;4D jobs to a Thinkbox
+        Deadline farm so frames spread across your nodes.</p>
+        <h3>Connect</h3>
+        <p class="muted">Enable the <b>Deadline</b> panel, set the <b>Repository</b>
+        and (optionally) <b>deadlinecommand</b> paths — both auto-detected when
+        possible — and hit <b>Test Connection</b>. All of this lives in
+        <a href="action:properties/Deadline">Properties → Deadline</a>.</p>
+        <h3>Submit</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Targeting</td><td>Pool, secondary pool, group,
+              priority, department, machine limit and comment.</td></tr>
+          <tr><td class="fname">Chunking</td><td><b>Manual</b> frames-per-task, or
+              <b>Auto</b> (~5/10/20 min) sized from your render history.</td></tr>
+          <tr><td class="fname">Engines</td><td>Blender jobs render via the worker on
+              each node; <b>Cinema&nbsp;4D</b> jobs are baked into a self-contained
+              scene and rendered with the licensed C4D command-line renderer, so node
+              licensing just works.</td></tr>
+          <tr><td class="fname">Nodes</td><td><i>Deadline → Farm Nodes…</i> lists the
+              farm; right-click a queued job to <b>Set Priority</b> or <b>Requeue</b>.</td></tr>
+        </table>
+        <p class="muted"><b>One-time setup:</b> install the bundled
+        <code>RenderMapperPro</code> Deadline plugin into your repository's
+        <code>custom/plugins/</code>, and make sure each node is licensed for the
+        renderer it runs.</p>
+        """),
+            ("Backends & Setup", """
+        <h2>Backends &amp; Setup</h2>
+        <p class="lead">Three render backends, chosen automatically by scene type.
+        The app is self-contained — it fetches what it can.</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Blender</td><td><code>.blend</code> / <code>.fbx</code>
+              / <code>.usd</code> / <code>.obj</code> / <code>.abc</code>. If Blender
+              isn't found the app offers to <b>download a managed copy</b> for you;
+              or point it at your own in
+              <a href="action:properties/Render Engines">Properties → Render Engines</a>.</td></tr>
+          <tr><td class="fname">Cinema 4D + Redshift</td><td><code>.c4d</code>. Needs
+              your own licensed Cinema&nbsp;4D + Redshift (detected via
+              <code>c4dpy</code>) — it's commercial software the app can't install.</td></tr>
+          <tr><td class="fname">Web / glTF</td><td><code>.glb</code> /
+              <code>.gltf</code> via headless three.js — it fetches its own Chromium
+              on first use. (You can also render a .glb through Blender.)</td></tr>
+        </table>
+        <p class="muted"><b>ffmpeg</b> is bundled (frame extraction + muxing).
+        Updates are automatic — the app checks Releases on launch; see
+        <a href="action:properties/Updates">Properties → Updates</a>.</p>
+        """),
+            ("Reports & Tips", """
+        <h2>Reports, Logs &amp; Tips</h2>
+        <p class="lead">Track cost and time, review outputs, get notified, and move
+        fast.</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Analytics</td><td>Every render records seconds/frame,
+              total time and an estimated <b>cost</b> — set wattage + rate in
+              <a href="action:power">Power &amp; Cost</a>, see runs in
+              <a href="action:history">Render History</a>.</td></tr>
+          <tr><td class="fname">Output review</td><td>Auto <b>contact sheets</b> per
+              render, plus a shareable <b>HTML report</b> with timing, cost and
+              thumbnails.</td></tr>
+          <tr><td class="fname">Notifications</td><td>Ping on complete/fail via the
+              system tray or a <b>Discord webhook</b> —
+              <a href="action:notifications">set it up</a>.</td></tr>
+          <tr><td class="fname">Live Logs</td><td>Filter by text or level; downloads
+              and renders show a one-line <b>progress bar</b>; <b>Copy Diagnostics</b>
+              grabs everything for a bug report.</td></tr>
+        </table>
+        <h3>Move faster</h3>
+        <p class="muted">Press <kbd>⌘K</kbd> for the <b>command palette</b> to run
+        anything by name, browse all <a href="action:shortcuts">keyboard
+        shortcuts</a>, rearrange the workspace from <i>View → Layout</i>, and toggle
+        light/dark in <i>View</i>.</p>
+        """),
+        ]
 
     def _show_quick_start(self) -> None:
         html = self._help_css() + """
@@ -3399,6 +3648,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             ("Open HTML Render Report", self._open_html_report),
             ("Power & Cost Settings…", self._show_power_settings),
             ("Toggle Light/Dark Theme", lambda: self._toggle_theme(self._theme_mode != "light")),
+            ("User Guide", self._show_user_guide),
             ("Quick Start", self._show_quick_start),
             ("Copy Diagnostics", self._copy_diagnostics),
             ("Check for Updates…", lambda: self._check_for_updates(manual=True)),

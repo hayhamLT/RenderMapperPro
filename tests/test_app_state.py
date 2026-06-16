@@ -47,6 +47,12 @@ def test_help_dialogs_build_and_links_route(tmp_path, monkeypatch):
     w._show_shortcuts_help()
     w._show_about()
 
+    # The tabbed User Guide builds every section, each with real content.
+    sections = w._guide_sections()
+    assert len(sections) >= 7
+    assert all(title and "<h2>" in body for title, body in sections)
+    w._show_user_guide()   # builds the QTabWidget across all tabs, no raise
+
     # action: anchors open the matching dialog, passing any tab argument through.
     opened: dict = {}
     monkeypatch.setattr(w, "_show_properties_dialog", lambda tab=None: opened.update(props=tab))
