@@ -2,9 +2,11 @@
 
 A third backend (alongside Blender and Cinema 4D / Redshift) for web-native
 scenes (``.glb`` / ``.gltf``). Runs in-process: drives a headless Chromium that
-loads ``assets/web_scene.html`` (three.js ``WebGPURenderer``, auto WebGL2
-fallback), maps clips onto material emissive maps by name, renders frame by
-frame, and assembles the result with the bundled ffmpeg.
+loads ``assets/web_scene.html`` (three.js ``WebGLRenderer`` — mature + reliable
+under headless Windows ANGLE), maps clips onto material emissive maps by name,
+renders frame by frame, reads each frame back via canvas ``toDataURL`` (not a
+GPU-canvas screenshot, which is black on headless Windows), and assembles the
+result with the bundled ffmpeg.
 
 Playwright is an optional dependency — imported lazily so the rest of the app
 runs without it; a missing install yields a clear, actionable error.
@@ -346,9 +348,6 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
             for mn, _ in mappings:
                 if mn not in mat_names:
                     log(f"[web] WARNING: material '{mn}' not found in the scene — skipped.")
-            canvas = page.query_selector("canvas")
-            if canvas is None:
-                raise RuntimeError("web renderer produced no canvas")
             for out_i, frame in enumerate(out_frames):
                 if should_cancel and should_cancel():
                     log("[web] Cancelled.")
@@ -364,7 +363,14 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                     page.evaluate("([m, d]) => window.api.setEmissive(m, d)",
                                   [mn, f"data:image/png;base64,{data}"])
                 page.evaluate("() => window.api.render()")
-                canvas.screenshot(path=str(out_dir / f"out_{out_i:05d}.png"))
+                # Read the frame back from the canvas (toDataURL) rather than a
+                # GPU-canvas element screenshot, which returns black on headless
+                # Windows. The page keeps preserveDrawingBuffer on for this read.
+                data_url = page.evaluate("() => window.api.capture()")
+                if not isinstance(data_url, str) or "," not in data_url:
+                    raise RuntimeError("web renderer returned no frame data")
+                (out_dir / f"out_{out_i:05d}.png").write_bytes(
+                    base64.b64decode(data_url.split(",", 1)[1]))
                 if out_i % 20 == 0:
                     log(f"[web] frame {out_i + 1}/{total}")
         finally:
