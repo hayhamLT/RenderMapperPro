@@ -393,12 +393,39 @@ def material_assignments_from_config(config: dict) -> list[dict[str, str]]:
 
 
 def set_camera(camera_name: str) -> None:
-    camera_obj = bpy.data.objects.get(camera_name)
-    if camera_obj is None or camera_obj.type != "CAMERA":
-        raise RuntimeError(f"Camera not found (or not camera type): {camera_name}")
+    """Ensure the scene has an active render camera.
 
-    bpy.context.scene.camera = camera_obj
-    log(f"Set active camera: {camera_name}")
+    Uses ``camera_name`` when it names a camera object; otherwise keeps an
+    already-active camera (a ``.blend`` usually ships one), and failing that
+    falls back to the first camera in the scene. Only raises when the scene has
+    no camera at all. The fallback matters for imported glTF/FBX scenes: Blender
+    imports their cameras but does NOT set one as the active scene camera, so
+    without this a ``.glb`` render dies with "Cannot render, no camera"."""
+    scene = bpy.context.scene
+    if camera_name:
+        camera_obj = bpy.data.objects.get(camera_name)
+        if camera_obj is not None and camera_obj.type == "CAMERA":
+            scene.camera = camera_obj
+            log(f"Set active camera: {camera_name}")
+            return
+        log(f"WARNING: camera '{camera_name}' not found — falling back to another camera")
+
+    if scene.camera is not None and getattr(scene.camera, "type", "") == "CAMERA":
+        log(f"Using the scene's active camera: {scene.camera.name}")
+        return
+
+    cams = [o for o in scene.objects if o.type == "CAMERA"]
+    if not cams:
+        cams = [o for o in bpy.data.objects if o.type == "CAMERA"]
+        if cams:   # imported but not linked to the active scene — link it so it renders
+            try:
+                scene.collection.objects.link(cams[0])
+            except Exception:
+                pass
+    if not cams:
+        raise RuntimeError("No camera in the scene to render from")
+    scene.camera = cams[0]
+    log(f"Set active camera (fallback): {cams[0].name}")
 
 
 def configure_render(config: dict) -> None:
@@ -666,8 +693,7 @@ def main() -> None:
 
     load_scene(config["scene_path"])
     target_cam = str(config.get("target_camera", "")).strip()
-    if target_cam:
-        set_camera(target_cam)
+    set_camera(target_cam)   # always ensure an active camera (falls back if needed)
     for assignment in assignments:
         apply_video_to_material(
             material_name=assignment["material_name"],
