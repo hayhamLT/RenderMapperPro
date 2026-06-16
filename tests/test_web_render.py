@@ -55,3 +55,19 @@ def test_is_software_renderer():
     assert _is_software_renderer("Google SwiftShader")
     assert _is_software_renderer("llvmpipe (software)")
     assert _is_software_renderer("")
+
+
+def test_web_video_args_honours_codec_and_quality():
+    """The three.js encode maps the job's codec + quality to ffmpeg args, instead
+    of using ffmpeg defaults (which ignored the user's Output Format / quality)."""
+    from core.web_render import _web_video_args
+
+    def opts(**kw):
+        return RenderOptions(width=8, height=8, fps=24, frame_start=1, frame_end=2, **kw)
+
+    hi = _web_video_args(opts(video_quality="HIGH"))
+    assert "libx264" in hi and hi[hi.index("-crf") + 1] == "18"
+    lo = _web_video_args(opts(video_quality="LOW"))
+    assert lo[lo.index("-crf") + 1] == "28"
+    assert "libx265" in _web_video_args(opts(video_codec="H265"))
+    assert "prores_ks" in _web_video_args(opts(video_codec="ProRes"))
