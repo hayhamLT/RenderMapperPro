@@ -103,17 +103,25 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/Render Mapper Pro.app" \
             "RenderMapperPro-${{ matrix.label }}.zip"
+          bash installer/make_dmg.sh "RenderMapperPro-${{ matrix.label }}.dmg"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive -Path "dist/Render Mapper Pro" `
             -DestinationPath "RenderMapperPro-${{ matrix.label }}.zip"
+          choco install innosetup --no-progress -y
+          $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
+          Copy-Item "installer\Output\RenderMapperPro-Windows-x64-Setup.exe" .
       - uses: actions/upload-artifact@v4
         with:
           name: RenderMapperPro-${{ matrix.label }}
-          path: RenderMapperPro-${{ matrix.label }}.zip
-          if-no-files-found: error
+          path: |
+            RenderMapperPro-${{ matrix.label }}.zip
+            RenderMapperPro-${{ matrix.label }}.dmg
+            RenderMapperPro-Windows-x64-Setup.exe
+          if-no-files-found: ignore
 
   # macOS-Intel (macos-13) runners are scarce and often queue for a long time,
   # so this is decoupled — it never blocks the Release.
@@ -147,10 +155,13 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/Render Mapper Pro.app" \
             "RenderMapperPro-macOS-intel.zip"
+          bash installer/make_dmg.sh "RenderMapperPro-macOS-intel.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: RenderMapperPro-macOS-intel
-          path: RenderMapperPro-macOS-intel.zip
+          path: |
+            RenderMapperPro-macOS-intel.zip
+            RenderMapperPro-macOS-intel.dmg
           if-no-files-found: error
 
   # Publish the Release as soon as arm64 + Windows are ready.
@@ -168,21 +179,24 @@ jobs:
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
           generate_release_notes: true
           body: |
             Standalone builds of **Render Mapper Pro**.
 
-            | Platform | Download |
-            |----------|----------|
-            | macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.zip` |
-            | macOS (Intel) | `RenderMapperPro-macOS-intel.zip` |
-            | Windows (x64) | `RenderMapperPro-Windows-x64.zip` |
+            | Platform | Installer (recommended) | Portable |
+            |----------|-------------------------|----------|
+            | Windows (x64) | `RenderMapperPro-Windows-x64-Setup.exe` | `RenderMapperPro-Windows-x64.zip` |
+            | macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.dmg` | `RenderMapperPro-macOS-arm64.zip` |
+            | macOS (Intel) | `RenderMapperPro-macOS-intel.dmg` | `RenderMapperPro-macOS-intel.zip` |
 
-            **macOS:** unzip, then right-click the app → **Open** → **Open** (first launch only, since it isn't notarized).
-            **Windows:** unzip the folder, run **Render Mapper Pro.exe**. If SmartScreen warns, click **More info → Run anyway**.
+            **Windows:** run the **Setup.exe** (installs to Program Files + Start-Menu shortcut). SmartScreen may warn — **More info → Run anyway** (the build isn't code-signed).
+            **macOS:** open the **.dmg** and drag the app to Applications. First launch: right-click → **Open** → **Open** (it isn't notarized).
 
-            _The macOS-Intel zip attaches automatically once its build finishes (it can lag if GitHub's Intel runners are busy)._
+            _The macOS-Intel build attaches automatically once it finishes (it can lag if GitHub's Intel runners are busy)._
 
   # Attach the Intel zip to the same Release whenever its build finishes.
   release-intel:
@@ -197,7 +211,9 @@ jobs:
         with:
           name: RenderMapperPro-macOS-intel
           path: artifacts
-      - name: Upload Intel zip to the Release
+      - name: Upload Intel build to the Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/RenderMapperPro-macOS-intel.zip
+          files: |
+            artifacts/RenderMapperPro-macOS-intel.zip
+            artifacts/RenderMapperPro-macOS-intel.dmg

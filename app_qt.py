@@ -1652,10 +1652,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
     # ── Updates (automatic: checks GitHub Releases with a baked-in read-only
     #    token, so a private repo updates with zero per-machine config) ────────
+    # In-app update downloads the platform INSTALLER and launches it — the
+    # installer handles replacing the (possibly running) app, so there's no
+    # extract-over-a-locked-exe problem. (Releases also ship portable .zips.)
     _ASSET_FOR_PLATFORM: ClassVar = {
-        "macos-arm64": "RenderMapperPro-macOS-arm64.zip",
-        "macos-intel": "RenderMapperPro-macOS-intel.zip",
-        "windows-x64": "RenderMapperPro-Windows-x64.zip",
+        "macos-arm64": "RenderMapperPro-macOS-arm64.dmg",
+        "macos-intel": "RenderMapperPro-macOS-intel.dmg",
+        "windows-x64": "RenderMapperPro-Windows-x64-Setup.exe",
     }
 
     def _check_for_updates(self, manual: bool = False) -> None:
@@ -1731,16 +1734,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         asset = next((a for a in info.get("assets", []) if a.get("name") == want), None)
         if not asset:
             QMessageBox.warning(self, "Update",
-                f"This release has no build for your platform ({_update_platform_key()}).")
+                f"This release has no installer for your platform ({_update_platform_key()}).")
             return
         token = _update_token()
         tag = str(info.get("tag_name", "") or "update").lstrip("v") or "update"
         dest = Path.home() / "Downloads" / want
-        # Extract into a NEW, versioned folder — NEVER over the running install.
-        # The app is often run straight from Downloads/Render Mapper Pro/, and an
-        # OS won't let you overwrite a running executable (Windows: Errno 13 on
-        # the locked .exe). A separate folder side-steps that entirely.
-        extract_dir = Path.home() / "Downloads" / f"{APP_NAME} {tag}"
         try:
             import urllib.request
             req = urllib.request.Request(asset["url"], headers={
@@ -1749,15 +1747,19 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             dest.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
-            from core.archive import safe_extract_zip
-            if extract_dir.exists():     # clear a prior attempt (staging, not the running app)
-                shutil.rmtree(extract_dir, ignore_errors=True)
-            safe_extract_zip(dest, extract_dir)   # Zip-Slip-safe; into the versioned dir
-            reveal_in_file_manager(extract_dir)
-            QMessageBox.information(self, "Update Downloaded",
-                f"{APP_NAME} {tag} was unzipped to:\n\n{extract_dir}\n\n"
-                f"Quit {APP_NAME}, then move the new build out of that folder to replace "
-                f"your current copy (an app can't overwrite itself while running).")
+            # Hand off to the platform installer — it replaces the running app
+            # itself (Windows: the Inno setup closes + overwrites; macOS: drag to
+            # Applications), so there's no extract-over-a-locked-exe problem.
+            if sys.platform == "win32":
+                os.startfile(str(dest))                  # runs Setup.exe
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(dest)])    # mounts the .dmg
+            else:
+                reveal_in_file_manager(dest)
+            QMessageBox.information(self, "Update Ready",
+                f"{APP_NAME} {tag} downloaded to:\n\n{dest}\n\n"
+                f"The installer is opening — follow its prompts. You may be asked to "
+                f"quit {APP_NAME} first so it can be replaced.")
         except Exception as exc:
             QMessageBox.warning(self, "Update Failed", str(exc))
 

@@ -13,6 +13,8 @@ env/
 build/
 dist/
 *.egg-info/
+installer/Output/      # Inno Setup compiler output (Setup.exe), produced in CI
+*.dmg                  # locally-built disk images (CI uploads its own)
 
 # macOS
 .DS_Store
