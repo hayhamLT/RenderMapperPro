@@ -28,7 +28,7 @@ window.__ready = false;
 window.__error = '';
 
 const api = {
-  init(w, h) {
+  init(w, h, transparent, exposure) {
     // Mature WebGLRenderer (not the experimental WebGPURenderer): it renders
     // identically for these emissive-screen scenes and, critically, is reliable
     // under headless Windows ANGLE (d3d11), where the WebGPU path plus the
@@ -36,18 +36,22 @@ const api = {
     // keeps the rendered pixels readable so capture() can read them back directly.
     // powerPreference 'high-performance' asks the OS/driver for the DISCRETE GPU
     // on a multi-GPU machine (e.g. a laptop's dGPU instead of the integrated one).
+    // alpha:true + a 0-alpha clear honours the job's "transparent background".
     renderer = new THREE.WebGLRenderer({
-      antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
+      antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance',
+      alpha: !!transparent });
     renderer.setPixelRatio(1);
     renderer.setSize(w, h);
-    renderer.setClearColor(0x000000, 1);
+    renderer.setClearColor(0x000000, transparent ? 0 : 1);
     document.body.appendChild(renderer.domElement);
     // Neutral PBR tone-map for lit geometry; emissive screens set toneMapped=false
     // so they bypass this curve and stay full-bright. Bake a neutral studio IBL
     // once (reused every frame). Guarded so a PMREM failure never blocks readiness
     // or renders black — setLighting's HemisphereLight floor carries the ambient.
     renderer.toneMapping = THREE.NeutralToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    // Exposure (in stops, like Blender's Film exposure) scales the tone-mapped
+    // geometry; the full-bright emissive screens (toneMapped=false) are unaffected.
+    renderer.toneMappingExposure = Math.pow(2, (typeof exposure === 'number' ? exposure : 0));
     try {
       const pmrem = new THREE.PMREMGenerator(renderer);
       envMap = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -218,12 +222,28 @@ const api = {
     renderer.render(scene, camera);
   },
 
-  capture() {
+  capture(burnIn) {
     // Read the rendered pixels straight from the canvas (GPU readback) instead
     // of Playwright's element screenshot, which captures BLACK for a GPU canvas
     // on headless Windows. preserveDrawingBuffer (set in init) keeps the buffer
     // intact for this read. Returns a PNG data URL the Python side decodes.
-    return renderer.domElement.toDataURL('image/png');
+    const gl = renderer.domElement;
+    if (!burnIn) return gl.toDataURL('image/png');
+    // Burn-in: composite the WebGL frame onto a 2D canvas and stamp the label.
+    const c = document.createElement('canvas');
+    c.width = gl.width; c.height = gl.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(gl, 0, 0);
+    const fs = Math.max(12, Math.round(c.height * 0.026));
+    ctx.font = fs + "px -apple-system, Segoe UI, Roboto, sans-serif";
+    ctx.textBaseline = 'alphabetic';
+    const pad = Math.round(fs * 0.6);
+    const tw = ctx.measureText(burnIn).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(pad - 5, c.height - pad - fs - 4, tw + 10, fs + 9);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(burnIn, pad, c.height - pad);
+    return c.toDataURL('image/png');
   },
 };
 

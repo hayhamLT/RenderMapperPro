@@ -1397,7 +1397,13 @@ class RenderPanel(QWidget):
         # Blender-only controls — also hidden for the web/three.js backend.
         self.device_box.setVisible(not is_c4d and not is_web)   # Redshift/web are GPU-only
         self.color_box.setVisible(not is_c4d and not is_web)    # Blender color management
-        self.transparent_cb.setVisible(not is_c4d and not is_web)
+        # Samples + denoise are path-tracer concepts — not three.js (no path tracing).
+        self.samples_label.setVisible(not is_web)
+        self.samples_edit.setVisible(not is_web)
+        self.denoise_cb.setVisible(not is_web)
+        # Transparent background works in three.js too now (only Redshift hides it —
+        # it has its own alpha handling); burn-in works on every backend.
+        self.transparent_cb.setVisible(not is_c4d)
         self.web_light_box.setVisible(is_web)                    # three.js scene lighting
         if is_web:
             items = ["H264 MP4", "PNG Sequence"]
