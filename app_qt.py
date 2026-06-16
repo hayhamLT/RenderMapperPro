@@ -79,6 +79,7 @@ from core.models import (
     RenderOptions,
     is_c4d_scene,
     is_web_scene,
+    uses_web_backend,
 )
 from core.reporting import format_duration, friendly_error_hint
 from core.utils import (
@@ -996,6 +997,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._sync_preview_frame_range()  # seed the picker from the default range
         self.render_panel.frame_step_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.engine_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
+        # Switching engine (e.g. three.js ↔ Blender for a .glb) re-adapts the panel.
+        self.render_panel.engine_combo.currentIndexChanged.connect(lambda _i: self._adapt_renderer_panel())
         self.render_panel.samples_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.denoise_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.view_transform_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
@@ -1761,24 +1764,43 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
     def _set_renderer_options(self, is_c4d: bool, is_web: bool = False, detected: str = "") -> None:
         """Populate the renderer dropdown with the engines that apply to the
         loaded scene: Redshift for .c4d, three.js for .glb/.gltf, Blender else."""
-        self.render_panel.set_renderer(is_c4d, is_web)   # adapt all settings to the renderer
         combo = self.render_panel.engine_combo
-        # C4D path only supports Redshift; web scenes render via headless three.js;
-        # Blender keeps its own engines.
+        # C4D → Redshift only. .glb/.gltf → three.js OR Blender (Blender imports
+        # the glTF), three.js as the default. .blend/other → Blender engines.
         if is_web:
-            items = ["WEB_THREEJS"]
+            items = ["WEB_THREEJS", "CYCLES", "BLENDER_EEVEE"]
         elif is_c4d:
             items = ["Redshift"]
         else:
             items = ["CYCLES", "BLENDER_EEVEE"]
-        if self.render_panel.engine_values() == items:
-            return
         cur = self.render_panel.engine_value()
-        target = detected if detected in items else (cur if cur in items else items[0])
-        combo.blockSignals(True)
-        self.render_panel.populate_engines(items)
-        self.render_panel.set_engine_value(target)
-        combo.blockSignals(False)
+        if detected in items:
+            target = detected                 # restore the scene's saved renderer
+        elif is_web:
+            target = "WEB_THREEJS"            # .glb defaults to three.js (switchable to Blender)
+        elif cur in items:
+            target = cur                      # keep the user's engine across same-type scenes
+        else:
+            target = items[0]
+        # Adapt the settings to the TARGET engine, not the extension — so picking
+        # Blender for a .glb swaps the three.js controls for Blender's.
+        self.render_panel.set_renderer(target == "Redshift", target == "WEB_THREEJS")
+        if self.render_panel.engine_values() != items:
+            combo.blockSignals(True)
+            self.render_panel.populate_engines(items)
+            self.render_panel.set_engine_value(target)
+            combo.blockSignals(False)
+        elif self.render_panel.engine_value() != target:
+            combo.blockSignals(True)
+            self.render_panel.set_engine_value(target)
+            combo.blockSignals(False)
+
+    def _adapt_renderer_panel(self) -> None:
+        """Re-adapt the settings panel when the user switches engine in the
+        dropdown — e.g. choosing Blender for a .glb swaps the three.js scene-
+        lighting/outputs for Blender's device + colour-management controls."""
+        eng = self.render_panel.engine_value()
+        self.render_panel.set_renderer(eng == "Redshift", eng == "WEB_THREEJS")
 
     def _on_discovery(self, materials: list, cameras: list, settings: dict) -> None:
         self._material_aspects = dict(settings.get("material_aspects") or {})
@@ -2345,7 +2367,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         # headless browser (no Blender/c4dpy); everything else via Blender.
         _scene_now = self.scene_panel.scene_edit.text().strip()
         _is_c4d = is_c4d_scene(_scene_now)
-        _is_web = is_web_scene(_scene_now)
+        # A .glb uses Blender unless three.js is the chosen engine.
+        _is_web = uses_web_backend(_scene_now, self.render_panel.engine_value())
         if _is_web:
             c4dpy = ""
             blender = ""
@@ -2604,7 +2627,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         # With no mappings we still preview the bare 3D model.
         self._preview_pending = False
         is_c4d = is_c4d_scene(scene)
-        is_web = is_web_scene(scene)
+        # Preview a .glb via Blender unless three.js is the chosen engine.
+        is_web = uses_web_backend(scene, self.render_panel.engine_value())
         if is_web:
             c4dpy = ""
             blender = ""

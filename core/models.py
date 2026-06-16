@@ -44,6 +44,18 @@ def is_blender_scene(scene_path: str) -> bool:
     return str(scene_path).lower().endswith(BLENDER_SCENE_EXTS)
 
 
+# A .glb/.gltf can render via three.js OR Blender (which imports it), chosen by
+# the render engine — so the backend depends on BOTH the extension and the engine.
+WEB_THREEJS_ENGINE = "WEB_THREEJS"
+
+
+def uses_web_backend(scene_path: str, engine: str) -> bool:
+    """True if this scene+engine renders via the headless three.js backend. A
+    web scene with a Blender engine (CYCLES/EEVEE) goes to Blender, which imports
+    the glTF — so a glb is web-rendered only when three.js is the chosen engine."""
+    return is_web_scene(scene_path) and engine == WEB_THREEJS_ENGINE
+
+
 @dataclass
 class RenderOptions:
     width: int

@@ -30,6 +30,18 @@ def test_properties_dialog_builds(tmp_path, monkeypatch):
     dialogs.build_properties_dialog(w)
 
 
+def test_glb_offers_blender_and_threejs_engines(tmp_path, monkeypatch):
+    """A .glb scene must offer Blender engines alongside three.js (Blender can
+    import + render the glTF), with three.js the default."""
+    _app_qt, w = _window(tmp_path, monkeypatch)
+    w._set_renderer_options(is_c4d=False, is_web=True)
+    engines = w.render_panel.engine_values()
+    assert "WEB_THREEJS" in engines
+    assert "CYCLES" in engines
+    assert "BLENDER_EEVEE" in engines
+    assert w.render_panel.engine_value() == "WEB_THREEJS"   # three.js default
+
+
 def test_profile_roundtrip(tmp_path, monkeypatch):
     """State written by _profile_dict must be read back by _apply_profile_data."""
     app_qt, w = _window(tmp_path, monkeypatch)
