@@ -71,3 +71,11 @@ def test_web_video_args_honours_codec_and_quality():
     assert lo[lo.index("-crf") + 1] == "28"
     assert "libx265" in _web_video_args(opts(video_codec="H265"))
     assert "prores_ks" in _web_video_args(opts(video_codec="ProRes"))
+
+
+def test_burn_text_includes_scene_camera_clip_frame():
+    from core.web_render import _burn_text
+    job = JobConfig("CelebrationStadium.glb", "/v/reel.mp4", "Screen", "07_HR", "out.mp4", _opts(),
+                    material_assignments=[MaterialVideoAssignment("Screen", "/v/reel.mp4")])
+    t = _burn_text(job, 98)
+    assert "CelebrationStadium" in t and "07_HR" in t and "reel.mp4" in t and "f98" in t

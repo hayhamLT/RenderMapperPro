@@ -80,6 +80,22 @@ def test_glb_offers_blender_and_threejs_engines(tmp_path, monkeypatch):
     assert w.render_panel.engine_value() == "WEB_THREEJS"   # three.js default
 
 
+def test_renderer_drives_visible_settings(tmp_path, monkeypatch):
+    """The renderer choice dictates which advanced settings show: three.js hides
+    the path-tracer controls (samples / denoise / device) and shows web lighting;
+    transparent applies to three.js too. Uses isHidden() since the offscreen
+    window isn't shown (so isVisible() is always False)."""
+    _app_qt, w = _window(tmp_path, monkeypatch)
+    rp = w.render_panel
+    rp.set_renderer(is_c4d=False, is_web=True)        # three.js
+    assert rp.samples_edit.isHidden() and rp.denoise_cb.isHidden()
+    assert rp.device_box.isHidden() and not rp.web_light_box.isHidden()
+    assert not rp.transparent_cb.isHidden()           # transparent now works in three.js
+    rp.set_renderer(is_c4d=False, is_web=False)       # Blender
+    assert not rp.samples_edit.isHidden() and not rp.denoise_cb.isHidden()
+    assert rp.web_light_box.isHidden()
+
+
 def test_profile_roundtrip(tmp_path, monkeypatch):
     """State written by _profile_dict must be read back by _apply_profile_data."""
     app_qt, w = _window(tmp_path, monkeypatch)

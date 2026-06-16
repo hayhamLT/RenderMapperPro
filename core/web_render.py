@@ -272,6 +272,26 @@ def _web_video_args(r) -> list:
             "-crf", _WEB_CRF.get(quality, "18"), "-preset", "medium", "-pix_fmt", "yuv420p"]
 
 
+def _burn_text(job, frame: int) -> str:
+    """The burn-in label stamped on each three.js frame — mirrors the Blender /
+    Redshift burn-in (clip, frame, camera, date)."""
+    import datetime
+    bits = []
+    stem = Path(str(getattr(job, "scene_path", "") or "")).stem
+    if stem:
+        bits.append(stem)
+    cam = str(getattr(job, "target_camera", "") or "").strip()
+    if cam:
+        bits.append(cam)
+    asn = getattr(job, "material_assignments", None) or []
+    clip = (getattr(asn[0], "video_path", "") if asn else "") or getattr(job, "video_path", "")
+    if clip:
+        bits.append(Path(clip).name)
+    bits.append(f"f{frame}")
+    bits.append(datetime.date.today().isoformat())
+    return "   ·   ".join(bits)
+
+
 def _clip_frame_index(frame: int, frame_start: int, clip_offset: int, n_frames: int) -> int:
     """Index into the extracted clip frames for a timeline ``frame``, clamped to
     [0, n-1] so frames before the clip hold frame 0 and frames past the clip end
@@ -308,6 +328,10 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     web_light_preset = str(getattr(r, "web_lighting_preset", "auto") or "auto")
     web_light_intensity = float(getattr(r, "web_lighting_intensity", 1.0) or 1.0)
     web_respect_lights = bool(getattr(r, "web_respect_scene_lights", True))
+    # Shared render settings the three.js backend also honours.
+    transparent = bool(getattr(r, "film_transparent", False))
+    exposure = float(getattr(r, "color_exposure", 0.0) or 0.0)
+    do_burn = bool(getattr(r, "burn_in", False))
 
     # Single-frame preview vs. full render.
     preview_frame = int(getattr(job, "preview_frame", 0) or 0)
@@ -351,7 +375,9 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     with sync_playwright() as pw:
         browser, page = _launch(pw, width + 40, height + 40, log)
         try:
-            backend = page.evaluate("([w, h]) => window.api.init(w, h)", [width, height])
+            backend = page.evaluate(
+                "([w, h, t, e]) => window.api.init(w, h, t, e)",
+                [width, height, transparent, exposure])
             log(f"[web] renderer backend: {backend}")
             info = page.evaluate("([b, bin]) => window.api.loadGLB(b, bin)", _load_args(glb))
             mat_names = set(info.get("materials", []))
@@ -386,7 +412,8 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                 # Read the frame back from the canvas (toDataURL) rather than a
                 # GPU-canvas element screenshot, which returns black on headless
                 # Windows. The page keeps preserveDrawingBuffer on for this read.
-                data_url = page.evaluate("() => window.api.capture()")
+                burn = _burn_text(job, frame) if do_burn else ""
+                data_url = page.evaluate("(b) => window.api.capture(b)", burn)
                 if not isinstance(data_url, str) or "," not in data_url:
                     raise RuntimeError("web renderer returned no frame data")
                 (out_dir / f"out_{out_i:05d}.png").write_bytes(
