@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -17,7 +18,16 @@ from pathlib import Path
 from typing import ClassVar
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -2324,6 +2334,12 @@ class LogsPanel(QWidget):
         self._raw: list[str] = []
         self._filter_text = ""
         self._level = "All"
+        # Active "progress" line: consecutive ticks of one task (a download, a
+        # render, …) collapse onto a single in-place updating bar instead of
+        # spamming a line each tick. _progress_key is the task id (numbers
+        # stripped, so it's stable across ticks); it must index the LAST _raw row.
+        self._progress_key: str | None = None
+        self._progress_idx = -1
 
         hdr = QHBoxLayout()
         hdr.setContentsMargins(0, 0, 0, 0)
@@ -2412,6 +2428,8 @@ class LogsPanel(QWidget):
     @staticmethod
     def _line_color(line: str, pal: T.Palette) -> str:
         low = line.lower()
+        if "█" in line or "░" in line:          # a live progress bar
+            return pal.success if " 100%" in line else pal.accent
         if any(k in low for k in ("error", "traceback", "failed", "not found", "cannot", "exception", "critical")):
             return pal.danger
         if any(k in low for k in ("warning", "warn", "skipped", "timeout", "unavailable")):
@@ -2425,16 +2443,99 @@ class LogsPanel(QWidget):
             return pal.text_faint
         return pal.text_muted
 
+    # ── progress lines ──────────────────────────────────────────────────────
+    _PROGRESS_RE = re.compile(r"(\d{1,3})\s*%|(\d+)\s*/\s*(\d+)")
+    _PROGRESS_HINT = re.compile(
+        r"\b(download|downloading|render|rendering|extract|extracting|install|"
+        r"installing|fetch|fetching|copy|copying|upload|uploading|frame|sample|"
+        r"baking|progress|chromium|runtime)\b", re.I)
+    _TS_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*")
+
+    @classmethod
+    def _parse_progress(cls, line: str):
+        """``(pct, label, detail, key)`` if ``line`` is a progress tick, else
+        ``None``. ``key`` has its numbers stripped so successive ticks of the
+        same task share one id and collapse onto a single updating bar."""
+        if not cls._PROGRESS_HINT.search(line):
+            return None
+        for m in cls._PROGRESS_RE.finditer(line):
+            if m.start() and line[m.start() - 1] == "=":   # skip scale=50% / frame=12
+                continue
+            if m.group(1) is not None:
+                pct = int(m.group(1))
+            else:
+                done, tot = int(m.group(2)), int(m.group(3))
+                if tot <= 0:
+                    continue
+                pct = round(100 * done / tot)
+            pct = max(0, min(100, pct))
+            label = line[:m.start()].rstrip(" -—·:|")
+            detail = line[m.end():].strip(" -—·|")
+            key = cls._TS_RE.sub("", label).lower()
+            key = re.sub(r"[\d.]+", "", key)               # numbers out → stable id
+            key = re.sub(r"\s+", " ", key).strip(" |·—-:")
+            if not key:
+                continue
+            return pct, label, detail, key
+        return None
+
+    @staticmethod
+    def _bar(pct: int, width: int = 16) -> str:
+        filled = round(pct / 100.0 * width)
+        return "█" * filled + "░" * (width - filled)
+
+    @classmethod
+    def _format_progress(cls, label: str, pct: int, detail: str) -> str:
+        s = f"{label}  {cls._bar(pct)} {pct:>3d}%"
+        return f"{s}  {detail}" if detail else s
+
+    def _replace_last(self, line: str) -> None:
+        """Rewrite the last shown row in place (the updating progress bar). If
+        the row is filtered out it isn't in the view, so just skip the redraw —
+        ``_raw`` is already current and a later re-render will pick it up."""
+        import html
+        if not self._passes(line):
+            return
+        color = self._line_color(line, active_palette())
+        safe = html.escape(line).replace(" ", "&nbsp;")
+        cur = self.text.textCursor()
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        cur.movePosition(QTextCursor.MoveOperation.StartOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        cur.removeSelectedText()
+        cur.insertHtml(f'<span style="color:{color}; white-space:pre;">{safe}</span>')
+
     def append(self, line: str) -> None:
+        prog = self._parse_progress(line)
+        if prog is not None:
+            pct, label, detail, key = prog
+            bar = self._format_progress(label, pct, detail)
+            # Same task as the current bar (and it's still the last row)? Update
+            # it in place rather than adding a new line.
+            if key == self._progress_key and self._progress_idx == len(self._raw) - 1:
+                self._raw[self._progress_idx] = bar
+                self._replace_last(bar)
+                return
+            self._raw.append(bar)
+            self._progress_key, self._progress_idx = key, len(self._raw) - 1
+            self._emit(bar)
+            self._cap()
+            return
+        # A normal line ends any active progress run.
+        self._progress_key = None
         self._raw.append(line)
+        self._emit(line)
+        self._cap()
+
+    def _cap(self) -> None:
         if len(self._raw) > 8000:          # cap memory for very long sessions
             self._raw = self._raw[-6000:]
+            self._progress_key = None      # slice invalidated the index
             self._rerender()
-            return
-        self._emit(line)
 
     def _clear(self) -> None:
         self._raw.clear()
+        self._progress_key = None
+        self._progress_idx = -1
         self.text.clear()
 
 
@@ -2680,8 +2781,32 @@ class PreviewPanel(QWidget):
         else:
             lay.addWidget(self.scroll_area, 1)
 
+        # A thin progress strip under the preview, shown only while a preview
+        # frame renders (indeterminate until the engine reports a percentage).
+        self.render_bar = QProgressBar()
+        self.render_bar.setObjectName("PreviewProgress")
+        self.render_bar.setTextVisible(False)
+        self.render_bar.setFixedHeight(3)
+        self.render_bar.setRange(0, 0)
+        self.render_bar.setVisible(False)
+        lay.addWidget(self.render_bar)
+
         self.auto_btn.setChecked(True)   # auto-render on by default
         self.restyle(active_palette())
+
+    # ── preview render progress (thin bar under the frame) ──────────────────
+    def start_render_progress(self) -> None:
+        self.render_bar.setRange(0, 0)        # busy/indeterminate until a % lands
+        self.render_bar.setVisible(True)
+
+    def set_render_progress(self, pct: int) -> None:
+        self.render_bar.setRange(0, 100)
+        self.render_bar.setValue(max(0, min(100, pct)))
+        self.render_bar.setVisible(True)
+
+    def end_render_progress(self) -> None:
+        self.render_bar.setVisible(False)
+        self.render_bar.setRange(0, 0)
 
     # ── frame picker ─────────────────────────────────────────────────────
     def restyle(self, palette) -> None:
@@ -2691,6 +2816,9 @@ class PreviewPanel(QWidget):
         self.prev_btn.setIcon(icons.icon("chevron_left", palette.text, 16))
         self.next_btn.setIcon(icons.icon("chevron_right", palette.text, 16))
         self.preview_frame_btn.setIcon(icons.icon("camera", palette.text, 16))
+        self.render_bar.setStyleSheet(
+            f"QProgressBar#PreviewProgress{{background:{palette.surface_alt};border:none;}}"
+            f"QProgressBar#PreviewProgress::chunk{{background:{palette.accent};}}")
         self._retint_auto_icon()
 
     def _retint_auto_icon(self) -> None:
