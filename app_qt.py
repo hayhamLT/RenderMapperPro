@@ -24,9 +24,17 @@ from PySide6.QtCore import (
     Qt,
     QThread,
     QTimer,
+    QUrl,
     Signal,
 )
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -722,16 +730,22 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
     # ── Help ──────────────────────────────────────────────────────────────
     def _show_help_dialog(self, title: str, html: str) -> None:
+        """A themed rich-text help dialog. Links are click-through: ``http(s)``
+        anchors open in the system browser, and ``action:<name>`` anchors run an
+        in-app action (e.g. ``action:properties/Updates`` opens that settings
+        tab) so the guides are interactive, not just text."""
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
-        dlg.setMinimumSize(560, 460)
+        dlg.setMinimumSize(600, 540)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
         browser = QTextBrowser()
-        browser.setOpenExternalLinks(True)
+        browser.setOpenLinks(False)   # route every click through _on_help_anchor
         pal = self._palette
-        browser.setStyleSheet(f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 16px; }}")
+        browser.setStyleSheet(
+            f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 22px 24px; }}")
         browser.setHtml(html)
+        browser.anchorClicked.connect(lambda url: self._on_help_anchor(url, dlg))
         lay.addWidget(browser)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(dlg.reject)
@@ -739,120 +753,146 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         lay.addWidget(btns)
         dlg.exec()
 
+    def _on_help_anchor(self, url: QUrl, _dlg: QDialog) -> None:
+        spec = url.toString()
+        if not spec.startswith("action:"):
+            QDesktopServices.openUrl(url)   # external link → system browser
+            return
+        # Every target is a settings/info dialog that opens *over* the help
+        # window and returns to it, so the guide stays open for more reading.
+        name, _, arg = spec[len("action:"):].partition("/")
+        actions = {
+            "properties": lambda: self._show_properties_dialog(arg or None),
+            "shortcuts": self._show_shortcuts_help,
+            "history": self._show_history_dialog,
+            "power": self._show_power_settings,
+            "notifications": self._show_notification_settings,
+        }
+        if name in actions:
+            actions[name]()
+
     def _help_css(self) -> str:
         p = self._palette
         return (
             f"<style>"
-            f"body{{color:{p.text}; font-size:13px; line-height:1.5;}}"
-            f"h2{{color:{p.accent}; font-size:15px; margin:14px 0 6px;}}"
-            f"h3{{color:{p.text}; font-size:13px; margin:12px 0 4px;}}"
-            f"code,kbd{{background:{p.surface_alt}; color:{p.text}; padding:1px 6px; border-radius:4px; font-family:Menlo,monospace;}}"
-            f"li{{margin:3px 0;}} a{{color:{p.info};}}"
-            f"table{{border-collapse:collapse; margin:4px 0;}}"
-            f"td{{padding:3px 14px 3px 0; vertical-align:top;}}"
+            f"body{{color:{p.text}; font-size:13px; line-height:1.55;}}"
+            f"h2{{color:{p.accent}; font-size:18px; margin:0 0 2px;}}"
+            f"h3{{color:{p.text}; font-size:12px; font-weight:700; "
+            f"letter-spacing:.4px; margin:20px 0 6px; text-transform:uppercase;}}"
+            f"p{{margin:6px 0;}}"
+            f".lead{{color:{p.text_muted}; font-size:13px; margin:2px 0 16px;}}"
             f".muted{{color:{p.text_muted};}}"
+            f"a{{color:{p.info}; font-weight:600;}}"
+            f"code,kbd{{background:{p.surface_alt}; color:{p.text}; padding:1px 6px; "
+            f"border-radius:4px; font-family:Menlo,monospace; font-size:12px;}}"
+            f"table{{border-collapse:collapse; margin:2px 0;}}"
+            f"td{{padding:6px 12px 6px 0; vertical-align:top;}}"
+            f"td.num{{background:{p.accent}; color:#ffffff; font-weight:700; "
+            f"text-align:center; padding:6px 0; margin:0;}}"
+            f"td.fname{{color:{p.accent}; font-weight:700; white-space:nowrap; padding-right:16px;}}"
             f"</style>"
         )
 
     def _show_quick_start(self) -> None:
         html = self._help_css() + """
         <h2>Quick Start</h2>
-        <ol>
-          <li><b>Pick a scene</b> — drop a 3D file onto the Scene field (or click <i>Browse</i>),
-              then click <b>Scan Scene</b> to load its materials and cameras. Blender (<code>.blend</code>,
-              <code>.fbx</code>, <code>.usd</code>, …) and <b>Cinema&nbsp;4D</b> (<code>.c4d</code>) scenes
-              are both supported — see below.</li>
-          <li><b>Add videos</b> — click <i>Add</i> or drag &amp; drop clips into the Videos list.
-              Pick a <b>Camera</b> for the render.</li>
-          <li><b>Connect</b> — select a material and a video, then click the <b>link</b> button
-              between the lists. A colored <b>stripe</b> marks the connected pair; hover or select
-              either side to light up its partner. Or just use <b>Auto-map</b> (below).</li>
-          <li><b>Output</b> auto-fills next to the source clip — edit it if you like. Set resolution,
-              frame range, format, and (optionally) the collapsed <i>Advanced quality settings</i>.</li>
-          <li>Click <b>Queue</b> to add the job, then <b>Start</b> (or submit to a <b>render farm</b>).
-              Watch per-row progress and a live frame preview.</li>
-        </ol>
-        <h3>Auto-map by name &amp; Watch folder</h3>
-        <p class="muted">A clip is linked to a material automatically when the material's name
-        appears in the clip's filename (e.g. <code>Screen</code> ↔ <code>Screen_final_v3.mp4</code>).
-        This runs the moment you <b>import</b> a clip, or on demand with the <b>Auto-map</b> button —
-        it only fills empty materials, never overwriting a manual mapping.</p>
-        <p class="muted">Turn on the <b>Watch folder</b> (clock button under the clip list) and any
-        clip dropped into that folder is imported and mapped automatically. <b>Versions</b> are
-        understood — <code>Screen_v1</code>/<code>Screen_v2</code>/<code>Screen_3</code> are one clip
-        and the <b>latest wins</b>; if a newer version appears, the project updates to it
-        automatically. Files still being copied are skipped until complete. Tune the poll interval
-        and stability window in <i>Properties → General → Watch / Ingest</i>.</p>
-        <h3>Auto-render targets</h3>
-        <p class="muted">Right-click a material → <b>Mark as Render Target</b> to flag the screens
-        a finished render must cover. With <b>Auto-render</b> on (<i>Properties → General →
-        Auto-render</i>), the watch folder queues <b>one multi-screen render</b> the moment every
-        target has a clip — and queues a fresh one whenever a newer version of a target lands. The
-        output is named after the clips with a <code>PREVIZ</code> suffix (customizable), and lands
-        in its own folder so it's never re-ingested. Choose <i>queue only</i> or <i>start
-        automatically</i>.</p>
-        <h3>Cinema 4D + Redshift</h3>
-        <p class="muted">Import a <code>.c4d</code> scene and the renderer switches to <b>Redshift</b>
-        automatically. The clip is mapped to a material's Redshift emission (full-bright). The
-        Advanced panel shows Redshift controls — a <b>Speed Preset</b> (Draft→Final), Max/Min samples,
-        adaptive <b>Noise Threshold</b>, Denoise, GI bounces / on-off, and Max Ray Depth — to trade
-        quality for render time. Settings panels adapt to the active renderer so every control is real.</p>
-        <h3>Render farm (Deadline)</h3>
-        <p class="muted">Enable the <b>Deadline</b> panel to submit jobs to a Thinkbox Deadline farm.
-        Blender jobs run via the worker on each node; <b>Cinema 4D</b> jobs are baked into a
-        self-contained scene and rendered with the licensed Cinema 4D command-line renderer (the same
-        engine the stock Cinema4D plugin uses), so node licensing just works. Frames distribute across
-        nodes, and jobs show the app icon in the Deadline Monitor.</p>
-        <p class="muted"><b>Chunking</b> can be <i>Manual</i> or <i>Auto</i> (~5/10/20 min per task) —
-        Auto sizes Frames-Per-Task from your render history. <i>Deadline → Farm Nodes…</i> lists the
-        nodes on the farm, and right-clicking a queued job offers <b>Set Priority</b> and
-        <b>Requeue</b>.</p>
-        <h3>Analytics, reports &amp; notifications</h3>
-        <p class="muted">Renders record <b>seconds/frame</b>, total time and an estimated <b>cost</b>
-        (set machine wattage + rate in <i>Tools → Power &amp; Cost</i>); see them in
-        <i>Tools → Render History</i>, which also builds a <b>contact sheet</b> for any output. Each run
-        writes an <b>HTML report</b> (<i>Tools → Open HTML Render Report</i>) with timing, cost and
-        embedded thumbnails. Get pinged when a render finishes or fails via <i>Tools → Notifications</i>
-        — system tray and/or a <b>Discord webhook</b> (everything is also logged to Live Logs).</p>
-        <h3>Audio</h3>
-        <p class="muted">Any clip that contains sound shows a <b>speaker</b> badge in the Videos
-        list. Click the badge (or right-click → <i>Mute audio</i>) to drop that clip's audio; every
-        non-muted mapped clip is mixed into the rendered video.</p>
-        <h3>Queue</h3>
-        <p class="muted">Click a row to activate and edit it; <b>double-click the name</b> to rename.
-        New jobs (the <b>+</b> button) are added at the top. Duplicate with <kbd>⌘D</kbd>,
-        delete with <kbd>⌫</kbd>, or right-click for Duplicate / Set Priority / Requeue / Reveal /
-        Open / Move / Delete. Tick the <b>Run</b> box to include a job when you press Start.</p>
-        <h3>Layout &amp; appearance</h3>
-        <p class="muted"><i>View → Layout</i> offers Default, All Panels (grid), Render Focus,
-        Setup Focus, Stacked and Tabbed presets, plus <b>Save Current Layout</b>. Drag a panel's
-        tab to rearrange, tab, or float it, and show/hide panels from <i>View</i>.
-        Toggle <i>View → Light Theme</i> for light/dark, and press <kbd>⌘K</kbd> for the
-        <b>command palette</b> to search and run any action. The window opens at 70% of your
-        screen, centered, and remembers your size and position.</p>
+        <p class="lead">Map your videos onto a 3D scene's materials and render them —
+        on your machine or a farm. Here's the whole flow in five steps.</p>
+
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td>
+              <td><b>Add your scene.</b> Drag a 3D file onto the Scene box (or
+              <a href="action:properties">point the app at Blender</a> first, then
+              <b>Browse</b>), and click <b>Scan Scene</b> to read its materials and cameras.
+              <span class="muted">Blender (.blend, .fbx, .usd, .obj…), Cinema&nbsp;4D (.c4d)
+              and glTF (.glb / .gltf) all work.</span></td></tr>
+          <tr><td class="num">2</td>
+              <td><b>Add your clips.</b> Drag videos into the Videos list (or click <b>Add</b>),
+              then choose the <b>Camera</b> to render from.</td></tr>
+          <tr><td class="num">3</td>
+              <td><b>Link each clip to a material.</b> Easiest way: click <b>Auto-map</b> — it
+              matches by name, so a <code>Screen</code> material grabs <code>Screen_v3.mp4</code>.
+              Or select one of each and click the <b>link</b> button between the lists. A colored
+              stripe marks every pair.</td></tr>
+          <tr><td class="num">4</td>
+              <td><b>Set the output.</b> It auto-fills next to your clip — adjust the file,
+              resolution, frame range and format to taste.</td></tr>
+          <tr><td class="num">5</td>
+              <td><b>Queue &amp; render.</b> Click <b>Queue</b>, then <b>Start</b>
+              (<kbd>⌘R</kbd>). Watch per-row progress and a live frame preview — or send the
+              job to a farm.</td></tr>
+        </table>
+
+        <h3>Do more, automatically</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Auto-map</td>
+              <td>Links clips to materials by name the moment you import them — only filling
+              empty materials, never overwriting your manual links.</td></tr>
+          <tr><td class="fname">Watch folder</td>
+              <td>Point it at a folder and new clips import and map themselves; the newest
+              version of a clip always wins. <a href="action:properties/Watch">Set it up&nbsp;→</a></td></tr>
+          <tr><td class="fname">Auto-render</td>
+              <td>Mark screens as targets; one multi-screen render queues automatically once
+              every target has a clip. <a href="action:properties/Watch">Configure&nbsp;→</a></td></tr>
+          <tr><td class="fname">Render farm</td>
+              <td>Submit Blender &amp; Cinema&nbsp;4D jobs to a Thinkbox Deadline farm — frames
+              spread across nodes. <a href="action:properties/Deadline">Connect&nbsp;→</a></td></tr>
+          <tr><td class="fname">Cinema&nbsp;4D</td>
+              <td>Open a .c4d and the renderer switches to Redshift, with Draft→Final speed
+              presets in the Advanced panel.</td></tr>
+          <tr><td class="fname">Cost &amp; reports</td>
+              <td>Every render logs time, seconds/frame and energy cost, plus an HTML report and
+              contact sheet. <a href="action:history">Open history&nbsp;→</a></td></tr>
+          <tr><td class="fname">Notifications</td>
+              <td>Get pinged in the system tray or a Discord webhook when a render finishes or
+              fails. <a href="action:notifications">Set up&nbsp;→</a></td></tr>
+          <tr><td class="fname">Audio</td>
+              <td>Clips with sound show a speaker badge — click to mute one; the rest are mixed
+              into the final video.</td></tr>
+        </table>
+
+        <h3>Good to know</h3>
+        <p class="muted">Press <kbd>⌘K</kbd> for the command palette to run anything by name,
+        browse all <a href="action:shortcuts">keyboard shortcuts</a>, or open
+        <a href="action:properties">Properties</a> to set up Blender and Cinema&nbsp;4D.
+        Drag a panel's tab to rearrange, tab or float it, rearrange the whole workspace from
+        <i>View → Layout</i>, and switch light/dark in <i>View</i>.</p>
         """
         self._show_help_dialog("Quick Start", html)
 
     def _show_shortcuts_help(self) -> None:
-        rows = [
-            ("⌘K", "Command palette — search & run any action"),
-            ("⌘O", "Open a project"),
-            ("⌘S", "Save the project"),
-            ("⌘,", "Properties & Settings"),
-            ("⌘Z", "Undo the last destructive action"),
-            ("⌘R", "Start render (queued jobs ticked Run)"),
-            ("⌘⇧R", "Start all queued jobs"),
-            ("⌘.", "Stop the current render"),
-            ("⌘B", "Browse for a scene file"),
-            ("⌘D", "Duplicate selected queue job(s)"),
-            ("⌫ / Delete", "Delete selected queue job(s) / clips"),
-            ("Space", "Play/pause the preview movie"),
+        groups = [
+            ("General", [
+                ("⌘K", "Command palette — search &amp; run anything"),
+                ("⌘,", "Properties &amp; Settings"),
+                ("⌘Z", "Undo the last destructive action"),
+            ]),
+            ("Project", [
+                ("⌘O", "Open a project"),
+                ("⌘S", "Save the project"),
+                ("⌘B", "Browse for a scene file"),
+            ]),
+            ("Render", [
+                ("⌘R", "Start render (jobs ticked Run)"),
+                ("⌘⇧R", "Start all queued jobs"),
+                ("⌘.", "Stop the current render"),
+                ("Space", "Play / pause the preview movie"),
+            ]),
+            ("Queue", [
+                ("⌘D", "Duplicate selected job(s)"),
+                ("⌫ / Delete", "Delete selected job(s) / clips"),
+            ]),
         ]
-        body = "".join(f"<tr><td><kbd>{k}</kbd></td><td>{d}</td></tr>" for k, d in rows)
+        sections = ""
+        for name, rows in groups:
+            body = "".join(
+                f"<tr><td width='110'><kbd>{k}</kbd></td><td>{d}</td></tr>" for k, d in rows)
+            sections += f"<h3>{name}</h3><table width='100%'>{body}</table>"
         html = self._help_css() + f"""
         <h2>Keyboard Shortcuts</h2>
-        <table>{body}</table>
-        <p class="muted">On Windows/Linux, ⌘ is Ctrl. Queue shortcuts apply when the Queue has focus.</p>
+        <p class="lead">On Windows &amp; Linux, ⌘ is Ctrl. Queue shortcuts apply when the
+        Queue panel has focus.</p>
+        {sections}
         """
         self._show_help_dialog("Keyboard Shortcuts", html)
 
@@ -3949,21 +3989,23 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         blender = _find_blender(self._blender_path)
         ffmpeg = find_ffmpeg_tool("ffmpeg")
         lines = [
-            f"Blender:  {'✓ ' + Path(blender).name if blender else '✗ not found — set it in Properties'}",
-            f"Cinema 4D:  {'✓ detected' if self._c4dpy_path else '— not detected (optional)'}",
-            f"ffmpeg:  {'✓ bundled' if ffmpeg else '✗ not found — frame extraction will be limited'}",
+            f"Blender   {'✓ ' + Path(blender).name if blender else '✗ not found — set it in Properties'}",
+            f"Cinema 4D   {'✓ detected' if self._c4dpy_path else '— not detected (optional)'}",
+            f"ffmpeg   {'✓ bundled' if ffmpeg else '✗ not found — frame extraction will be limited'}",
         ]
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle(f"Welcome to {APP_NAME}")
-        box.setText("You're set up to map videos onto a 3D scene and render headlessly.")
+        box.setText(f"Welcome to {APP_NAME}!")
         box.setInformativeText(
-            "\n".join(lines)
-            + "\n\nffmpeg ships with the app (used to extract clip frames). "
-            "Drop in a scene, add clips, map them, and hit render.")
+            "Map your videos onto a 3D scene's materials and render them — on your "
+            "machine or a farm.\n\nWhat's ready on this computer:\n\n"
+            + "\n".join(lines)
+            + "\n\nNew here? Open the Quick Start for a quick tour of the whole flow.")
         qs = box.addButton("Open Quick Start", QMessageBox.ButtonRole.ActionRole)
         loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) if not blender else None
-        box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
+        go = box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(go)
         box.exec()
         clicked = box.clickedButton()
         if clicked is qs:

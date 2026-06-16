@@ -560,8 +560,14 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     export_files_btn.clicked.connect(win._export_deadline_files)
 
     if initial_tab:
+        # Tolerant match so callers (incl. in-app help links) can pass a clean
+        # name: ignore the '&' mnemonic markers, case, and allow a prefix match.
+        def _norm(s: str) -> str:
+            return s.replace("&", "").strip().lower()
+        want = _norm(initial_tab)
         for i in range(tabs.count()):
-            if tabs.tabText(i) == initial_tab:
+            label = _norm(tabs.tabText(i))
+            if label == want or label.startswith(want):
                 tabs.setCurrentIndex(i)
                 break
 
