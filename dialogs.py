@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.utils import find_deadlinecommand
+from core.utils import find_deadlinecommand, subprocess_creation_flags
 from media import _find_ffprobe, find_ffmpeg_tool
 from workers import DeadlineQueryThread
 
@@ -159,7 +159,8 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             blender_ver_lbl.setText("No valid Blender path set.")
             return
         try:
-            out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15)
+            out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15,
+                                 creationflags=subprocess_creation_flags())
             text = (out.stdout or out.stderr).strip()
             first = text.splitlines()[0] if text else ""
             blender_ver_lbl.setText(
