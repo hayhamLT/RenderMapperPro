@@ -23,7 +23,7 @@ dev = [
     "pytest>=8",
     "pytest-timeout>=2.3",
     "pytest-cov>=5",
-    "pyinstaller==6.20.0",
+    "pyinstaller==6.21.0",
 ]
 
 # Version is the single source of truth in app_version.py.
