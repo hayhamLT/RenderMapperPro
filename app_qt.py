@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSystemTrayIcon,
     QTabBar,
@@ -338,13 +339,24 @@ def _resolve_runtime_script(name: str) -> str:
 
 class RuntimeInstallThread(QThread):
     log = Signal(str)
-    finished_install = Signal(str, str)
+    progress = Signal(int, int)            # (bytes_read, bytes_total); total 0 = unknown
+    finished_install = Signal(str, str)    # (path, error); error == "cancelled" when aborted
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request abort; the in-flight download stops at its next chunk."""
+        self._cancelled = True
 
     def _download(self, url: str, dest: Path) -> None:
         from core.download import download_with_progress
         self.log.emit(f"[runtime] Downloading {url}")
         self.log.emit("[runtime] This is a ~300–700 MB download and can take several minutes.")
-        download_with_progress(url, dest, self.log.emit)   # progress/ETA logging in core
+        download_with_progress(url, dest, self.log.emit,
+                               on_progress=self.progress.emit,
+                               should_cancel=lambda: self._cancelled)
 
     def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
         from core.archive import safe_extract_tar, safe_extract_zip
@@ -409,6 +421,7 @@ class RuntimeInstallThread(QThread):
         raise RuntimeError("Installed runtime executable not found")
 
     def run(self) -> None:
+        from core.download import DownloadCancelled
         try:
             spec = _runtime_download_spec()
             if not spec:
@@ -424,6 +437,8 @@ class RuntimeInstallThread(QThread):
                 self._download(url, archive_path)
             else:
                 self.log.emit("[runtime] Using cached runtime archive")
+            if self._cancelled:
+                raise DownloadCancelled()
 
             with tempfile.TemporaryDirectory(prefix="blender-runtime-") as td:
                 staging_dir = Path(td) / "staging"
@@ -457,8 +472,78 @@ class RuntimeInstallThread(QThread):
             if not installed:
                 raise RuntimeError("Runtime install completed but executable was not detected")
             self.finished_install.emit(installed, "")
+        except DownloadCancelled:
+            self.finished_install.emit("", "cancelled")
         except Exception as exc:
             self.finished_install.emit("", str(exc))
+
+
+class _RuntimeProgressDialog(QDialog):
+    """Modern progress UI for the one-time managed-Blender download (hundreds of
+    MB): a live bar with MB / speed / ETA and a Cancel button. Non-modal, so the
+    user can read Quick Start while it runs."""
+
+    cancelled = Signal()
+
+    def __init__(self, parent, version: str, palette) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Setting up Blender")
+        self.setMinimumWidth(460)
+        self._t0 = time.monotonic()
+        self._done = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 18)
+        lay.setSpacing(10)
+        title = QLabel(f"Setting up Blender {version}")
+        title.setStyleSheet(f"color:{palette.text}; font-size:15px; font-weight:700;")
+        sub = QLabel("Downloading a managed Blender runtime so you don't have to install "
+                     "anything yourself. This happens once.")
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"color:{palette.text_muted}; font-size:12px;")
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)            # indeterminate until the first byte lands
+        self._bar.setTextVisible(False)
+        self._status = QLabel("Starting…")
+        self._status.setStyleSheet(f"color:{palette.text_muted}; font-size:12px;")
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self._cancel_btn)
+        for w in (title, sub, self._bar, self._status):
+            lay.addWidget(w)
+        lay.addLayout(row)
+
+    def _on_cancel(self) -> None:
+        self._cancel_btn.setEnabled(False)
+        self._status.setText("Cancelling…")
+        self.cancelled.emit()
+
+    def set_progress(self, read: int, total: int) -> None:
+        if self._done:
+            return
+        mb = 1024 * 1024
+        if total > 0 and read >= total:
+            self._bar.setRange(0, 0)         # busy spinner for the extract/install phase
+            self._status.setText("Installing…")
+            return
+        if total > 0:
+            self._bar.setRange(0, 100)
+            self._bar.setValue(int(read / total * 100))
+            elapsed = max(0.001, time.monotonic() - self._t0)
+            speed = read / elapsed
+            eta = int((total - read) / speed) if speed > 0 else 0
+            self._status.setText(
+                f"Downloading… {read // mb} / {total // mb} MB · "
+                f"{speed / mb:.1f} MB/s · ~{eta}s left")
+        else:
+            self._bar.setRange(0, 0)
+            self._status.setText(f"Downloading… {read // mb} MB")
+
+    def finish(self) -> None:
+        self._done = True
+        self.close()
 
 
 class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
@@ -498,6 +583,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._render_thread: RenderThread | None = None
         self._discovery_thread: DiscoveryThread | None = None
         self._runtime_install_thread: RuntimeInstallThread | None = None
+        self._runtime_progress_dialog: _RuntimeProgressDialog | None = None
         self._runtime_prompted = False
         self._save_timer: QTimer | None = None
 
@@ -1476,8 +1562,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             self._blender_path = b
             self._append_log(f"[app] Blender detected: {b}")
         else:
-            self._append_log("[app] Blender not found. Use Profile -> Properties.")
-            self._prompt_install_runtime()
+            self._append_log("[app] Blender not found — the app can download it for you.")
+            # On a first launch the welcome dialog makes the offer (one clean
+            # prompt); for a returning user with no Blender, ask here.
+            if not getattr(self, "_is_first_run", False):
+                self._prompt_install_runtime()
         self._update_health()
 
         # Auto-scan a restored scene so materials/cameras are ready on launch.
@@ -1540,28 +1629,50 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
     def _install_managed_runtime(self) -> None:
         if self._runtime_install_thread and self._runtime_install_thread.isRunning():
-            QMessageBox.information(self, "Runtime", "Runtime installation is already in progress.")
+            dlg = getattr(self, "_runtime_progress_dialog", None)
+            if dlg is not None:
+                dlg.show()
+                dlg.raise_()
+            return
+        if _runtime_download_spec() is None:
+            QMessageBox.warning(
+                self, "Automatic Setup Unavailable",
+                "Automatic Blender download isn't supported on this OS. Please install "
+                "Blender and point the app at it in Properties → Render Engines.")
             return
 
         self._append_log(f"[runtime] Installing Blender {BLENDER_RUNTIME_VERSION}...")
-        if hasattr(self, "logs_dock"):   # surface the download progress
-            self.logs_dock.show()
-            self.logs_dock.raise_()
-        self._runtime_install_thread = RuntimeInstallThread(self)
-        self._runtime_install_thread.log.connect(self._append_log)
-        self._runtime_install_thread.finished_install.connect(self._on_runtime_installed)
-        self._runtime_install_thread.start()
+        thread = RuntimeInstallThread(self)
+        self._runtime_install_thread = thread
+        dlg = _RuntimeProgressDialog(self, BLENDER_RUNTIME_VERSION, self._palette)
+        self._runtime_progress_dialog = dlg
+        thread.progress.connect(dlg.set_progress)
+        thread.log.connect(self._append_log)
+        thread.finished_install.connect(self._on_runtime_installed)
+        dlg.cancelled.connect(thread.cancel)
+        thread.start()
+        dlg.show()
 
     def _on_runtime_installed(self, blender_path: str, error: str) -> None:
+        dlg = getattr(self, "_runtime_progress_dialog", None)
+        if dlg is not None:
+            dlg.finish()
+            self._runtime_progress_dialog = None
+        if error == "cancelled":
+            self._append_log("[runtime] Blender setup cancelled.")
+            return
         if error:
             self._append_log(f"[runtime] Install failed: {error}")
-            QMessageBox.warning(self, "Runtime Install Failed", error)
+            QMessageBox.warning(
+                self, "Blender Setup Failed",
+                f"{error}\n\nYou can retry, or install Blender yourself and point the "
+                f"app at it in Properties → Render Engines.")
             return
         self._blender_path = blender_path
         self._append_log(f"[runtime] Installed Blender runtime: {blender_path}")
         self._schedule_save()
         self._update_health()
-        self._show_toast("Managed Blender runtime is ready", "success")
+        self._show_toast("Blender is ready — the app is fully set up", "success")
 
 
     def _show_properties_dialog(self, initial_tab: str | None = None) -> None:
@@ -3990,11 +4101,20 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             return
         blender = _find_blender(self._blender_path)
         ffmpeg = find_ffmpeg_tool("ffmpeg")
+        can_fetch = _runtime_download_spec() is not None
+        blender_line = (
+            f"✓ {Path(blender).name}" if blender
+            else ("— the app will download it for you" if can_fetch
+                  else "✗ not found — install Blender and set it in Properties"))
         lines = [
-            f"Blender   {'✓ ' + Path(blender).name if blender else '✗ not found — set it in Properties'}",
+            f"Blender   {blender_line}",
             f"Cinema 4D   {'✓ detected' if self._c4dpy_path else '— not detected (optional)'}",
             f"ffmpeg   {'✓ bundled' if ffmpeg else '✗ not found — frame extraction will be limited'}",
         ]
+        tail = ("\n\nNew here? Open the Quick Start for a quick tour of the whole flow."
+                if blender else
+                "\n\nNo Blender yet? Click “Download Blender” and the app fetches a "
+                "managed copy — nothing else to install.")
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle(f"Welcome to {APP_NAME}")
@@ -4002,16 +4122,21 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         box.setInformativeText(
             "Map your videos onto a 3D scene's materials and render them — on your "
             "machine or a farm.\n\nWhat's ready on this computer:\n\n"
-            + "\n".join(lines)
-            + "\n\nNew here? Open the Quick Start for a quick tour of the whole flow.")
+            + "\n".join(lines) + tail)
         qs = box.addButton("Open Quick Start", QMessageBox.ButtonRole.ActionRole)
-        loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) if not blender else None
+        # When Blender is missing, lead with the one-click auto-download.
+        dl = box.addButton("Download Blender", QMessageBox.ButtonRole.ActionRole) \
+            if (not blender and can_fetch) else None
+        loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) \
+            if not blender else None
         go = box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(go)
+        box.setDefaultButton(dl or go)
         box.exec()
         clicked = box.clickedButton()
         if clicked is qs:
             self._show_quick_start()
+        elif dl is not None and clicked is dl:
+            self._install_managed_runtime()
         elif loc is not None and clicked is loc:
             self._show_properties_dialog()
         self._save_profile()   # ensure a profile exists so this won't show again
