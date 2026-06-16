@@ -8,44 +8,58 @@ It supports **two render backends**, chosen automatically by scene type: **Blend
 
 ## Download
 
-Grab a prebuilt app from the [**Releases**](../../releases) page:
+Grab the latest from the [**Releases**](../../releases) page. The **installer** is the easy path; the **portable** zip is a no‑install folder you can run from anywhere.
 
-| Platform | File |
-|----------|------|
-| macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.zip` |
-| macOS (Intel) | `RenderMapperPro-macOS-intel.zip` |
-| Windows (x64) | `RenderMapperPro-Windows-x64.zip` |
+| Platform | Installer (recommended) | Portable |
+|----------|-------------------------|----------|
+| Windows (x64) | `RenderMapperPro-Windows-x64-Setup.exe` | `RenderMapperPro-Windows-x64.zip` |
+| macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.dmg` | `RenderMapperPro-macOS-arm64.zip` |
+| macOS (Intel) | `RenderMapperPro-macOS-intel.dmg` | `RenderMapperPro-macOS-intel.zip` |
 
-- **macOS:** unzip, then right‑click the app → **Open** → **Open** (first launch only — it isn't notarized).
-- **Windows:** unzip, run **Render Mapper Pro.exe**. If SmartScreen warns, **More info → Run anyway**.
+- **Windows:** run **Setup.exe** — it installs to Program Files with a Start‑Menu shortcut. If SmartScreen warns, **More info → Run anyway** (the build isn't code‑signed).
+- **macOS:** open the **.dmg** and drag the app to **Applications**. First launch only: right‑click the app → **Open** → **Open** (it isn't notarized).
+- **Updates are automatic:** on launch the app checks Releases and, with one click, downloads and runs the right installer for you — no manual replace.
 
-Every push to `main` also publishes the three builds as downloadable **workflow artifacts** under the GitHub Actions run.
+Every push to `main` also publishes the builds as downloadable **workflow artifacts** under the GitHub Actions run.
+
+## Quick start
+
+1. **Add a scene** — drag a `.blend` / `.c4d` / `.glb` (or `.fbx`, `.usd`, …) onto the Scene box, then click **Scan Scene**.
+2. **Add clips** — drag your videos into the Videos list and pick a **Camera**.
+3. **Link them** — click **Auto‑map** to match clips to materials by name, or link a selected pair by hand.
+4. **Set the output** — it auto‑fills next to each clip; adjust resolution, frame range and format.
+5. **Queue & render** — hit **Queue**, then **Start** (`⌘/Ctrl+R`), and watch the live preview — or send it to a farm.
+
+> New to the app? The in‑app **Help → Quick Start** is a click‑through version of this with links straight to the relevant settings.
 
 ## What it does
 
-- Load a 3D scene — **Blender** (`.blend`, `.fbx`, `.obj`, `.glb`, `.usd`, `.abc`, …) or **Cinema 4D** (`.c4d`) — and one or many videos.
-- **Scan** the scene to populate materials and cameras — and pull the scene's own render settings (fps, frame range, resolution, engine, samples, and for C4D the Redshift sampling/optimization) straight into the UI.
-- Map videos onto materials (full‑bright **emission** or **base‑color/alpha**) — multiple video→material pairs render in a single pass.
-- **Auto‑map by name:** clips link to materials automatically when the material name appears in the filename — on import or via a button (gap‑fill only, never clobbers manual mappings).
-- **Watch folder:** point at a folder and dropped clips import + map themselves. Version‑aware (`Screen_v1`/`v2`/`_3` → latest wins) and auto‑updates the project to a newer version; half‑copied files are skipped until complete.
-- **Auto‑render targets:** mark the screen materials a render must cover (right‑click → *Mark as Render Target*). When the watch folder fills every target — or a newer version arrives — a single multi‑screen render is queued automatically, named after the clips with a `PREVIZ` suffix. Queue‑only or auto‑start; all configurable in *Properties → General → Auto‑render*.
-- **Automatic updates:** on launch the app checks GitHub Releases and offers a one‑click download of the right platform build — zero configuration. For this private repo, a read‑only token is baked into the build by CI (from the `RMP_UPDATE_TOKEN` Actions secret → `assets/update_token.txt`, which is git‑ignored); without it, auto‑update is simply off.
-- **Burn‑in overlay** (optional): stamps the clip name/version, frame number, camera and date onto every frame — versioned previz reviews are never ambiguous (Blender + local C4D renders).
-- **Auto‑retry:** a failed job automatically retries once (after the remaining jobs) — protects unattended auto‑renders from GPU/license hiccups.
-- **Aspect guard:** warns when a clip's aspect ratio is far from its screen's (e.g. 16:9 footage on a 21:9 wall) — auto‑map's seatbelt.
-- **Delivery copy:** finished renders can copy themselves into a delivery/review folder (*Properties → Watch & Auto‑render → Delivery*).
-- **Rec.709 tagging:** movie outputs are colour‑tagged (+faststart) so they look identical in every player and NLE.
-- Video textures render at **full quality** (cubic sampling, texture‑size limits forced off, no mip down‑scaling).
-- Per‑clip **audio**: clips with sound show a speaker badge; click to mute/include per clip.
+### Map & render
+- Load a 3D scene — **Blender** (`.blend`, `.fbx`, `.obj`, `.glb`, `.usd`, `.abc`, …) or **Cinema 4D** (`.c4d`) — plus one or many videos.
+- **Scan** the scene to populate materials and cameras, pulling its own render settings (fps, frame range, resolution, engine, samples, and for C4D the Redshift sampling) straight into the UI.
+- Map videos onto materials (full‑bright **emission** or **base‑color/alpha**); multiple video→material pairs render in a single pass, at **full quality** (cubic sampling, texture‑size limits off, no mip down‑scaling).
 - **Renderer‑aware settings** — the panel adapts to the active engine so every control is real:
   - **Blender:** Cycles/EEVEE, samples, denoise, device, colour transform/exposure/gamma, transparent.
   - **Redshift:** Speed Preset (Draft→Final), Max/Min samples, adaptive Noise Threshold, denoise, GI bounces / on‑off, Max Ray Depth.
-- Output profiles: H.264 MP4, ProRes MOV, PNG/EXR sequence.
-- **Render farm (Thinkbox Deadline):** submit Blender *and* Cinema 4D jobs. C4D jobs are baked and rendered with the licensed Cinema 4D command‑line renderer; jobs carry the app icon in the Deadline Monitor and distribute frames across nodes. **Auto‑chunking** sizes frames‑per‑task from render history; *Deadline → Farm Nodes…* lists the farm; right‑click a job to **Set Priority** or **Requeue**.
-- **Render analytics & cost:** every render records seconds/frame, total time and an estimated power **cost** (set wattage + rate in *Tools → Power & Cost*) — shown live and in *Tools → Render History*, with an upfront ETA from prior runs of the same scene.
-- **Output review:** auto‑generated **contact sheets** for each render (preview them from History), plus a shareable **HTML report** with timing, cost and embedded thumbnails.
-- **Notifications:** get pinged on render complete/fail via the system tray and/or a **Discord webhook** (*Tools → Notifications*) — everything also logs to Live Logs.
-- **Command palette** (**⌘/Ctrl+K**) to search and run any action; **light/dark** theme toggle (*View → Light Theme*).
+- Output profiles: **H.264 MP4**, **ProRes MOV**, **PNG/EXR** sequence — movie outputs are **Rec.709**‑tagged (+faststart) so they look identical everywhere.
+- Per‑clip **audio** (speaker badge to mute/include) and an optional **burn‑in overlay** stamping clip/version/frame/camera/date onto every frame.
+
+### Automate the busywork
+- **Auto‑map by name** — clips link to materials when the material name appears in the filename (on import or on demand); gap‑fill only, never clobbers a manual link.
+- **Watch folder** — drop clips into a folder and they import + map themselves. Version‑aware (`Screen_v1`/`v2`/`_3` → latest wins), auto‑updating the project; half‑copied files are skipped until complete.
+- **Auto‑render targets** — mark the screens a render must cover; once the watch folder fills every target (or a newer version lands) a single multi‑screen render queues automatically with a `PREVIZ` suffix. Queue‑only or auto‑start.
+- **Auto‑retry** a failed job once, and an **aspect guard** that warns when footage doesn't match its screen (16:9 clip on a 21:9 wall).
+- **Delivery copy** — finished renders can copy themselves into a review/delivery folder.
+- **Automatic updates** — the app checks Releases on launch and one‑click downloads + runs the right installer. (For this private repo a read‑only token is baked in by CI from the `RMP_UPDATE_TOKEN` secret → git‑ignored `assets/update_token.txt`; without it, auto‑update is simply off.)
+
+### Scale to a farm
+- **Thinkbox Deadline** — submit Blender *and* Cinema 4D jobs. C4D jobs are baked and rendered with the licensed Cinema 4D command‑line renderer; jobs carry the app icon in the Deadline Monitor and spread frames across nodes. **Auto‑chunking** sizes frames‑per‑task from render history; *Deadline → Farm Nodes…* lists the farm; right‑click a job to **Set Priority** or **Requeue**.
+
+### Review & track
+- **Analytics & cost** — every render records seconds/frame, total time and estimated power **cost** (set wattage + rate in *Tools → Power & Cost*), shown live and in *Tools → Render History*, with an upfront ETA from prior runs.
+- **Output review** — auto‑generated **contact sheets** per render and a shareable **HTML report** with timing, cost and embedded thumbnails.
+- **Notifications** — pinged on complete/fail via the system tray and/or a **Discord webhook**; everything also logs to Live Logs.
+- **Command palette** (**⌘/Ctrl+K**) to run any action by name, plus a **light/dark** theme toggle.
 
 ### Live Preview
 
@@ -102,7 +116,7 @@ python -m PyInstaller --noconfirm --clean BlenderVideoMapper.spec
 # → dist/Render Mapper Pro.app  (macOS)  /  dist/Render Mapper Pro/  (Windows)
 ```
 
-GitHub Actions (`.github/workflows/build.yml`) does this for macOS arm64/Intel + Windows on every push to `main`; pushing a `v*` tag also publishes a Release with the zips.
+GitHub Actions (`.github/workflows/build.yml`) does this for macOS arm64/Intel + Windows on every push to `main`. The Windows job also compiles a `Setup.exe` with **Inno Setup** and the macOS jobs build a `.dmg` (see `installer/`); pushing a `v*` tag publishes a Release with both the installers and the portable zips.
 
 ## Development
 

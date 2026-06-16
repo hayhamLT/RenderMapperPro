@@ -30,6 +30,38 @@ def test_properties_dialog_builds(tmp_path, monkeypatch):
     dialogs.build_properties_dialog(w)
 
 
+def test_help_dialogs_build_and_links_route(tmp_path, monkeypatch):
+    """The rich-text help dialogs build without error, and the interactive
+    ``action:`` links route to the right in-app dialog while ``http`` links go
+    to the system browser — guards the click-through help wiring."""
+    _app_qt, w = _window(tmp_path, monkeypatch)
+    w._blender_path = ""   # avoid a `blender --version` subprocess in _show_about/quick-start
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtWidgets import QDialog, QMessageBox
+    monkeypatch.setattr(QDialog, "exec", lambda self: 0)   # don't block on the modals
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+
+    # Each help surface builds and shows without raising.
+    w._show_quick_start()
+    w._show_shortcuts_help()
+    w._show_about()
+
+    # action: anchors open the matching dialog, passing any tab argument through.
+    opened: dict = {}
+    monkeypatch.setattr(w, "_show_properties_dialog", lambda tab=None: opened.update(props=tab))
+    monkeypatch.setattr(w, "_show_history_dialog", lambda: opened.update(history=True))
+    w._on_help_anchor(QUrl("action:properties/Updates"), None)
+    w._on_help_anchor(QUrl("action:history"), None)
+    assert opened == {"props": "Updates", "history": True}
+
+    # http(s) anchors go to the browser, never an in-app action.
+    visited: list = []
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: visited.append(url.toString()))
+    w._on_help_anchor(QUrl("https://example.com/docs"), None)
+    assert visited == ["https://example.com/docs"]
+
+
 def test_glb_offers_blender_and_threejs_engines(tmp_path, monkeypatch):
     """A .glb scene must offer Blender engines alongside three.js (Blender can
     import + render the glTF), with three.js the default."""
