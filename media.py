@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from core.logging_setup import get_logger
+from core.utils import subprocess_creation_flags  # CREATE_NO_WINDOW on Windows (no console flash)
 
 _log = get_logger(__name__)
 
@@ -149,7 +150,6 @@ def _probe_frame_count(src: str) -> int:
     ffprobe = find_ffmpeg_tool("ffprobe")
     if not ffprobe:
         return 0
-    from core.utils import subprocess_creation_flags
     for args in (
         ["-show_entries", "stream=nb_frames"],
         ["-count_frames", "-show_entries", "stream=nb_read_frames"],
@@ -174,7 +174,6 @@ def build_contact_sheet(src: str, dest: str, cols: int = 4, rows: int = 3) -> bo
     ffmpeg = find_ffmpeg_tool("ffmpeg")
     if not ffmpeg:
         return False
-    from core.utils import subprocess_creation_flags
     cells = max(1, cols * rows)
     p = Path(src)
     try:
@@ -275,6 +274,7 @@ def video_has_audio(path: str) -> bool:
                     ],
                     text=True,
                     timeout=10,
+                    creationflags=subprocess_creation_flags(),
                 )
                 result = bool(json.loads(out).get("streams"))
             except Exception:
@@ -300,6 +300,7 @@ def _parse_mp4_info(path: str) -> tuple[int, float] | None:
                 ],
                 text=True,
                 timeout=10,
+                creationflags=subprocess_creation_flags(),
             )
             data = json.loads(out)
             streams = data.get("streams", [])
@@ -424,7 +425,7 @@ def probe_video_size(path: str) -> tuple[int, int] | None:
             out = subprocess.check_output(
                 [ffprobe, "-v", "quiet", "-print_format", "json",
                  "-show_streams", "-select_streams", "v:0", path],
-                text=True, timeout=10)
+                text=True, timeout=10, creationflags=subprocess_creation_flags())
             streams = json.loads(out).get("streams") or []
             if streams:
                 w = int(streams[0].get("width") or 0)
