@@ -2843,10 +2843,20 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._preview_thread = PreviewFrameThread(blender, worker, cfg, out_dir,
                                                   c4dpy=c4dpy, c4d_worker=c4d_worker)
         self._preview_thread.log.connect(self._append_log)
+        self._preview_thread.log.connect(self._on_preview_progress)
         self._preview_thread.done.connect(self._on_preview_frame_done)
+        self.preview_panel.start_render_progress()   # thin bar under the preview
         self._preview_thread.start()
 
+    def _on_preview_progress(self, line: str) -> None:
+        """Drive the thin bar under the preview from the worker's log: determinate
+        when the engine reports a % / fraction, otherwise it stays indeterminate."""
+        prog = LogsPanel._parse_progress(line)
+        if prog is not None:
+            self.preview_panel.set_render_progress(prog[0])
+
     def _on_preview_frame_done(self, path: str, error: str) -> None:
+        self.preview_panel.end_render_progress()
         self.preview_panel.preview_frame_btn.setEnabled(True)
         if error or not path:
             self._show_toast("Preview failed: " + (error or "no frame"), "error")
