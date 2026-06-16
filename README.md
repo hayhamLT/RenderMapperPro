@@ -19,6 +19,8 @@ Grab the latest from the [**Releases**](../../releases) page. The **installer** 
 - **macOS:** open the **.dmg** and drag the app to **Applications**. First launch only: right‑click the app → **Open** → **Open** (it isn't notarized).
 - **Updates are automatic:** on launch the app checks Releases and, with one click, downloads and runs the right installer for you — no manual replace.
 
+**Nothing else to install.** The app is self-contained: **ffmpeg** is bundled, the `.glb` web renderer fetches its own headless Chromium on first use, and if **Blender** isn't already on the machine the app offers to **download a managed Blender runtime** for you (one click, with a progress bar). The only "bring your own" is **Cinema 4D + Redshift** for `.c4d` scenes — that's licensed commercial software, so you point the app at your own install.
+
 Every push to `main` also publishes the builds as downloadable **workflow artifacts** under the GitHub Actions run.
 
 ## Quick start

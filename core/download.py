@@ -12,12 +12,25 @@ from collections.abc import Callable
 from pathlib import Path
 
 LogCallback = Callable[[str], None]
+ProgressCallback = Callable[[int, int], None]   # (bytes_read, bytes_total); total 0 = unknown
+CancelCheck = Callable[[], bool]
+
+
+class DownloadCancelled(Exception):
+    """Raised by :func:`download_with_progress` when ``should_cancel()`` returns True."""
 
 
 def download_with_progress(url: str, dest: str | Path, on_log: LogCallback | None = None,
-                           *, user_agent: str = "RenderMapperPro/1.0", timeout: int = 120,
+                           *, on_progress: ProgressCallback | None = None,
+                           should_cancel: CancelCheck | None = None,
+                           user_agent: str = "RenderMapperPro/1.0", timeout: int = 120,
                            chunk: int = 512 * 1024, tag: str = "[runtime]") -> int:
     """Stream ``url`` to ``dest``, logging percent / speed / ETA every ~5%.
+
+    ``on_progress(bytes_read, bytes_total)`` is called on every chunk so a UI can
+    drive a real progress bar (``bytes_total`` is 0 when the server omits
+    Content-Length). If ``should_cancel`` returns True mid-stream, the partial
+    file is left in place and :class:`DownloadCancelled` is raised.
     Returns the number of bytes written."""
     log = on_log or (lambda *_: None)
     dest = Path(dest)
@@ -28,12 +41,18 @@ def download_with_progress(url: str, dest: str | Path, on_log: LogCallback | Non
         last_pct = -5
         t0 = time.monotonic()
         mb = 1024 * 1024
+        if on_progress is not None:
+            on_progress(0, total)
         while True:
+            if should_cancel is not None and should_cancel():
+                raise DownloadCancelled()
             data = resp.read(chunk)
             if not data:
                 break
             out.write(data)
             read += len(data)
+            if on_progress is not None:
+                on_progress(read, total)
             if total > 0:
                 pct = int((read / total) * 100)
                 if pct >= last_pct + 5:        # 5% steps, not one line per chunk
