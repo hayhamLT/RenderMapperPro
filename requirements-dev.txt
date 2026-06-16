@@ -1,6 +1,6 @@
 # Developer + CI tooling. Installs the runtime deps too.
 -r requirements.txt
-pyinstaller==6.20.0
+pyinstaller==6.21.0
 ruff>=0.9,<1
 mypy>=1.13
 pytest>=8

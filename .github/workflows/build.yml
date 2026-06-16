@@ -21,8 +21,8 @@ jobs:
     name: Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Qt offscreen system libs
@@ -50,8 +50,8 @@ jobs:
     name: UI Smoke (headless)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Qt offscreen system libs
@@ -78,8 +78,8 @@ jobs:
           - os: windows-latest  # x64
             label: Windows-x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install build dependencies
@@ -114,7 +114,7 @@ jobs:
           $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
           Copy-Item "installer\Output\RenderMapperPro-Windows-x64-Setup.exe" .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: RenderMapperPro-${{ matrix.label }}
           path: |
@@ -131,8 +131,8 @@ jobs:
     if: github.event_name != 'pull_request'   # PRs run gates only, not full builds
     runs-on: macos-13
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install build dependencies
@@ -156,7 +156,7 @@ jobs:
             "dist/Render Mapper Pro.app" \
             "RenderMapperPro-macOS-intel.zip"
           bash installer/make_dmg.sh "RenderMapperPro-macOS-intel.dmg"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: RenderMapperPro-macOS-intel
           path: |
@@ -173,11 +173,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/**/*.zip
@@ -207,12 +207,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: RenderMapperPro-macOS-intel
           path: artifacts
       - name: Upload Intel build to the Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/RenderMapperPro-macOS-intel.zip
