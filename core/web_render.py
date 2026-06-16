@@ -41,10 +41,15 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(WEB_RUNTIME_ROOT)
 # Prefer the real GPU. Plain headless Chrome force-disables the GPU process and
 # lands on SwiftShader (software). Running the FULL chromium in "new headless"
 # (headless=False + --headless=new — the full build, windowless) lets ANGLE bind
-# the platform GPU (Metal on macOS). The extra flags are defensive: Chrome binds
-# the GPU on its own here, but they guard against driver blocklisting.
+# the platform GPU. The ANGLE backend MUST match the OS — Metal is macOS-only;
+# forcing it on Windows/Linux yields no GPU. d3d11 is the Windows GPU backend; on
+# Linux we let Chrome pick its default. --ignore-gpu-blocklist guards driver
+# blocklisting. The UNMASKED_RENDERER probe below verifies a real GPU bound and
+# falls back to software if not, so a wrong/absent backend degrades gracefully.
+_ANGLE_BACKEND = {"darwin": "metal", "win32": "d3d11"}.get(sys.platform)
 _GPU_LAUNCH = {"headless": False,
-               "args": ["--headless=new", "--ignore-gpu-blocklist", "--use-angle=metal"]}
+               "args": ["--headless=new", "--ignore-gpu-blocklist"]
+               + ([f"--use-angle={_ANGLE_BACKEND}"] if _ANGLE_BACKEND else [])}
 # Deliberate software fallback for GPU-less / no-GUI-session / blocklisted machines.
 # Chrome 137+ dropped the automatic SwiftShader fallback, so it must be explicit.
 _SOFTWARE_LAUNCH = {"headless": False,
