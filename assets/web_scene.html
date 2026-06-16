@@ -190,7 +190,16 @@ const api = {
       img.onload = res; img.onerror = () => rej(new Error('image decode failed')); img.src = dataUrl;
     });
     let tex = m.__videoTex;
-    if (!tex) { tex = new THREE.Texture(); tex.colorSpace = THREE.SRGBColorSpace; m.__videoTex = tex; }
+    if (!tex) {
+      tex = new THREE.Texture();
+      tex.colorSpace = THREE.SRGBColorSpace;
+      // glTF UVs assume a top-left texture origin (the glTF loader sets flipY=false
+      // on every texture it makes). Our video texture must match, or it renders
+      // vertically flipped — WebGLRenderer does, whereas the old WebGPURenderer
+      // happened to compensate, so this only bit after the WebGL switch.
+      tex.flipY = false;
+      m.__videoTex = tex;
+    }
     tex.image = img; tex.needsUpdate = true;
     // Full-bright video: emissive map at white, no tone mapping (matches the
     // "emission full-bright" mapping the Blender/Redshift paths use).
