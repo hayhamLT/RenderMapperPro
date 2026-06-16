@@ -51,7 +51,7 @@ Every push to `main` also publishes the builds as downloadable **workflow artifa
 - **Auto‑render targets** — mark the screens a render must cover; once the watch folder fills every target (or a newer version lands) a single multi‑screen render queues automatically with a `PREVIZ` suffix. Queue‑only or auto‑start.
 - **Auto‑retry** a failed job once, and an **aspect guard** that warns when footage doesn't match its screen (16:9 clip on a 21:9 wall).
 - **Delivery copy** — finished renders can copy themselves into a review/delivery folder.
-- **Automatic updates** — the app checks Releases on launch and one‑click downloads + runs the right installer. (For this private repo a read‑only token is baked in by CI from the `RMP_UPDATE_TOKEN` secret → git‑ignored `assets/update_token.txt`; without it, auto‑update is simply off.)
+- **Automatic updates** — the app checks Releases on launch and one‑click downloads + runs the right installer. The repo is public, so this uses the anonymous GitHub API — **no credential is baked into the build**.
 
 ### Scale to a farm
 - **Thinkbox Deadline** — submit Blender *and* Cinema 4D jobs. C4D jobs are baked and rendered with the licensed Cinema 4D command‑line renderer; jobs carry the app icon in the Deadline Monitor and spread frames across nodes. **Auto‑chunking** sizes frames‑per‑task from render history; *Deadline → Farm Nodes…* lists the farm; right‑click a job to **Set Priority** or **Requeue**.

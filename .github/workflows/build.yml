@@ -85,15 +85,9 @@ jobs:
         run: python -m pip install --upgrade pip -r requirements-build.txt
       - name: Fetch bundled ffmpeg / ffprobe
         run: python tools/fetch_ffmpeg.py
-      - name: Inject auto-update token
-        shell: bash
-        run: |
-          if [ -n "${{ secrets.RMP_UPDATE_TOKEN }}" ]; then
-            printf '%s' "${{ secrets.RMP_UPDATE_TOKEN }}" > assets/update_token.txt
-            echo "Update token injected ($(wc -c < assets/update_token.txt) bytes)."
-          else
-            echo "No RMP_UPDATE_TOKEN secret — building without auto-update."
-          fi
+      # No auth token is baked into builds: the repo is public, so the in-app
+      # updater reads Releases over the anonymous GitHub API. (A token in a
+      # shipped binary would be extractable, so we deliberately ship none.)
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm --clean BlenderVideoMapper.spec
       - name: Package (macOS)
