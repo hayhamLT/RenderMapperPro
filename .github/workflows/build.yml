@@ -177,7 +177,7 @@ jobs:
         with:
           path: artifacts
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/**/*.zip
@@ -212,7 +212,7 @@ jobs:
           name: RenderMapperPro-macOS-intel
           path: artifacts
       - name: Upload Intel build to the Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artifacts/RenderMapperPro-macOS-intel.zip
