@@ -226,9 +226,10 @@ def _bundled_asset(name: str) -> Path | None:
 
 
 def _update_token() -> str:
-    """Read-only GitHub token for the auto-updater. Comes from the RMP_UPDATE_TOKEN
-    env var (dev) or assets/update_token.txt baked into the build by CI (never in
-    source). Empty → auto-update is simply off for this build."""
+    """Optional GitHub token for the auto-updater. The repo is public, so updates
+    work with NO token (anonymous API); a token only raises the rate limit. Read
+    from the RMP_UPDATE_TOKEN env var (dev convenience) — shipped builds bake in
+    no token on purpose, since a credential in a public binary is extractable."""
     t = os.environ.get("RMP_UPDATE_TOKEN", "").strip()
     if t:
         return t
@@ -1815,21 +1816,16 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
     }
 
     def _check_for_updates(self, manual: bool = False) -> None:
+        # The repo is public, so update checks work anonymously. A token (dev env
+        # var only — never baked into shipped builds) just raises the rate limit.
         token = _update_token()
-        if not token:
-            if manual:
-                QMessageBox.information(self, "Updates",
-                    "Automatic updates aren't configured in this build "
-                    "(no update token was baked in).")
-            return
-
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
         def _fetch(use_token: bool):
             headers = {"Accept": "application/vnd.github+json",
                        "X-GitHub-Api-Version": "2022-11-28",
                        "User-Agent": APP_NAME}
-            if use_token:
+            if use_token and token:
                 headers["Authorization"] = f"Bearer {token}"
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -1838,11 +1834,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         def work():
             info = None
             try:
-                info = _fetch(use_token=True)
+                info = _fetch(use_token=bool(token))
             except Exception:
-                # Token may be revoked or rate-limited — fall back to the public
-                # API (works if the repo is/becomes public) so updates degrade
-                # gracefully instead of breaking on a single embedded credential.
+                # A token may be revoked or rate-limited — fall back to the
+                # anonymous public API so updates never break on a credential.
                 try:
                     info = _fetch(use_token=False)
                 except Exception:
@@ -1894,9 +1889,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         dest = Path.home() / "Downloads" / want
         try:
             import urllib.request
-            req = urllib.request.Request(asset["url"], headers={
-                "Authorization": f"Bearer {token}", "Accept": "application/octet-stream",
-                "User-Agent": APP_NAME})
+            # Public repo → asset downloads work anonymously; only add auth when a
+            # dev token is present (never sent as an empty Bearer header).
+            headers = {"Accept": "application/octet-stream", "User-Agent": APP_NAME}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(asset["url"], headers=headers)
             dest.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
