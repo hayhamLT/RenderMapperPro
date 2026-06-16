@@ -1944,20 +1944,26 @@ class QueuePanel(QWidget):
         self.remove_btn.clicked.connect(self.remove_selected_requested.emit)
         self.remove_btn.hide()
         self.table = HintTableWidget(
-            0, 6, "Queue is empty.\n\n1. Choose a scene and click Scan\n"
+            0, 7, "Queue is empty.\n\n1. Choose a scene and click Scan\n"
             "2. Add video clips\n3. Map a clip to a material\n\n"
             "A render job then appears here automatically.")
-        self.table.setHorizontalHeaderLabels(["Run", "Job", "Preset", "Status", "Progress", "Output"])
+        self.table.setHorizontalHeaderLabels(
+            ["Run", "Job", "Preset", "Status", "ETA", "Progress", "Output"])
         run_header = self.table.horizontalHeaderItem(0)
         if run_header is not None:
             run_header.setToolTip("Checked jobs are included when you press Start.")
+        eta_header = self.table.horizontalHeaderItem(4)
+        if eta_header is not None:
+            eta_header.setToolTip("Estimated time: remaining for the running job, "
+                                  "or a prediction from past runs of the same scene.")
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setColumnWidth(0, 38)
         self.table.setColumnWidth(2, 112)
         self.table.setColumnWidth(3, 62)
-        self.table.setColumnWidth(4, 110)
+        self.table.setColumnWidth(4, 82)    # ETA
+        self.table.setColumnWidth(5, 110)   # Progress
         self.table.verticalHeader().setDefaultSectionSize(28)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self._emit_job_selected)
@@ -2006,11 +2012,12 @@ class QueuePanel(QWidget):
         self.progress_bar.setValue(int(max(0, min(100, value))))
         self.progress_caption.setText(caption)
 
-    def set_jobs(self, jobs: list[RenderJob]) -> None:
+    def set_jobs(self, jobs: list[RenderJob], etas: dict[int, str] | None = None) -> None:
         self._failed_ids = {j.id for j in jobs if j.status == "failed"}
         self._finished_ids = {j.id for j in jobs if j.status in ("failed", "cancelled", "success")}
         pal = active_palette()
         faint = QColor(pal.text_faint)
+        muted = QColor(pal.text_muted)
         self.table.blockSignals(True)
         self.table.setRowCount(0)
         for j in jobs:
@@ -2045,14 +2052,19 @@ class QueuePanel(QWidget):
             if j.status == "failed" and j.error:
                 status_item.setToolTip(j.error)
             self.table.setItem(r, 3, status_item)
-            self.table.setCellWidget(r, 4, self._make_progress_cell(j))
+            eta_item = QTableWidgetItem((etas or {}).get(j.id, ""))
+            eta_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+            eta_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            eta_item.setForeground(muted)
+            self.table.setItem(r, 4, eta_item)
+            self.table.setCellWidget(r, 5, self._make_progress_cell(j))
             out_item = QTableWidgetItem(j.output_path)
             if j.output_path:
                 out_item.setToolTip(j.output_path)
-            self.table.setItem(r, 5, out_item)
+            self.table.setItem(r, 6, out_item)
             # Completed jobs dim out (Media-Encoder style); re-checking re-activates.
             if done:
-                for c in (1, 2, 3, 5):
+                for c in (1, 2, 3, 4, 6):
                     it = self.table.item(r, c)
                     if it is not None:
                         it.setForeground(faint)

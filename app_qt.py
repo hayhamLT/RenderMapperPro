@@ -660,7 +660,16 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
     def _apply_theme(self) -> None:
         self._palette = T.build_palette(self._theme_mode, self._accent)
         set_active_palette(self._palette)
-        self.setStyleSheet(T.stylesheet(self._palette))
+        qss = T.stylesheet(self._palette)
+        # Apply the theme app-wide, not just to the main window: a window-only
+        # stylesheet leaves top-level dialogs (Properties, About, …) unpainted —
+        # the `QWidget { background: transparent }` rule makes the dialog itself
+        # transparent (→ black) while only its children get themed. An app-level
+        # sheet styles each dialog directly, so its background matches the app.
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.setStyleSheet(qss)
+        self.setStyleSheet(qss)
 
     def _toggle_theme(self, light: bool) -> None:
         mode = "light" if light else "dark"
@@ -2977,6 +2986,32 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
     @staticmethod
     def _fmt_dur(seconds: float) -> str:
         return format_duration(seconds)   # logic in core.reporting (UI-free, tested)
+
+    def _job_etas(self) -> dict[int, str]:
+        """Per-job ETA strings for the queue's ETA column: remaining time for the
+        running job (from elapsed + progress), blank for finished ones (their real
+        time is in Render History), and a from-history prediction for the rest."""
+        need_pred = any(
+            j.status not in ("running", "success", "failed", "cancelled") for j in self._jobs)
+        history = self._load_history() if need_pred else []
+        return {j.id: self._job_eta_text(j, history) for j in self._jobs}
+
+    def _job_eta_text(self, job: RenderJob, history: list[dict]) -> str:
+        if job.status == "running":
+            started = getattr(self, "_job_started", {}).get(job.id)
+            if started and job.progress > 1:
+                elapsed = time.monotonic() - started
+                return f"~{self._fmt_dur(elapsed * (100.0 - job.progress) / job.progress)}"
+            return "…"
+        if job.status in ("success", "failed", "cancelled"):
+            return ""
+        ro = job.render_options
+        if ro is None:
+            return "—"
+        scene = Path(job.scene_path).name if job.scene_path else ""
+        fc = max(1, ro.frame_end - ro.frame_start + 1)
+        pred = predict_total_seconds(history, scene, fc)
+        return f"~{self._fmt_dur(pred)}" if pred else "—"
 
     def _update_progress_caption(self) -> None:
         if not hasattr(self, "queue_panel"):
