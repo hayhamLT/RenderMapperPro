@@ -7,6 +7,7 @@ from core.models import (
     is_c4d_scene,
     is_web_scene,
     scene_backend,
+    uses_web_backend,
 )
 
 
@@ -69,3 +70,13 @@ def test_scene_backend_predicates():
     assert is_blender_scene("a.blend") and not is_blender_scene("a.glb")
     # SceneBackend is a StrEnum — values are usable as plain strings.
     assert SceneBackend.WEB == "web"
+
+
+def test_uses_web_backend_depends_on_engine():
+    # A .glb renders via three.js only when three.js is the chosen engine;
+    # with a Blender engine it goes to Blender (which imports the glTF).
+    assert uses_web_backend("tv.glb", "WEB_THREEJS")
+    assert not uses_web_backend("tv.glb", "CYCLES")
+    assert not uses_web_backend("tv.glb", "BLENDER_EEVEE")
+    # A .blend is never web, whatever the engine string.
+    assert not uses_web_backend("scene.blend", "WEB_THREEJS")

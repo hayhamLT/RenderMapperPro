@@ -458,9 +458,12 @@ def run_blender_job(
     c4dpy_executable: str = "",
     c4d_worker_script: str = "",
 ) -> int:
-    # Route web-native scenes (.glb/.gltf) to the headless three.js backend.
-    from .web_render import is_web_scene, run_web_job
-    if is_web_scene(job.scene_path):
+    # Route .glb/.gltf to headless three.js ONLY when three.js is the chosen
+    # engine; with a Blender engine (CYCLES/EEVEE) it falls through and Blender
+    # imports the glTF (build_blender_command + the worker's load_scene).
+    from .models import uses_web_backend
+    from .web_render import run_web_job
+    if uses_web_backend(job.scene_path, job.render.engine):
         return run_web_job(job, on_log, should_cancel)
 
     # Route Cinema 4D scenes to the C4D/Redshift backend.
