@@ -14,7 +14,6 @@ Grab the latest from the [**Releases**](../../releases) page. The **installer** 
 |----------|-------------------------|----------|
 | Windows (x64) | `RenderMapperPro-Windows-x64-Setup.exe` | `RenderMapperPro-Windows-x64.zip` |
 | macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.dmg` | `RenderMapperPro-macOS-arm64.zip` |
-| macOS (Intel) | `RenderMapperPro-macOS-intel.dmg` | `RenderMapperPro-macOS-intel.zip` |
 
 - **Windows:** run **Setup.exe** — it installs to Program Files with a Start‑Menu shortcut. If SmartScreen warns, **More info → Run anyway** (the build isn't code‑signed).
 - **macOS:** open the **.dmg** and drag the app to **Applications**. First launch only: right‑click the app → **Open** → **Open** (it isn't notarized).
@@ -116,7 +115,7 @@ python -m PyInstaller --noconfirm --clean BlenderVideoMapper.spec
 # → dist/Render Mapper Pro.app  (macOS)  /  dist/Render Mapper Pro/  (Windows)
 ```
 
-GitHub Actions (`.github/workflows/build.yml`) does this for macOS arm64/Intel + Windows on every push to `main`. The Windows job also compiles a `Setup.exe` with **Inno Setup** and the macOS jobs build a `.dmg` (see `installer/`); pushing a `v*` tag publishes a Release with both the installers and the portable zips.
+GitHub Actions (`.github/workflows/build.yml`) does this for macOS (Apple Silicon) + Windows on every push to `main`. The Windows job also compiles a `Setup.exe` with **Inno Setup** and the macOS job builds a `.dmg` (see `installer/`); pushing a `v*` tag publishes a Release with both the installers and the portable zips. _(macOS is Apple-Silicon-only — the deprecated Intel runner build was dropped; a universal2 build is the path back to Intel support if needed.)_
 
 ## Development
 

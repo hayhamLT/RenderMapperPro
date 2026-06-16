@@ -1695,9 +1695,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
     # In-app update downloads the platform INSTALLER and launches it — the
     # installer handles replacing the (possibly running) app, so there's no
     # extract-over-a-locked-exe problem. (Releases also ship portable .zips.)
+    # No macos-intel entry: releases are Apple-Silicon-only (the deprecated Intel
+    # runner build was dropped). An Intel Mac would get "no installer for your
+    # platform", which is correct — there's nothing to hand it.
     _ASSET_FOR_PLATFORM: ClassVar = {
         "macos-arm64": "RenderMapperPro-macOS-arm64.dmg",
-        "macos-intel": "RenderMapperPro-macOS-intel.dmg",
         "windows-x64": "RenderMapperPro-Windows-x64-Setup.exe",
     }
 
