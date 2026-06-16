@@ -206,12 +206,15 @@ def stylesheet(p: Palette) -> str:
     """
     return f"""
     /* ── Base ─────────────────────────────────────────────────────────── */
-    QMainWindow, QDialog {{ background: {p.window}; }}
     QWidget {{
         background: transparent;
         color: {p.text};
         font-size: {FONT_BASE}px;
     }}
+    /* Window/dialog backdrop comes AFTER the transparent QWidget rule so it
+       wins (equal specificity → last rule applies); otherwise a top-level
+       dialog like Properties/About paints transparent → black. */
+    QMainWindow, QDialog {{ background: {p.window}; }}
     QToolTip {{
         background: {p.surface_alt};
         color: {p.text};

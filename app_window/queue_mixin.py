@@ -170,7 +170,7 @@ class QueueMixin(_WindowMembers):
         self._schedule_save()
 
     def _refresh_queue_view(self) -> None:
-        self.queue_panel.set_jobs(self._jobs)
+        self.queue_panel.set_jobs(self._jobs, self._job_etas())
         if self._active_job_id is not None:
             self.queue_panel.select_job(self._active_job_id)
         self._update_health()
