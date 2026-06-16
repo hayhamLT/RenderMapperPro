@@ -34,7 +34,10 @@ const api = {
     // under headless Windows ANGLE (d3d11), where the WebGPU path plus the
     // browser's canvas screenshot produced an all-black frame. preserveDrawingBuffer
     // keeps the rendered pixels readable so capture() can read them back directly.
-    renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    // powerPreference 'high-performance' asks the OS/driver for the DISCRETE GPU
+    // on a multi-GPU machine (e.g. a laptop's dGPU instead of the integrated one).
+    renderer = new THREE.WebGLRenderer({
+      antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(1);
     renderer.setSize(w, h);
     renderer.setClearColor(0x000000, 1);

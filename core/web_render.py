@@ -252,6 +252,26 @@ def _clip_mappings(job: JobConfig) -> list[tuple[str, str]]:
     return out
 
 
+# Blender's named CRF presets → x264/x265 numeric CRF (lower = higher quality).
+_WEB_CRF = {"NONE": "0", "LOSSLESS": "0", "PERC_LOSSLESS": "12", "HIGH": "18",
+            "MEDIUM": "23", "LOW": "28", "VERYLOW": "32", "LOWEST": "37"}
+
+
+def _web_video_args(r) -> list:
+    """ffmpeg codec + quality args for the assembled movie. The three.js path
+    encodes with the bundled ffmpeg (not Blender), so we honour the job's output
+    codec (H.264 / H.265 / ProRes) and quality here instead of using ffmpeg's
+    defaults — otherwise the user's Output Format + quality choices were ignored."""
+    quality = str(getattr(r, "video_quality", "HIGH") or "HIGH").upper()
+    override = str(getattr(r, "video_codec", "") or "").strip().upper()
+    base = str(getattr(r, "codec", "H264") or "H264").upper()
+    if "PRORES" in override or "PRORES" in base:
+        return ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+    is_265 = override in ("H265", "HEVC", "X265") or base in ("H265", "HEVC")
+    return ["-c:v", "libx265" if is_265 else "libx264",
+            "-crf", _WEB_CRF.get(quality, "18"), "-preset", "medium", "-pix_fmt", "yuv420p"]
+
+
 def _clip_frame_index(frame: int, frame_start: int, clip_offset: int, n_frames: int) -> int:
     """Index into the extracted clip frames for a timeline ``frame``, clamped to
     [0, n-1] so frames before the clip hold frame 0 and frames past the clip end
@@ -390,11 +410,17 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
         return 0
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm"):
-        subprocess.run(
-            [ff, "-y", "-framerate", str(fps), "-i", str(out_dir / "out_%05d.png"),
-             "-pix_fmt", "yuv420p", str(out_path)],
-            check=True, capture_output=True, creationflags=subprocess_creation_flags())
+    suffix = out_path.suffix.lower()
+    if suffix in (".mp4", ".mov", ".mkv", ".webm"):
+        cmd = [ff, "-y", "-framerate", str(fps), "-i", str(out_dir / "out_%05d.png")]
+        if suffix == ".webm":
+            cmd += ["-pix_fmt", "yuv420p"]      # let ffmpeg pick VP9; webm can't carry H.264
+        else:
+            cmd += _web_video_args(r)           # honour the job's codec + quality
+            if suffix in (".mp4", ".mov"):
+                cmd += ["-movflags", "+faststart"]
+        subprocess.run([*cmd, str(out_path)], check=True, capture_output=True,
+                       creationflags=subprocess_creation_flags())
         log(f"[web] Wrote {out_path}")
     else:
         seq = out_path if out_path.suffix == "" else out_path.parent
