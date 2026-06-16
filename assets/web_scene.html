@@ -6,8 +6,7 @@
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
-      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
     }
   }
@@ -29,13 +28,17 @@ window.__ready = false;
 window.__error = '';
 
 const api = {
-  async init(w, h) {
-    renderer = new THREE.WebGPURenderer({ antialias: true });
+  init(w, h) {
+    // Mature WebGLRenderer (not the experimental WebGPURenderer): it renders
+    // identically for these emissive-screen scenes and, critically, is reliable
+    // under headless Windows ANGLE (d3d11), where the WebGPU path plus the
+    // browser's canvas screenshot produced an all-black frame. preserveDrawingBuffer
+    // keeps the rendered pixels readable so capture() can read them back directly.
+    renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(1);
     renderer.setSize(w, h);
     renderer.setClearColor(0x000000, 1);
     document.body.appendChild(renderer.domElement);
-    await renderer.init();
     // Neutral PBR tone-map for lit geometry; emissive screens set toneMapped=false
     // so they bypass this curve and stay full-bright. Bake a neutral studio IBL
     // once (reused every frame). Guarded so a PMREM failure never blocks readiness
@@ -49,7 +52,7 @@ const api = {
     } catch (e) {
       envMap = null;
     }
-    return (renderer.backend && renderer.backend.isWebGPUBackend) ? 'webgpu' : 'webgl2';
+    return 'webgl2';
   },
 
   async loadGLB(b64, isBinary) {
@@ -199,8 +202,16 @@ const api = {
     return true;
   },
 
-  async render() {
-    await renderer.renderAsync(scene, camera);
+  render() {
+    renderer.render(scene, camera);
+  },
+
+  capture() {
+    // Read the rendered pixels straight from the canvas (GPU readback) instead
+    // of Playwright's element screenshot, which captures BLACK for a GPU canvas
+    // on headless Windows. preserveDrawingBuffer (set in init) keeps the buffer
+    // intact for this read. Returns a PNG data URL the Python side decodes.
+    return renderer.domElement.toDataURL('image/png');
   },
 };
 
