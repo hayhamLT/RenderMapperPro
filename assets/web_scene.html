@@ -22,6 +22,8 @@ let renderer, scene, camera, envMap = null;
 let sceneHasLights = false;            // set in loadGLB by the o.isLight pass
 let lightRig = null;                   // reusable THREE.Group; rebuilt per setLighting
 const materialsByName = {};
+const videoMatByName = {};          // unlit MeshBasicMaterial per mapped material
+const meshSlotsByMaterial = {};     // [mesh, slotIndex] pairs that use each material
 const camerasByName = {};
 
 window.__ready = false;
@@ -77,9 +79,14 @@ const api = {
     sceneHasLights = false;
     scene.traverse((o) => {
       if (o.isMesh && o.material) {
-        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
-          if (m.name) materialsByName[m.name] = m;
-        }
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        mats.forEach((m, i) => {
+          if (m && m.name) {
+            materialsByName[m.name] = m;
+            if (!meshSlotsByMaterial[m.name]) meshSlotsByMaterial[m.name] = [];
+            meshSlotsByMaterial[m.name].push([o, Array.isArray(o.material) ? i : -1]);
+          }
+        });
       }
       if (o.isCamera && o.name) camerasByName[o.name] = o;
       if (o.isLight) sceneHasLights = true;
@@ -190,31 +197,34 @@ const api = {
   },
 
   async setEmissive(materialName, dataUrl) {
-    const m = materialsByName[materialName];
-    if (!m) return false;
+    const slots = meshSlotsByMaterial[materialName];
+    if (!slots || !slots.length) return false;
     const img = new Image();
     await new Promise((res, rej) => {
       img.onload = res; img.onerror = () => rej(new Error('image decode failed')); img.src = dataUrl;
     });
-    let tex = m.__videoTex;
-    if (!tex) {
-      tex = new THREE.Texture();
+    let mat = videoMatByName[materialName];
+    if (!mat) {
+      // Pure, full-bright, UNLIT video — exactly like Blender's "emission
+      // full-bright": MeshBasicMaterial ignores all lighting, reflections and the
+      // environment map, so the screen shows ONLY the clip at 100% (no base
+      // colour, no specular/IBL reflection mixed in). We replace the glTF PBR
+      // material on every mesh slot that used it — the same as mapping a clip
+      // onto a material in Blender. toneMapped=false keeps it from being dimmed
+      // by the tone-map curve; flipY=false matches the glTF UV origin.
+      const tex = new THREE.Texture();
       tex.colorSpace = THREE.SRGBColorSpace;
-      // glTF UVs assume a top-left texture origin (the glTF loader sets flipY=false
-      // on every texture it makes). Our video texture must match, or it renders
-      // vertically flipped — WebGLRenderer does, whereas the old WebGPURenderer
-      // happened to compensate, so this only bit after the WebGL switch.
       tex.flipY = false;
-      m.__videoTex = tex;
+      mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false });
+      mat.name = materialName;
+      videoMatByName[materialName] = mat;
+      for (const [mesh, idx] of slots) {
+        if (idx < 0) mesh.material = mat;
+        else mesh.material[idx] = mat;
+      }
     }
-    tex.image = img; tex.needsUpdate = true;
-    // Full-bright video: emissive map at white, no tone mapping (matches the
-    // "emission full-bright" mapping the Blender/Redshift paths use).
-    m.emissiveMap = tex;
-    if (m.emissive && m.emissive.setRGB) m.emissive.setRGB(1, 1, 1);
-    if ('emissiveIntensity' in m) m.emissiveIntensity = 1.0;
-    m.toneMapped = false;
-    m.needsUpdate = true;
+    mat.map.image = img;
+    mat.map.needsUpdate = true;
     return true;
   },
 
