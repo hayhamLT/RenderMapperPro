@@ -2799,14 +2799,16 @@ class PreviewPanel(QWidget):
         else:
             lay.addWidget(self.scroll_area, 1)
 
-        # A thin progress strip under the preview, shown only while a preview
-        # frame renders (indeterminate until the engine reports a percentage).
+        # A thin progress strip pinned under the preview. It's ALWAYS in the
+        # layout (it just paints transparent when idle), so a render starting or
+        # finishing never shifts the preview image up or down.
+        self._bar_active = False
         self.render_bar = QProgressBar()
         self.render_bar.setObjectName("PreviewProgress")
         self.render_bar.setTextVisible(False)
         self.render_bar.setFixedHeight(3)
-        self.render_bar.setRange(0, 0)
-        self.render_bar.setVisible(False)
+        self.render_bar.setRange(0, 100)
+        self.render_bar.setValue(0)
         lay.addWidget(self.render_bar)
 
         self.auto_btn.setChecked(True)   # auto-render on by default
@@ -2815,16 +2817,32 @@ class PreviewPanel(QWidget):
     # ── preview render progress (thin bar under the frame) ──────────────────
     def start_render_progress(self) -> None:
         self.render_bar.setRange(0, 0)        # busy/indeterminate until a % lands
-        self.render_bar.setVisible(True)
+        self._set_bar_active(True)
 
     def set_render_progress(self, pct: int) -> None:
+        # A real 0–100 fill once the engine reports a percentage.
         self.render_bar.setRange(0, 100)
         self.render_bar.setValue(max(0, min(100, pct)))
-        self.render_bar.setVisible(True)
+        self._set_bar_active(True)
 
     def end_render_progress(self) -> None:
-        self.render_bar.setVisible(False)
-        self.render_bar.setRange(0, 0)
+        self.render_bar.setRange(0, 100)
+        self.render_bar.setValue(0)
+        self._set_bar_active(False)
+
+    def _set_bar_active(self, active: bool) -> None:
+        """Show/hide the bar by paint only (transparent ⇄ accent), never by
+        layout — so the preview never jumps when a render starts or ends."""
+        self._bar_active = active
+        pal = active_palette()
+        if active:
+            self.render_bar.setStyleSheet(
+                f"QProgressBar#PreviewProgress{{background:{pal.surface_alt};border:none;}}"
+                f"QProgressBar#PreviewProgress::chunk{{background:{pal.accent};}}")
+        else:
+            self.render_bar.setStyleSheet(
+                "QProgressBar#PreviewProgress{background:transparent;border:none;}"
+                "QProgressBar#PreviewProgress::chunk{background:transparent;}")
 
     # ── frame picker ─────────────────────────────────────────────────────
     def restyle(self, palette) -> None:
@@ -2834,9 +2852,7 @@ class PreviewPanel(QWidget):
         self.prev_btn.setIcon(icons.icon("chevron_left", palette.text, 16))
         self.next_btn.setIcon(icons.icon("chevron_right", palette.text, 16))
         self.preview_frame_btn.setIcon(icons.icon("camera", palette.text, 16))
-        self.render_bar.setStyleSheet(
-            f"QProgressBar#PreviewProgress{{background:{palette.surface_alt};border:none;}}"
-            f"QProgressBar#PreviewProgress::chunk{{background:{palette.accent};}}")
+        self._set_bar_active(self._bar_active)   # keep current state, new palette
         self._retint_auto_icon()
 
     def _retint_auto_icon(self) -> None:
