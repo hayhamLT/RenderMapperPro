@@ -15,6 +15,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
+# A frozen build ships its own Python with no CA certificates, so every HTTPS
+# request (the update check, the managed-Blender download, …) fails verification
+# with CERTIFICATE_VERIFY_FAILED — which surfaces as "Couldn't reach GitHub".
+# Point OpenSSL at certifi's bundled cacert.pem before any network call. (From
+# source the system certs are used, so this only matters in the .app/.exe.)
+if getattr(sys, "frozen", False):
+    try:
+        import certifi
+        os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
+    except Exception:
+        pass
+
 from PySide6.QtCore import (
     QByteArray,
     QEasingCurve,

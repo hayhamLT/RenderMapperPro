@@ -46,7 +46,6 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         _find_blender,
         _find_c4dpy,
         _norm_blender,
-        _update_token,
     )
 
     dlg = QDialog(win)
@@ -316,8 +315,6 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     upd_row.addWidget(upd_check_btn)
     upd_row.addStretch()
     lay.addLayout(upd_row)
-    if not _update_token():
-        lay.addWidget(hint("This build has no update token baked in, so automatic checks are off."))
     lay.addStretch()
 
     # ── Deadline ─────────────────────────────────────────────────────
