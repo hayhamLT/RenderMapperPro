@@ -83,7 +83,7 @@ a = Analysis(
         ('assets', 'assets'),
         ('THIRD_PARTY_LICENSES.md', '.'),   # GPL/LGPL notices for bundled ffmpeg + Qt
     ] + _pw_datas,
-    hiddenimports=_pw_hidden,
+    hiddenimports=_pw_hidden + ['certifi'],   # certifi hook bundles cacert.pem → HTTPS works
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['pw_runtime_hook.py'],
