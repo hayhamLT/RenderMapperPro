@@ -109,6 +109,7 @@ from core.utils import (
     VIDEO_EXTENSIONS,
     ext_for_format,
     file_exists,
+    subprocess_creation_flags,
 )
 from core.utils import update_platform_key as _update_platform_key
 from core.utils import version_tuple as _version_tuple
@@ -610,6 +611,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._preview_enabled = True
         self._preview_path = ""
         self._preview_timer: QTimer | None = None
+        self._last_preview_sig: tuple | None = None   # auto-preview re-renders only when this changes
         self._job_started: dict[int, float] = {}
         self._render_t0 = 0.0
         self._custom_layout_state = ""
@@ -634,6 +636,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._power_rate = 0.15          # electricity rate ($/kWh)
         self._notify_desktop = True      # system-tray notifications on render events
         self._discord_webhook = ""       # optional Discord webhook for render events
+        self._auto_update = True         # install updates automatically on launch (on by default)
         self._discord_thread: FuncThread | None = None
         self._job_durations: dict[int, float] = {}
         self._job_metrics: dict[int, dict] = {}   # job_id → {frames, avg_spf, p95_spf}
@@ -2132,28 +2135,123 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 QMessageBox.information(self, "Updates", f"You're up to date (v{APP_VERSION}).")
             return
         self._sb_update.setText(f"● Update {tag} available")
-        self._offer_update(info, tag)
+        # Auto-update only on the automatic launch check — a manual "Check Now"
+        # always shows the offer so the user stays in control of an explicit click.
+        if self._auto_update and not manual:
+            self._append_log(f"[update] Auto-updating to {tag}…")
+            self._show_toast(f"Updating to {tag}…", "info")
+            self._fetch_update(info, silent=True)
+        else:
+            self._offer_update(info, tag)
 
     def _offer_update(self, info, tag: str) -> None:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle("Update Available")
-        box.setText(f"{APP_NAME} {tag} is available — you have v{APP_VERSION}.")
+        """A themed, platform-aware 'update available' card. macOS and Windows get
+        their own install wording and primary-button label so each feels native."""
+        pal = self._palette
+        is_mac = sys.platform == "darwin"
+        is_win = sys.platform == "win32"
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Software Update")
+        dlg.setMinimumWidth(460)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(24, 22, 24, 18)
+        outer.setSpacing(0)
+
+        # ── Header: app icon + version transition ───────────────────────
+        head = QHBoxLayout()
+        head.setSpacing(14)
+        icon_lbl = QLabel()
+        pm = self.windowIcon().pixmap(52, 52)
+        if not pm.isNull():
+            icon_lbl.setPixmap(pm)
+        icon_lbl.setFixedSize(52, 52)
+        head.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+        head_text = QVBoxLayout()
+        head_text.setSpacing(2)
+        title = QLabel(f"{APP_NAME} {tag} is available")
+        title.setStyleSheet(f"color:{pal.text}; font-size:16px; font-weight:600;")
+        title.setWordWrap(True)
+        sub = QLabel(f"You're on v{APP_VERSION}. A newer version is ready to install.")
+        sub.setStyleSheet(f"color:{pal.text_muted}; font-size:12px;")
+        sub.setWordWrap(True)
+        head_text.addWidget(title)
+        head_text.addWidget(sub)
+        head.addLayout(head_text, 1)
+        outer.addLayout(head)
+        outer.addSpacing(14)
+
+        # ── Release notes (rendered markdown, scrollable) ───────────────
         notes = str(info.get("body") or "").strip()
         if notes:
-            box.setInformativeText(notes[:600] + ("…" if len(notes) > 600 else ""))
-        get = box.addButton("Download Update", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is get:
+            label = QLabel("What's new")
+            label.setStyleSheet(f"color:{pal.text_faint}; font-size:11px; "
+                                f"font-weight:600; letter-spacing:1px;")
+            outer.addWidget(label)
+            outer.addSpacing(4)
+            view = QTextBrowser()
+            view.setOpenExternalLinks(True)
+            try:
+                view.setMarkdown(notes)
+            except Exception:
+                view.setPlainText(notes)
+            view.setStyleSheet(
+                f"QTextBrowser{{background:{pal.surface}; border:1px solid {pal.border}; "
+                f"border-radius:8px; padding:8px; color:{pal.text}; font-size:12px;}}")
+            view.setMinimumHeight(150)
+            view.setMaximumHeight(220)
+            outer.addWidget(view)
+            outer.addSpacing(12)
+
+        # ── Platform-specific install note ──────────────────────────────
+        if is_mac:
+            note = (f"It'll download the macOS installer (.dmg) and open it — "
+                    f"drag {APP_NAME} to Applications to finish.")
+        elif is_win:
+            note = (f"It'll download and run the Windows installer — your settings "
+                    f"are kept and {APP_NAME} relaunches when it's done.")
+        else:
+            note = "It'll download the installer and reveal it in your file manager."
+        note_lbl = QLabel(note)
+        note_lbl.setStyleSheet(f"color:{pal.text_muted}; font-size:11px;")
+        note_lbl.setWordWrap(True)
+        outer.addWidget(note_lbl)
+        outer.addSpacing(16)
+
+        # ── Buttons (platform-native ordering + accent primary) ─────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        later = QPushButton("Later")
+        later.setObjectName("SmallButton")
+        primary_label = "Download Update" if is_mac else "Update Now"
+        primary = QPushButton(primary_label)
+        primary.setObjectName("PrimaryButton")
+        primary.setStyleSheet(
+            f"QPushButton#PrimaryButton{{background:{pal.accent}; color:{pal.accent_text}; "
+            f"border:none; border-radius:7px; padding:8px 18px; font-weight:600;}}"
+            f"QPushButton#PrimaryButton:hover{{background:{pal.accent_hover};}}")
+        primary.setCursor(Qt.CursorShape.PointingHandCursor)
+        later.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_row.addStretch(1)
+        # macOS keeps the affirmative button rightmost; Windows too — same order here.
+        btn_row.addWidget(later)
+        btn_row.addWidget(primary)
+        outer.addLayout(btn_row)
+
+        primary.clicked.connect(dlg.accept)
+        later.clicked.connect(dlg.reject)
+        primary.setDefault(True)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             self._fetch_update(info)
 
-    def _fetch_update(self, info) -> None:
+    def _fetch_update(self, info, silent: bool = False) -> None:
         want = self._ASSET_FOR_PLATFORM.get(_update_platform_key()) or ""
         asset = next((a for a in info.get("assets", []) if a.get("name") == want), None)
         if not asset:
-            QMessageBox.warning(self, "Update",
-                f"This release has no installer for your platform ({_update_platform_key()}).")
+            if not silent:
+                QMessageBox.warning(self, "Update",
+                    f"This release has no installer for your platform ({_update_platform_key()}).")
             return
         token = _update_token()
         tag = str(info.get("tag_name", "") or "update").lstrip("v") or "update"
@@ -2170,20 +2268,33 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
             # Hand off to the platform installer — it replaces the running app
-            # itself (Windows: the Inno setup closes + overwrites; macOS: drag to
-            # Applications), so there's no extract-over-a-locked-exe problem.
-            if sys.platform == "win32":
-                os.startfile(str(dest))                  # runs Setup.exe
+            # itself (no extract-over-a-locked-exe problem).
+            if sys.platform == "win32" and silent:
+                # Inno Setup silent install: close us, install, relaunch — seamless.
+                subprocess.Popen([str(dest), "/VERYSILENT", "/SUPPRESSMSGBOXES",
+                                  "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"],
+                                 creationflags=subprocess_creation_flags())
+            elif sys.platform == "win32":
+                os.startfile(str(dest))                  # runs Setup.exe (wizard)
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(dest)])    # mounts the .dmg
             else:
                 reveal_in_file_manager(dest)
-            QMessageBox.information(self, "Update Ready",
-                f"{APP_NAME} {tag} downloaded to:\n\n{dest}\n\n"
-                f"The installer is opening — follow its prompts. You may be asked to "
-                f"quit {APP_NAME} first so it can be replaced.")
+            if silent:
+                if sys.platform == "darwin":
+                    self._show_toast(f"{tag} downloaded — drag the app to Applications to finish.",
+                                     "info")
+                # Windows is handled by the silent installer; nothing to prompt.
+            else:
+                QMessageBox.information(self, "Update Ready",
+                    f"{APP_NAME} {tag} downloaded to:\n\n{dest}\n\n"
+                    f"The installer is opening — follow its prompts. You may be asked to "
+                    f"quit {APP_NAME} first so it can be replaced.")
         except Exception as exc:
-            QMessageBox.warning(self, "Update Failed", str(exc))
+            if not silent:
+                QMessageBox.warning(self, "Update Failed", str(exc))
+            else:
+                self._append_log(f"[update] Auto-update failed: {exc}")
 
     def _update_renderer_for_scene(self) -> None:
         """Reflect the scene type in the renderer dropdown the moment a scene is
@@ -2499,10 +2610,41 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             self._auto_preview_timer = t
         t.start(700)
 
+    def _preview_signature(self) -> tuple:
+        """A hashable fingerprint of everything that changes the *rendered preview
+        frame*. Output-only knobs (codec, video quality, fps, frame step, render
+        device, render-scale %) are deliberately excluded — they never alter the
+        single frame shown, so changing them must not trigger a re-render. Frame
+        start/end ARE included: they set where the clip samples at the previewed
+        frame."""
+        sp, rp = self.scene_panel, self.render_panel
+        o = rp.render_options()
+        asn = tuple((a.material_name, a.video_path, a.mapping_mode)
+                    for a in sp.get_assignments())
+        return (
+            sp.scene_edit.text().strip(),
+            asn,
+            sp.camera_combo.currentText(),
+            o.engine, o.width, o.height,
+            o.samples, o.use_denoise, o.film_transparent,
+            o.color_view_transform, o.color_exposure, o.color_gamma,
+            o.frame_start, o.frame_end,
+            o.rs_min_samples, o.rs_threshold, o.rs_gi_enabled,
+            o.rs_gi_bounces, o.rs_ray_depth,
+            o.web_lighting_preset, o.web_lighting_intensity, o.web_respect_scene_lights,
+            self.preview_panel.current_frame(),
+            round(self.preview_panel.preview_scale(), 4),
+        )
+
     def _fire_auto_preview(self) -> None:
         if not self.preview_panel.auto_btn.isChecked() or self._is_rendering:
             return
         if not self._preview_ready():
+            return
+        # Only re-render when something that affects the rendered frame changed —
+        # tweaking output codec/fps/device/etc. leaves the frame identical.
+        sig = self._preview_signature()
+        if sig == self._last_preview_sig:
             return
         # _render_preview_frame coalesces if a preview is already running.
         self._render_preview_frame()
@@ -3096,6 +3238,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         opts = dataclasses.replace(opts, output_format="PNG", codec="NONE", resolution_percentage=pct)
         self._preview_started = time.monotonic()
         self._preview_frame_num = fs
+        # Remember exactly what we're rendering so the auto-preview can skip a
+        # re-render when nothing frame-relevant changes afterwards.
+        self._last_preview_sig = self._preview_signature()
         primary_video = asn[0].video_path if asn else ""
         primary_mat = asn[0].material_name if asn else ""
         out_dir = tempfile.mkdtemp(prefix="rmp_previewframe_")
@@ -3985,6 +4130,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             "power_rate": self._power_rate,
             "notify_desktop": self._notify_desktop,
             "discord_webhook": self._discord_webhook,
+            "auto_update": self._auto_update,
             "live_preview": self._preview_enabled,
             "watch_folder": watch_folder,
             "watch_enabled": watch_enabled,
@@ -4071,6 +4217,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             _log.debug("invalid power/cost values in profile; using defaults", exc_info=True)
         self._notify_desktop = bool(d.get("notify_desktop", self._notify_desktop))
         self._discord_webhook = str(d.get("discord_webhook", self._discord_webhook) or "")
+        self._auto_update = bool(d.get("auto_update", self._auto_update))
         if "live_preview" in d:
             self._preview_enabled = bool(d.get("live_preview", True))
             if hasattr(self, "preview_action"):
