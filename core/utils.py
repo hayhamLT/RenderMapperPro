@@ -16,6 +16,38 @@ from core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
+# Windows file attributes marking a cloud "online-only" placeholder.
+_FILE_ATTRIBUTE_OFFLINE = 0x1000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+
+
+def is_cloud_placeholder(path: str, st: os.stat_result | None = None) -> bool:
+    """True if ``path`` looks like a not-yet-downloaded cloud placeholder —
+    Dropbox/OneDrive 'online-only' (Windows) or a dataless file (macOS/Linux).
+    Reading one would block on a network hydrate or fail, so the watch folder
+    should wait until it's actually local before ingesting it.
+
+    Side-effect-free: it only inspects stat metadata, never opens the file (which
+    would itself trigger a download)."""
+    try:
+        if st is None:
+            st = os.stat(path)
+    except OSError:
+        return False
+    # Windows: OneDrive/Dropbox set OFFLINE / RECALL_ON_DATA_ACCESS attributes on
+    # placeholders. This is the authoritative signal there.
+    attrs = getattr(st, "st_file_attributes", 0) or 0
+    if attrs & (_FILE_ATTRIBUTE_OFFLINE | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS):
+        return True
+    # macOS/Linux: a dataless placeholder reports a logical size but almost no
+    # blocks actually allocated on disk. Only flag a clear mismatch (<25% on
+    # disk) so genuinely-local files — even sparse/compressed ones — aren't
+    # wrongly skipped. A file mid-copy grows its blocks with its size, so the
+    # size-stability/settle check (not this) is what guards against partial copies.
+    blocks = getattr(st, "st_blocks", None)
+    size = getattr(st, "st_size", 0)
+    return blocks is not None and size > 0 and (blocks * 512) * 4 < size
+
 
 def ca_bundle_path() -> str | None:
     """Path to a CA bundle for HTTPS verification. A frozen build ships its own
