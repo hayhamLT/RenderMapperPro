@@ -304,22 +304,19 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     # ── Updates ──────────────────────────────────────────────────────
     lay = _tab("Updates")
     lay.addWidget(section_title("SOFTWARE UPDATES"))
-    lay.addWidget(hint("The app checks for a newer release on launch. By default it asks "
-                       "before downloading; turn on auto-update to install new versions "
-                       "for you in the background."))
+    lay.addWidget(hint("When a newer version is released, the app shows a popup with the "
+                       "release notes so you can download it — nothing installs without "
+                       "your say-so."))
     upd_status = QLabel(f"This build is v{APP_VERSION}.")
     upd_status.setStyleSheet(f"color:{win._palette.text_muted}; font-size:12px;")
     lay.addWidget(upd_status)
 
-    auto_update_cb = QCheckBox("Install updates automatically")
-    auto_update_cb.setChecked(getattr(win, "_auto_update", False))
-    lay.addWidget(auto_update_cb)
-    _auto_hint = ("When a new version is found on launch it downloads and installs silently, "
-                  "then relaunches — no prompts."
-                  if sys.platform == "win32" else
-                  "When a new version is found on launch it downloads automatically and opens "
-                  "the installer for you to finish (drag to Applications).")
-    lay.addWidget(hint(_auto_hint))
+    launch_check_cb = QCheckBox("Check for updates on launch")
+    launch_check_cb.setChecked(getattr(win, "_check_updates_on_launch", True))
+    lay.addWidget(launch_check_cb)
+    lay.addWidget(hint("Looks for a newer release a few seconds after the app starts and "
+                       "pops the update notice if one is found. Turn off to only check "
+                       "manually with the button below."))
 
     upd_check_btn = QPushButton("Check for Updates Now")
     upd_check_btn.clicked.connect(lambda: win._check_for_updates(manual=True))
@@ -487,7 +484,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         win._deliver_dir = dlv_edit.text().strip()
 
         # Updates
-        win._auto_update = auto_update_cb.isChecked()
+        win._check_updates_on_launch = launch_check_cb.isChecked()
 
         win._save_profile()    # persist immediately so settings survive a quick quit
         dlg.accept()
