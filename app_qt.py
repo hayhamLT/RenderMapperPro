@@ -1044,6 +1044,19 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         </table>
         <p class="muted">Plus a render <b>scale&nbsp;%</b> and an optional
         <b>burn-in</b> overlay (clip/version/frame/camera/date on every frame).</p>
+        <h3>Presets — reuse a recipe</h3>
+        <p class="muted">Dialled in a look you like? Save the whole render recipe
+        (resolution, range, engine, quality, colour…) as a named <b>Preset</b> from
+        the <b>Presets</b> panel (or <i>Profile → Save Preset…</i>). Later, pick it
+        to <b>apply</b> it to the current settings — or to selected/checked queue
+        jobs — so a new scene matches your house style in one click. Presets store
+        <i>settings only</i>, never your scene or clips.</p>
+        <h3>Output path &amp; tokens</h3>
+        <p class="muted">The <b>Output path</b> takes tokens that fill in per job —
+        click the <b>▾</b> beside it for the full menu: <code>{video}</code>
+        <code>{scene}</code> <code>{camera}</code> <code>{res}</code>
+        <code>{width}</code> <code>{height}</code> <code>{fps}</code>
+        <code>{date}</code>.</p>
         """),
             ("Live Preview", """
         <h2>Live Preview</h2>
@@ -1086,6 +1099,67 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         <b>Clear Queue</b>. A failed job <b>auto-retries once</b> after the others.
         Overall progress + ETA show below the queue, and every step is in the
         Live&nbsp;Logs.</p>
+        """),
+            ("Watch & Auto-render", """
+        <h2>Watch &amp; Auto-render</h2>
+        <p class="lead">Hands-off mode: point the app at a folder, mark the screens
+        that matter, and every time fresh footage lands it imports, maps, and
+        renders on its own — ideal for review loops and "drop a new cut, get a new
+        preview" pipelines.</p>
+
+        <h3>1 · The watch folder</h3>
+        <p class="muted">Click the <b>clock</b> button under the Videos list (or set
+        it in <a href="action:properties/Watch">Properties → Watch &amp; Auto-render</a>)
+        and pick a folder. Anything you — or another app — drops there imports and
+        <b>auto-maps</b> to a material by name. It's:</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Version-aware</td><td>Drop <code>Screen_v2.mp4</code>
+              next to <code>Screen_v1.mp4</code> and the newer version takes over the
+              mapping — <b>latest wins</b>, no re-linking.</td></tr>
+          <tr><td class="fname">Instant + reliable</td><td>Local drops are picked up
+              the moment they land; folders on a <b>network share</b> or
+              <b>Dropbox/cloud</b> are polled as a backstop, so nothing is missed.</td></tr>
+          <tr><td class="fname">Copy-safe</td><td>A file is only imported once it has
+              finished writing (its size holds steady) — never a half-copied clip.</td></tr>
+          <tr><td class="fname">Cloud-aware</td><td>Dropbox/OneDrive <b>"online-only"</b>
+              placeholders are skipped until their contents are actually downloaded.</td></tr>
+        </table>
+
+        <h3>2 · Mark render targets</h3>
+        <p class="muted">Tell the app which screens an auto-render must cover:
+        <b>right-click a material → Mark as Render Target</b>, or click the coloured
+        <b>stripe</b> on the material's left edge. Targets are what the next step
+        waits for.</p>
+
+        <h3>3 · Auto-render</h3>
+        <p class="muted">In <a href="action:properties/Watch">Properties → Watch &amp;
+        Auto-render</a>, turn on <b>"Auto-render once every render-target screen has a
+        clip"</b>. As soon as every target has footage, a single <b>multi-screen
+        render</b> is created automatically (a burst of new versions is coalesced into
+        one render, not one per file). Choose how it behaves:</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Start automatically</td><td>On = it renders straight
+              away. Off = the job is just <b>added to the Queue</b> for you to start.</td></tr>
+          <tr><td class="fname">Output folder</td><td>Where renders go. Blank = a
+              <code>PREVIZ</code> subfolder inside the watch folder (kept out of the
+              scan, so previews never re-trigger themselves).</td></tr>
+          <tr><td class="fname">Name</td><td>Filename pattern with tokens
+              <code>{clip}</code> · <code>{scene}</code> · <code>{date}</code>.</td></tr>
+        </table>
+
+        <h3>4 · Delivery (optional)</h3>
+        <p class="muted">Set a <b>Copy&nbsp;to</b> folder under <b>Delivery</b> and every
+        finished render is also copied there — e.g. a synced review/hand-off folder —
+        so collaborators get it without you lifting a finger. Blank = off.</p>
+
+        <h3>Tuning</h3>
+        <p class="muted">Two knobs in Properties: <b>poll interval</b> (how often a
+        network/cloud folder is re-checked) and the <b>settle</b> window (how long a
+        file's size must hold steady before import). Defaults suit most setups; raise
+        the settle time for very large files copied slowly.</p>
+        <p class="muted"><b>Tip:</b> watch + targets + auto-start + a delivery folder =
+        a fully automatic "new footage → rendered preview in the review folder"
+        pipeline.</p>
         """),
             ("Render Farm", """
         <h2>Render Farm (Deadline)</h2>
