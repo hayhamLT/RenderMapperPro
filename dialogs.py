@@ -304,11 +304,23 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     # ── Updates ──────────────────────────────────────────────────────
     lay = _tab("Updates")
     lay.addWidget(section_title("SOFTWARE UPDATES"))
-    lay.addWidget(hint("Updates are automatic — the app checks for a newer release on launch "
-                       "and offers a one-click download. Nothing to configure."))
+    lay.addWidget(hint("The app checks for a newer release on launch. By default it asks "
+                       "before downloading; turn on auto-update to install new versions "
+                       "for you in the background."))
     upd_status = QLabel(f"This build is v{APP_VERSION}.")
     upd_status.setStyleSheet(f"color:{win._palette.text_muted}; font-size:12px;")
     lay.addWidget(upd_status)
+
+    auto_update_cb = QCheckBox("Install updates automatically")
+    auto_update_cb.setChecked(getattr(win, "_auto_update", False))
+    lay.addWidget(auto_update_cb)
+    _auto_hint = ("When a new version is found on launch it downloads and installs silently, "
+                  "then relaunches — no prompts."
+                  if sys.platform == "win32" else
+                  "When a new version is found on launch it downloads automatically and opens "
+                  "the installer for you to finish (drag to Applications).")
+    lay.addWidget(hint(_auto_hint))
+
     upd_check_btn = QPushButton("Check for Updates Now")
     upd_check_btn.clicked.connect(lambda: win._check_for_updates(manual=True))
     upd_row = QHBoxLayout()
@@ -473,6 +485,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         win._autorender_output = ar_out_edit.text().strip()
         win._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
         win._deliver_dir = dlv_edit.text().strip()
+
+        # Updates
+        win._auto_update = auto_update_cb.isChecked()
 
         win._save_profile()    # persist immediately so settings survive a quick quit
         dlg.accept()

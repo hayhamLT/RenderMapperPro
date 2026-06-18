@@ -1202,14 +1202,14 @@ class RenderPanel(QWidget):
             "Before rendering, check that the scene and every mapped clip exist, are "
             "readable, and have a supported extension. Turn off only if you use "
             "symlinks or relative paths that are valid on the render machine.")
-        cb_row = QHBoxLayout()
-        cb_row.setSpacing(18)
-        cb_row.addWidget(self.denoise_cb)
-        cb_row.addWidget(self.transparent_cb)
-        cb_row.addWidget(self.burn_in_cb)
-        cb_row.addWidget(self.safe_mode_cb)
-        cb_row.addStretch(1)
-        adv.addLayout(cb_row)
+        # Stacked vertically (not one wide row) so the long labels never force a
+        # huge minimum width — that's what made opening Advanced stretch the dock.
+        cb_col = QVBoxLayout()
+        cb_col.setSpacing(8)
+        cb_col.setContentsMargins(0, 2, 0, 0)
+        for _cb in (self.denoise_cb, self.transparent_cb, self.burn_in_cb, self.safe_mode_cb):
+            cb_col.addWidget(_cb)
+        adv.addLayout(cb_col)
 
         # ── Output (same slot for both renderers) ────────────────────────
         adv.addWidget(section("OUTPUT"))
