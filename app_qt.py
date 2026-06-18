@@ -109,7 +109,6 @@ from core.utils import (
     VIDEO_EXTENSIONS,
     ext_for_format,
     file_exists,
-    subprocess_creation_flags,
 )
 from core.utils import update_platform_key as _update_platform_key
 from core.utils import version_tuple as _version_tuple
@@ -636,7 +635,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._power_rate = 0.15          # electricity rate ($/kWh)
         self._notify_desktop = True      # system-tray notifications on render events
         self._discord_webhook = ""       # optional Discord webhook for render events
-        self._auto_update = True         # install updates automatically on launch (on by default)
+        self._check_updates_on_launch = True   # check GitHub for a newer release on startup (on by default)
+        self._skipped_update = ""              # a release tag the user chose to skip (no more launch nags)
         self._discord_thread: FuncThread | None = None
         self._job_durations: dict[int, float] = {}
         self._job_metrics: dict[int, dict] = {}   # job_id → {frames, avg_spf, p95_spf}
@@ -664,8 +664,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._load_profile()
         self._update_health()
         self._update_status_bar()
-        # Quietly check the update share a few seconds after launch.
-        QTimer.singleShot(3000, lambda: self._check_for_updates(manual=False))
+        # Check for a newer release a few seconds after launch (if the user hasn't
+        # turned the on-launch check off). A newer version pops the offer dialog.
+        QTimer.singleShot(3000, self._launch_update_check)
         QTimer.singleShot(300, self._maybe_first_run)   # one-time welcome on first launch
         # Size/position the window once it's shown: restore the user's last
         # adjustment if it's reasonable, otherwise default to 70% of the screen
@@ -2121,6 +2122,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._update_check_thread = FuncThread(work)
         self._update_check_thread.start()
 
+    def _launch_update_check(self) -> None:
+        """The startup update check — skipped entirely if the user turned off the
+        on-launch check in Properties → Updates."""
+        if self._check_updates_on_launch:
+            self._check_for_updates(manual=False)
+
     def _on_update_checked(self, info, manual: bool) -> None:
         if self._shutting_down:
             return
@@ -2135,14 +2142,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 QMessageBox.information(self, "Updates", f"You're up to date (v{APP_VERSION}).")
             return
         self._sb_update.setText(f"● Update {tag} available")
-        # Auto-update only on the automatic launch check — a manual "Check Now"
-        # always shows the offer so the user stays in control of an explicit click.
-        if self._auto_update and not manual:
-            self._append_log(f"[update] Auto-updating to {tag}…")
-            self._show_toast(f"Updating to {tag}…", "info")
-            self._fetch_update(info, silent=True)
-        else:
-            self._offer_update(info, tag)
+        # A version the user chose to skip stays quiet on the automatic launch
+        # check — the status-bar badge still shows it, and a manual "Check Now"
+        # (or the next, newer release) always pops the dialog.
+        if not manual and tag == self._skipped_update:
+            return
+        self._offer_update(info, tag)
 
     def _offer_update(self, info, tag: str) -> None:
         """A themed, platform-aware 'update available' card. macOS and Windows get
@@ -2233,25 +2238,41 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             f"QPushButton#PrimaryButton:hover{{background:{pal.accent_hover};}}")
         primary.setCursor(Qt.CursorShape.PointingHandCursor)
         later.setCursor(Qt.CursorShape.PointingHandCursor)
+        # "Skip this version" — left-aligned and quiet, like Sparkle. Declining a
+        # version stops the launch nag for it but not for the next release.
+        skip = QPushButton("Skip this version")
+        skip.setObjectName("LinkButton")
+        skip.setStyleSheet(f"QPushButton#LinkButton{{background:transparent; border:none; "
+                           f"color:{pal.text_faint}; padding:8px 4px;}}"
+                           f"QPushButton#LinkButton:hover{{color:{pal.text_muted};}}")
+        skip.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_row.addWidget(skip)
         btn_row.addStretch(1)
         # macOS keeps the affirmative button rightmost; Windows too — same order here.
         btn_row.addWidget(later)
         btn_row.addWidget(primary)
         outer.addLayout(btn_row)
 
+        # Custom codes so we can tell Skip apart from Later.
+        _SKIP = 2
         primary.clicked.connect(dlg.accept)
         later.clicked.connect(dlg.reject)
+        skip.clicked.connect(lambda: dlg.done(_SKIP))
         primary.setDefault(True)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        result = dlg.exec()
+        if result == QDialog.DialogCode.Accepted:
             self._fetch_update(info)
+        elif result == _SKIP:
+            self._skipped_update = tag
+            self._append_log(f"[update] Skipping {tag} — won't prompt again until a newer release.")
+            self._save_profile()
 
-    def _fetch_update(self, info, silent: bool = False) -> None:
+    def _fetch_update(self, info) -> None:
         want = self._ASSET_FOR_PLATFORM.get(_update_platform_key()) or ""
         asset = next((a for a in info.get("assets", []) if a.get("name") == want), None)
         if not asset:
-            if not silent:
-                QMessageBox.warning(self, "Update",
-                    f"This release has no installer for your platform ({_update_platform_key()}).")
+            QMessageBox.warning(self, "Update",
+                f"This release has no installer for your platform ({_update_platform_key()}).")
             return
         token = _update_token()
         tag = str(info.get("tag_name", "") or "update").lstrip("v") or "update"
@@ -2269,32 +2290,18 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 shutil.copyfileobj(r, f)
             # Hand off to the platform installer — it replaces the running app
             # itself (no extract-over-a-locked-exe problem).
-            if sys.platform == "win32" and silent:
-                # Inno Setup silent install: close us, install, relaunch — seamless.
-                subprocess.Popen([str(dest), "/VERYSILENT", "/SUPPRESSMSGBOXES",
-                                  "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"],
-                                 creationflags=subprocess_creation_flags())
-            elif sys.platform == "win32":
+            if sys.platform == "win32":
                 os.startfile(str(dest))                  # runs Setup.exe (wizard)
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(dest)])    # mounts the .dmg
             else:
                 reveal_in_file_manager(dest)
-            if silent:
-                if sys.platform == "darwin":
-                    self._show_toast(f"{tag} downloaded — drag the app to Applications to finish.",
-                                     "info")
-                # Windows is handled by the silent installer; nothing to prompt.
-            else:
-                QMessageBox.information(self, "Update Ready",
-                    f"{APP_NAME} {tag} downloaded to:\n\n{dest}\n\n"
-                    f"The installer is opening — follow its prompts. You may be asked to "
-                    f"quit {APP_NAME} first so it can be replaced.")
+            QMessageBox.information(self, "Update Ready",
+                f"{APP_NAME} {tag} downloaded to:\n\n{dest}\n\n"
+                f"The installer is opening — follow its prompts. You may be asked to "
+                f"quit {APP_NAME} first so it can be replaced.")
         except Exception as exc:
-            if not silent:
-                QMessageBox.warning(self, "Update Failed", str(exc))
-            else:
-                self._append_log(f"[update] Auto-update failed: {exc}")
+            QMessageBox.warning(self, "Update Failed", str(exc))
 
     def _update_renderer_for_scene(self) -> None:
         """Reflect the scene type in the renderer dropdown the moment a scene is
@@ -4130,7 +4137,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             "power_rate": self._power_rate,
             "notify_desktop": self._notify_desktop,
             "discord_webhook": self._discord_webhook,
-            "auto_update": self._auto_update,
+            "check_updates_on_launch": self._check_updates_on_launch,
+            "skipped_update": self._skipped_update,
             "live_preview": self._preview_enabled,
             "watch_folder": watch_folder,
             "watch_enabled": watch_enabled,
@@ -4217,7 +4225,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             _log.debug("invalid power/cost values in profile; using defaults", exc_info=True)
         self._notify_desktop = bool(d.get("notify_desktop", self._notify_desktop))
         self._discord_webhook = str(d.get("discord_webhook", self._discord_webhook) or "")
-        self._auto_update = bool(d.get("auto_update", self._auto_update))
+        self._check_updates_on_launch = bool(d.get("check_updates_on_launch", self._check_updates_on_launch))
+        self._skipped_update = str(d.get("skipped_update", self._skipped_update) or "")
         if "live_preview" in d:
             self._preview_enabled = bool(d.get("live_preview", True))
             if hasattr(self, "preview_action"):
