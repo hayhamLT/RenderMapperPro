@@ -4,6 +4,7 @@ import os
 import platform
 import queue
 import re
+import ssl
 import sys
 import threading
 import time
@@ -14,6 +15,41 @@ from pathlib import Path
 from core.logging_setup import get_logger
 
 _log = get_logger(__name__)
+
+
+def ca_bundle_path() -> str | None:
+    """Path to a CA bundle for HTTPS verification. A frozen build ships its own
+    Python with NO system certificates, so verification fails with
+    CERTIFICATE_VERIFY_FAILED ("Couldn't reach GitHub …") unless we point it at a
+    bundled cacert.pem. Tries, in order: certifi (if importable), then the
+    cacert.pem the build drops into the bundle root / certifi/ dir — so HTTPS
+    works even if ``import certifi`` itself fails inside the frozen app. Returns
+    None from source (the system trust store is fine there)."""
+    try:
+        import certifi
+        p = certifi.where()
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", "") or os.path.dirname(sys.executable)
+        for cand in (os.path.join(base, "cacert.pem"),
+                     os.path.join(base, "certifi", "cacert.pem")):
+            if os.path.exists(cand):
+                return cand
+    return None
+
+
+def ssl_context() -> ssl.SSLContext:
+    """A verifying SSL context that trusts the bundled CA bundle when present.
+    Building it explicitly (vs the SSL_CERT_FILE env var) is bulletproof — it
+    doesn't depend on OpenSSL honouring env vars or on the var being set before
+    the first network call. Pass to ``urllib.request.urlopen(..., context=…)``."""
+    ca = ca_bundle_path()
+    if ca:
+        return ssl.create_default_context(cafile=ca)
+    return ssl.create_default_context()
 
 
 def version_tuple(v: str) -> tuple:

@@ -62,6 +62,19 @@ def _playwright_driver():
 
 _pw_bins, _pw_datas = _playwright_driver()
 
+
+def _ca_datas():
+    """Land certifi's cacert.pem at the bundle ROOT (alongside the certifi/ copy
+    the hook makes), so the frozen app can locate a CA bundle by path even if
+    ``import certifi`` fails at runtime — the fix for 'Couldn't reach GitHub'."""
+    try:
+        import certifi
+        return [(certifi.where(), '.')]
+    except Exception:
+        print("[spec] WARNING: certifi not importable — cacert.pem not bundled at root")
+        return []
+
+
 try:
     from PyInstaller.utils.hooks import collect_submodules
     _pw_hidden = collect_submodules("playwright") + ["greenlet", "pyee"]
@@ -82,7 +95,7 @@ a = Analysis(
         ('c4d_discover.py', '.'),
         ('assets', 'assets'),
         ('THIRD_PARTY_LICENSES.md', '.'),   # GPL/LGPL notices for bundled ffmpeg + Qt
-    ] + _pw_datas,
+    ] + _pw_datas + _ca_datas(),
     hiddenimports=_pw_hidden + ['certifi'],   # certifi hook bundles cacert.pem → HTTPS works
     hookspath=[],
     hooksconfig={},

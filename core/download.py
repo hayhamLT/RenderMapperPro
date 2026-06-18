@@ -34,8 +34,9 @@ def download_with_progress(url: str, dest: str | Path, on_log: LogCallback | Non
     Returns the number of bytes written."""
     log = on_log or (lambda *_: None)
     dest = Path(dest)
+    from core.utils import ssl_context
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as out:
+    with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp, dest.open("wb") as out:
         total = int(resp.headers.get("Content-Length", "0") or "0")
         read = 0
         last_pct = -5
