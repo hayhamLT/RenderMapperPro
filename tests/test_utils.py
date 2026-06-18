@@ -6,10 +6,43 @@ import sys
 from core.utils import (
     expand_output_tokens,
     ext_for_format,
+    is_cloud_placeholder,
     resolve_output_path,
     slugify_filename,
     terminate_process,
 )
+
+
+class _FakeStat:
+    def __init__(self, size, blocks=None, attrs=None):
+        self.st_size = size
+        if blocks is not None:
+            self.st_blocks = blocks
+        if attrs is not None:
+            self.st_file_attributes = attrs
+
+
+def test_cloud_placeholder_local_file_is_not_flagged():
+    # Fully-allocated file: blocks cover the size → local, ingest it.
+    st = _FakeStat(size=1_000_000, blocks=2048)   # 2048*512 = ~1MB
+    assert is_cloud_placeholder("x.mp4", st) is False
+
+
+def test_cloud_placeholder_dataless_unix_is_flagged():
+    # Logical size present but almost no blocks on disk → online-only placeholder.
+    st = _FakeStat(size=1_000_000, blocks=0)
+    assert is_cloud_placeholder("x.mp4", st) is True
+
+
+def test_cloud_placeholder_windows_offline_attr_is_flagged():
+    # Windows OneDrive/Dropbox OFFLINE attribute (0x1000), blocks irrelevant.
+    st = _FakeStat(size=1_000_000, blocks=2048, attrs=0x1000)
+    assert is_cloud_placeholder("x.mp4", st) is True
+
+
+def test_cloud_placeholder_empty_file_not_flagged():
+    st = _FakeStat(size=0, blocks=0)
+    assert is_cloud_placeholder("x.mp4", st) is False
 
 
 def test_slugify_strips_unsafe_chars():

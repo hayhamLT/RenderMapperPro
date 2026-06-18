@@ -60,7 +60,7 @@ def test_watch_folder_scan_actually_runs(tmp_path, monkeypatch):
         if "listing" in got:
             break
     assert "listing" in got, "watch scan never emitted — thread not started"
-    assert any(p.endswith("Screen_v1.mp4") for p, _s, _m in got["listing"])
+    assert any(p.endswith("Screen_v1.mp4") for p, _s, _m, _d in got["listing"])
     assert sp._watch_scanning is False               # flag reset by _apply_watch_scan
 
 

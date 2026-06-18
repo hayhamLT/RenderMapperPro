@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QFileSystemWatcher, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -76,6 +76,7 @@ from core.utils import (
     OUTPUT_TOKENS,
     VIDEO_EXTENSIONS,
     auto_match_media_to_materials,
+    is_cloud_placeholder,
     reconcile_versions,
 )
 from media import MOD_LABEL, _audio_probe_cache, file_manager_name, video_has_audio
@@ -135,11 +136,22 @@ class ScenePanel(QWidget):
         self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
         self._targets: list[str] = []            # materials marked as render targets
         self._autorender_last: frozenset | None = None   # last target version-set emitted
+        self._watch_idle_polls = 0               # consecutive no-change polls (drives back-off)
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
         self._watch_timer.timeout.connect(self._scan_watch_folder)
         self._watch_scanned.connect(self._apply_watch_scan)
+        # Hybrid fast path: a filesystem watcher gives instant pickup for LOCAL
+        # folders (no waiting for the next poll), while the poll above stays as
+        # the reliable backstop for network shares / cloud folders where native
+        # FS events are unreliable or silently dropped.
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_fs_event)
+        self._fs_event_timer = QTimer(self)      # coalesce a burst of FS events
+        self._fs_event_timer.setSingleShot(True)
+        self._fs_event_timer.setInterval(250)
+        self._fs_event_timer.timeout.connect(self._scan_watch_folder)
         # Debounce auto-render: coalesce a burst of new target versions (landing
         # across several polls) into a single render once the set settles.
         self._autorender_timer = QTimer(self)
@@ -697,15 +709,57 @@ class ScenePanel(QWidget):
             self.set_watch_folder(d, True)
             self.watch_changed.emit(self._watch_folder, True)
 
+    def _start_watching(self) -> None:
+        """Begin watching: fresh scan, start the poll backstop at the base cadence
+        and arm the FS-event fast path on the folder."""
+        self._watch_seen = {}          # force a fresh scan
+        self._watch_sizes = {}
+        self._reset_poll_interval()
+        self._scan_watch_folder()
+        self._watch_timer.start()
+        self._sync_fs_watcher()
+
+    def _stop_watching(self) -> None:
+        self._watch_timer.stop()
+        self._fs_event_timer.stop()
+        self._sync_fs_watcher()
+
+    def _sync_fs_watcher(self) -> None:
+        """Keep the QFileSystemWatcher pointed at the active watch folder (and
+        nothing else when watching is off or the folder is gone)."""
+        old = self._fs_watcher.directories()
+        if old:
+            self._fs_watcher.removePaths(old)
+        if self.watch_btn.isChecked() and self._watch_folder and os.path.isdir(self._watch_folder):
+            self._fs_watcher.addPath(self._watch_folder)
+
+    def _on_fs_event(self, _path: str) -> None:
+        """A local change landed — scan almost immediately (debounced 250ms to
+        coalesce a burst) and snap the poll cadence back to its base."""
+        self._reset_poll_interval()
+        self._fs_event_timer.start()
+
+    def _reset_poll_interval(self) -> None:
+        self._watch_idle_polls = 0
+        if self._watch_timer.interval() != self._watch_interval_ms:
+            self._watch_timer.setInterval(self._watch_interval_ms)
+
+    def _note_idle_poll(self) -> None:
+        """Back the poll cadence off after sustained quiet (up to ~5x base, 20s
+        cap). Safe because the FS watcher still catches local drops instantly —
+        the slower poll only delays detection on event-less network shares."""
+        self._watch_idle_polls += 1
+        steps = min(self._watch_idle_polls // 4, 4)        # 0..4 → 1x..5x
+        target = min(self._watch_interval_ms * (1 + steps), 20000)
+        if target != self._watch_timer.interval():
+            self._watch_timer.setInterval(target)
+
     def _on_watch_toggled(self, on: bool) -> None:
         self._update_watch_ui()
         if on and self._watch_folder:
-            self._watch_seen = {}          # force a fresh scan
-            self._watch_sizes = {}
-            self._scan_watch_folder()
-            self._watch_timer.start()
+            self._start_watching()
         else:
-            self._watch_timer.stop()
+            self._stop_watching()
         self.watch_changed.emit(self._watch_folder, self.watch_btn.isChecked())
 
     def set_watch_folder(self, folder: str, enabled: bool) -> None:
@@ -716,12 +770,9 @@ class ScenePanel(QWidget):
         self.watch_btn.blockSignals(False)
         self._update_watch_ui()
         if self.watch_btn.isChecked():
-            self._watch_seen = {}
-            self._watch_sizes = {}
-            self._scan_watch_folder()
-            self._watch_timer.start()
+            self._start_watching()
         else:
-            self._watch_timer.stop()
+            self._stop_watching()
 
     def get_watch_folder(self) -> tuple[str, bool]:
         return self._watch_folder, self.watch_btn.isChecked()
@@ -736,7 +787,7 @@ class ScenePanel(QWidget):
         """Poll cadence + file-stability window (set from Properties)."""
         self._watch_interval_ms = max(1000, int(interval_ms))
         self._watch_settle = max(0.0, float(settle_s))
-        self._watch_timer.setInterval(self._watch_interval_ms)
+        self._reset_poll_interval()      # apply the new base cadence now (clears any back-off)
         self._autorender_timer.setInterval(max(4000, 2 * self._watch_interval_ms))
 
     def get_watch_options(self) -> tuple[int, float]:
@@ -764,7 +815,10 @@ class ScenePanel(QWidget):
                                 continue
                             if e.is_file() and Path(e.name).suffix.lower() in exts:
                                 st = e.stat()
-                                listing.append((e.path, st.st_size, st.st_mtime))
+                                # Flag cloud "online-only" placeholders so we don't
+                                # ingest a file whose bytes aren't on disk yet.
+                                dataless = is_cloud_placeholder(e.path, st)
+                                listing.append((e.path, st.st_size, st.st_mtime, dataless))
                         except OSError:
                             _log.debug("watch folder: failed to stat an entry", exc_info=True)
             except OSError:
@@ -782,31 +836,38 @@ class ScenePanel(QWidget):
             return
         folder = os.path.normpath(self._watch_folder)
         now = time.time()
-        present = {os.path.normpath(p) for p, _s, _m in listing}
+        # All listed files count as "present" — including cloud placeholders — so
+        # a clip that's evicted to online-only after ingest isn't treated as gone.
+        present = {os.path.normpath(p) for p, _s, _m, _d in listing}
         # Clips that came from the watch folder but are gone now (deleted, or
         # renamed away) — drop them so a rename doesn't leave a stale duplicate.
         gone = {v for v in self._videos
                 if os.path.normpath(os.path.dirname(v)) == folder and os.path.normpath(v) not in present}
 
         ready, mtimes, sizes = [], {}, {}
-        for path, size, mtime in listing:
+        for path, size, mtime, dataless in listing:
             sizes[path] = size
-            # "Ready" = finished copying: non-empty and either its size held
-            # steady since the last poll, or it hasn't been touched for a while.
-            # This avoids ingesting a half-written file mid-copy.
-            if size > 0 and (self._watch_sizes.get(path) == size or (now - mtime) >= self._watch_settle):
+            # "Ready" = finished copying AND actually on disk: non-empty, not a
+            # cloud placeholder, and either its size held steady since the last
+            # poll or it hasn't been touched for a while. Avoids ingesting a
+            # half-written file mid-copy or a not-yet-downloaded online-only file.
+            if (size > 0 and not dataless
+                    and (self._watch_sizes.get(path) == size or (now - mtime) >= self._watch_settle)):
                 ready.append(path)
                 mtimes[path] = mtime
         self._watch_sizes = sizes           # remember sizes for next poll's stability check
         sig = (dict(mtimes), tuple(sorted(gone)))
         if sig == self._watch_seen:
+            self._note_idle_poll()          # quiet → let the poll cadence back off
             return                          # nothing changed since last poll
         self._watch_seen = sig
 
         base_videos = [v for v in self._videos if v not in gone]
         videos_after, replacements, added = reconcile_versions(base_videos, ready, mtimes)
         if not gone and not replacements and not added:
+            self._note_idle_poll()
             return
+        self._reset_poll_interval()         # activity → snap back to the fast cadence
 
         assignments_changed = bool(replacements)
         if replacements:
