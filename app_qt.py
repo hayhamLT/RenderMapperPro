@@ -226,6 +226,12 @@ def _runtime_download_spec() -> tuple[str, str] | None:
 
 GITHUB_REPO = "hayhamLT/RenderMapperPro"   # for the auto-updater
 
+# Version tag for QMainWindow.saveState()/restoreState(). A saved dock layout is
+# only restored when its version matches — so when the set of docks changes
+# (panel added/renamed/removed), bump this and stale layouts are cleanly ignored
+# (we fall back to the default preset) instead of restoring into a broken state.
+LAYOUT_STATE_VERSION = 2
+
 
 def _bundled_asset(name: str) -> Path | None:
     """Find a file under assets/ in the source tree or a frozen bundle."""
@@ -1796,7 +1802,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._schedule_save()
 
     def _save_custom_layout(self) -> None:
-        self._custom_layout_state = bytes(self.saveState().toBase64().data()).decode("ascii")
+        self._custom_layout_state = bytes(
+            self.saveState(LAYOUT_STATE_VERSION).toBase64().data()).decode("ascii")
         if hasattr(self, "restore_layout_action"):
             self.restore_layout_action.setEnabled(True)
         self._schedule_save()
@@ -1805,12 +1812,22 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
     def _restore_custom_layout(self) -> None:
         if not self._custom_layout_state:
             return
+        ok = False
         try:
-            self.restoreState(QByteArray.fromBase64(self._custom_layout_state.encode("ascii")))
+            # restoreState returns False when the version tag doesn't match (e.g.
+            # the layout was saved by a build with a different set of docks).
+            ok = self.restoreState(
+                QByteArray.fromBase64(self._custom_layout_state.encode("ascii")),
+                LAYOUT_STATE_VERSION)
+        except Exception:
+            ok = False
+        if ok:
             self._fit_to_screen(recenter=False)
             self._schedule_titlebar_sync()
-        except Exception:
-            self._show_toast("Could not restore layout", "warning")
+        else:
+            # Stale/incompatible layout → don't leave the window half-restored.
+            self._apply_layout("default")
+            self._show_toast("Saved layout was incompatible — reset to default", "warning")
 
     def event(self, e):  # type: ignore[override]
         if e.type() == QEvent.Type.LayoutRequest:
@@ -4133,7 +4150,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
     def _profile_dict(self) -> dict:
         videos = self.scene_panel.get_videos()
-        layout_state = bytes(self.saveState().toBase64().data()).decode("ascii")
+        layout_state = bytes(self.saveState(LAYOUT_STATE_VERSION).toBase64().data()).decode("ascii")
         layout_geometry = bytes(self.saveGeometry().toBase64().data()).decode("ascii")
 
         # RenderJob is a dataclass — asdict() serializes every field (incl. nested
@@ -4532,11 +4549,20 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             except Exception:
                 _log.debug("could not restore saved window geometry", exc_info=True)
         if state_b64:
+            ok = False
             try:
-                self.restoreState(QByteArray.fromBase64(state_b64.encode("ascii")))
-                self._schedule_titlebar_sync()
+                # Version-tagged: a layout saved by a build with a different dock
+                # set returns False rather than restoring into a broken state.
+                ok = self.restoreState(
+                    QByteArray.fromBase64(state_b64.encode("ascii")), LAYOUT_STATE_VERSION)
             except Exception:
                 _log.debug("could not restore saved dock layout", exc_info=True)
+            if ok:
+                self._schedule_titlebar_sync()
+            else:
+                # Incompatible/old layout — keep the default preset already applied
+                # at startup instead of a half-restored window.
+                self._apply_layout("default")
 
         # Invariant: a non-empty queue always has exactly one active job.
         self._ensure_active_selection()
