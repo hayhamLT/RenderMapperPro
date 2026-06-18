@@ -2055,6 +2055,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._sb_update = QLabel("")
         self._sb_update.setStyleSheet(f"color:{self._palette.accent_text}; padding:0 10px; font-weight:600;")
         sb.addPermanentWidget(self._sb_update)
+        powered = QLabel(
+            f'Powered by <span style="color:{self._palette.accent}; '
+            f'font-weight:600;">Toy Robot Media</span>')
+        powered.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 4px;")
+        sb.addPermanentWidget(powered)
+        sep = QLabel("·")
+        sep.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 2px;")
+        sb.addPermanentWidget(sep)
         ver = QLabel(f"v{APP_VERSION}")
         ver.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 10px;")
         sb.addPermanentWidget(ver)
