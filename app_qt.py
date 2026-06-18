@@ -110,6 +110,7 @@ from core.utils import (
     ext_for_format,
     file_exists,
 )
+from core.utils import ssl_context as _ssl_context
 from core.utils import update_platform_key as _update_platform_key
 from core.utils import version_tuple as _version_tuple
 from media import (
@@ -561,7 +562,7 @@ class _RuntimeProgressDialog(QDialog):
 
 
 class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
-    _update_checked = Signal(object, bool)   # (manifest dict | None, was-manual)
+    _update_checked = Signal(object, bool, str)   # (manifest dict | None, was-manual, error-text)
     _delivery_log = Signal(str, str)         # (message, kind) from the delivery-copy thread
     _sheets_built = Signal(int)              # count of contact sheets generated post-render
 
@@ -2096,6 +2097,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         token = _update_token()
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
+        ctx = _ssl_context()
+
         def _fetch(use_token: bool):
             headers = {"Accept": "application/vnd.github+json",
                        "X-GitHub-Api-Version": "2022-11-28",
@@ -2103,11 +2106,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             if use_token and token:
                 headers["Authorization"] = f"Bearer {token}"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
                 return json.loads(r.read().decode("utf-8"))
 
         def work():
             info = None
+            err = ""
             try:
                 info = _fetch(use_token=bool(token))
             except Exception:
@@ -2115,9 +2119,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 # anonymous public API so updates never break on a credential.
                 try:
                     info = _fetch(use_token=False)
-                except Exception:
+                except Exception as exc2:
                     info = None
-            self._update_checked.emit(info, manual)
+                    err = f"{type(exc2).__name__}: {exc2}"
+            self._update_checked.emit(info, manual, err)
 
         self._update_check_thread = FuncThread(work)
         self._update_check_thread.start()
@@ -2128,12 +2133,21 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         if self._check_updates_on_launch:
             self._check_for_updates(manual=False)
 
-    def _on_update_checked(self, info, manual: bool) -> None:
+    def _on_update_checked(self, info, manual: bool, error: str = "") -> None:
         if self._shutting_down:
             return
         if not info:
+            # Surface the real reason — a frozen build hitting a TLS/cert problem,
+            # a rate-limit (HTTP 403), DNS, a proxy, etc. — instead of a generic
+            # "couldn't reach GitHub" that hides what actually went wrong.
+            if error:
+                self._append_log(f"[update] Check failed — {error}")
             if manual:
-                QMessageBox.information(self, "Updates", "Couldn't reach GitHub to check for updates.")
+                detail = f"\n\n{error}" if error else ""
+                QMessageBox.warning(self, "Updates",
+                    "Couldn't reach GitHub to check for updates." + detail
+                    + "\n\nYou can always download the latest version from the "
+                    "Releases page on GitHub.")
             return
         tag = str(info.get("tag_name", "")).strip()
         if not tag or _version_tuple(tag) <= _version_tuple(APP_VERSION):
@@ -2286,7 +2300,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 headers["Authorization"] = f"Bearer {token}"
             req = urllib.request.Request(asset["url"], headers=headers)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+            with urllib.request.urlopen(req, timeout=300, context=_ssl_context()) as r, open(dest, "wb") as f:
                 shutil.copyfileobj(r, f)
             # Hand off to the platform installer — it replaces the running app
             # itself (no extract-over-a-locked-exe problem).
@@ -3540,7 +3554,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 req = urllib.request.Request(
                     url, data=data,
                     headers={"Content-Type": "application/json", "User-Agent": APP_NAME})
-                urllib.request.urlopen(req, timeout=10).close()
+                urllib.request.urlopen(req, timeout=10, context=_ssl_context()).close()
             except Exception as exc:
                 self._delivery_log.emit(f"Discord notification failed: {exc}", "error")
 
