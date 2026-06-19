@@ -107,6 +107,16 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     lay.addWidget(preview_cb)
     lay.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
                        "Turn off for a small speed-up on heavy scenes."))
+
+    lay.addWidget(section_title("STARTUP"))
+    restore_cb = QCheckBox("Reopen the last session on launch")
+    restore_cb.setChecked(getattr(win, "_restore_session_on_launch", False))
+    lay.addWidget(restore_cb)
+    lay.addWidget(hint("Off (default): the app opens to a clean, empty workspace — use "
+                       "Profile → New (⌘N) to start fresh anytime, the Scene picker's "
+                       "recents to reopen a scene, or Reopen Last Session to bring back "
+                       "your last scene + queue. On: it restores your last scene, mappings "
+                       "and queue automatically."))
     lay.addStretch()
 
     # ── Render Engines ───────────────────────────────────────────────
@@ -495,6 +505,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         win.deadline_panel.dl_comment_edit.setText(win._deadline_comment)
 
         # Behaviour
+        win._restore_session_on_launch = restore_cb.isChecked()
         win._when_done = _vals[when_combo.currentIndex()]
         _menu_label = {"nothing": "Do Nothing", "quit": "Quit App", "sleep": "Sleep Computer"}.get(win._when_done)
         if _menu_label and hasattr(win, "_when_actions") and _menu_label in win._when_actions:

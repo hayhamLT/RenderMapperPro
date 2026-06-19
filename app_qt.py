@@ -635,6 +635,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._deliver_dir = ""           # blank = no post-render delivery copy
         self._asset_grouping = AssetGroupingConfig()   # filename-convention previz assembly
         self._asset_group_jobs: dict = {}   # (setup, asset) → job id, for grouped-watch dedup
+        self._restore_session_on_launch = False   # False = open clean; True = reopen last scene+queue
+        self._last_session: dict = {}      # snapshot of the previous session, for Reopen Last Session
         self._material_aspects: dict = {}   # material → screen aspect (from discovery)
         self._aspect_warned: set = set()    # (material, clip) pairs already warned about
         self._autorender_start = False        # auto-start vs queue-only
@@ -747,6 +749,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         props_act = profile.addAction("Properties…", self._show_properties_dialog)
         props_act.setShortcut(QKeySequence("Ctrl+,"))   # ⌘, — the macOS settings convention
         profile.addSeparator()
+        new_act = profile.addAction("New", lambda: self._new_session(confirm=True))
+        new_act.setShortcut(QKeySequence.StandardKey.New)           # ⌘N / Ctrl+N
+        profile.addAction("Reopen Last Session", self._reopen_last_session)
         open_act = profile.addAction("Open Project…", self._open_project)
         open_act.setShortcut(QKeySequence.StandardKey.Open)          # ⌘O / Ctrl+O
         save_act = profile.addAction("Save Project As…", self._save_project)
@@ -1403,7 +1408,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         name.setStyleSheet(f"color:{pal.text}; font-size:19px; font-weight:700; margin-top:8px;")
         ver = centered(QLabel(f"Version {APP_VERSION}"))
         ver.setStyleSheet(f"color:{pal.text_muted}; font-size:12px;")
-        desc = centered(QLabel("Automated video-texture mapping and\nheadless rendering for Blender."))
+        desc = centered(QLabel("Automated video-texture mapping and headless\n"
+                               "rendering — Blender, Cinema 4D and three.js."))
         desc.setStyleSheet(f"color:{pal.text_muted}; font-size:12px; margin-top:8px;")
         desc.setWordWrap(True)
 
@@ -1528,6 +1534,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self.render_panel.rs_gi_bounces_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_ray_depth_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_gi_cb.toggled.connect(lambda _v: self._on_settings_changed())
+        # three.js scene-lighting + burn-in change the rendered look → refresh preview.
+        self.render_panel.web_light_preset_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.web_light_intensity_slider.valueChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.web_respect_lights_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.burn_in_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
 
         self.deadline_panel.settings_changed.connect(lambda: self._on_settings_changed(preview=False))
         self.deadline_panel.test_connection_requested.connect(self._test_deadline_connection)
@@ -2162,13 +2173,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         powered = QLabel(
             f'Powered by <span style="color:{self._palette.accent}; '
             f'font-weight:600;">Toy Robot Media</span>')
-        powered.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 4px;")
+        powered.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 10px;")
         sb.addPermanentWidget(powered)
-        sep = QLabel("·")
-        sep.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 2px;")
-        sb.addPermanentWidget(sep)
         ver = QLabel(f"v{APP_VERSION}")
-        ver.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 10px;")
+        ver.setStyleSheet(f"color:{self._palette.text_faint}; padding:0 12px;")
         sb.addPermanentWidget(ver)
 
     def _update_status_bar(self) -> None:
@@ -2853,7 +2861,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             asn,
             sp.camera_combo.currentText(),
             o.engine, o.width, o.height,
-            o.samples, o.use_denoise, o.film_transparent,
+            o.samples, o.use_denoise, o.film_transparent, o.burn_in,
             o.color_view_transform, o.color_exposure, o.color_gamma,
             o.frame_start, o.frame_end,
             o.rs_min_samples, o.rs_threshold, o.rs_gi_enabled,
@@ -4370,6 +4378,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             "autorender_pattern": self._autorender_pattern,
             "deliver_dir": self._deliver_dir,
             "asset_grouping": self._asset_grouping.to_dict(),
+            "restore_session_on_launch": self._restore_session_on_launch,
             "render_targets": self.scene_panel.get_targets(),
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
@@ -4758,6 +4767,107 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
         # Invariant: a non-empty queue always has exactly one active job.
         self._ensure_active_selection()
+
+        # Clean-launch (default): the profile is fully restored above so nothing is
+        # lost, then we stash that session and open an empty workspace — like New
+        # in a document app. "Reopen Last Session" brings it back. Restore-on-launch
+        # users keep the old behaviour.
+        self._restore_session_on_launch = bool(d.get("restore_session_on_launch", False))
+        if not self._restore_session_on_launch:
+            snap = self._capture_workspace()
+            if snap.get("scene") or snap.get("jobs"):
+                self._last_session = snap
+            self._new_session(confirm=False, announce=False)
+
+    def _capture_workspace(self) -> dict:
+        """Snapshot the editable session — scene, clips, mappings, targets, camera
+        and the queue — so it can be cleared and later reopened intact."""
+        import copy
+        sp = self.scene_panel
+        return {
+            "scene": sp.scene_edit.text(),
+            "videos": list(sp.get_videos()),
+            "assignments": [(a.material_name, a.video_path, a.mapping_mode)
+                            for a in sp.get_assignments()],
+            "muted": list(sp.get_muted_videos()),
+            "targets": list(sp.get_targets()),
+            "camera": sp.camera_combo.currentText(),
+            "jobs": copy.deepcopy(self._jobs),
+            "active": self._active_job_id,
+        }
+
+    def _apply_workspace(self, snap: dict) -> None:
+        """Restore a workspace snapshot from _capture_workspace (paths already
+        resolved, so no re-scan needed)."""
+        sp = self.scene_panel
+        self._loading_job_into_ui = True
+        try:
+            sp.scene_edit.setText(snap.get("scene", ""))
+            sp.set_videos(list(snap.get("videos", [])))
+            sp.set_assignments([MaterialVideoAssignment(*t) for t in snap.get("assignments", [])])
+            sp.set_muted_videos(list(snap.get("muted", [])))
+            sp.set_targets(list(snap.get("targets", [])))
+            cam = snap.get("camera", "")
+            if cam:
+                idx = sp.camera_combo.findText(cam)
+                if idx >= 0:
+                    sp.camera_combo.setCurrentIndex(idx)
+            self._jobs = snap.get("jobs", []) or []
+            self._active_job_id = snap.get("active")
+        finally:
+            self._loading_job_into_ui = False
+        self._refresh_job_outputs()
+        self._refresh_queue_view()
+        self._ensure_active_selection()
+        self._schedule_save()
+
+    def _new_session(self, confirm: bool = True, announce: bool = True) -> None:
+        """Start a fresh, empty workspace — clear the scene, clips, mappings,
+        targets and the queue (like File → New). Guarded when there's work."""
+        if self._is_rendering:
+            QMessageBox.information(self, "Render In Progress",
+                                    "Stop rendering before starting a new session.")
+            return
+        has_work = bool(self.scene_panel.scene_edit.text().strip()
+                        or self.scene_panel.get_videos() or self._jobs)
+        if confirm and has_work:
+            resp = QMessageBox.question(
+                self, "New",
+                "Start a new session? The current scene, clips and queue will be "
+                "cleared (your saved projects and recents are kept).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        if confirm and has_work:
+            self._last_session = self._capture_workspace()   # let Reopen undo an explicit New
+        sp = self.scene_panel
+        self._loading_job_into_ui = True
+        try:
+            sp.set_assignments([])
+            sp.set_targets([])
+            sp.set_muted_videos([])
+            sp.set_videos([])
+            sp.scene_edit.setText("")
+        finally:
+            self._loading_job_into_ui = False
+        self._jobs = []
+        self._active_job_id = None
+        self._asset_group_jobs = {}
+        self._refresh_job_outputs()
+        self._refresh_queue_view()
+        self._schedule_save()
+        if announce:
+            self._show_toast("New session", "info")
+
+    def _reopen_last_session(self) -> None:
+        """Bring back the session that was open before a clean launch or New."""
+        if not self._last_session:
+            self._show_toast("No previous session to reopen", "info")
+            return
+        snap = self._last_session
+        self._apply_workspace(snap)
+        self._show_toast("Reopened last session", "success")
 
     def _ensure_active_selection(self) -> None:
         """Guarantee the 'one active job' invariant: if the queue is non-empty

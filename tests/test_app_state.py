@@ -99,6 +99,7 @@ def test_renderer_drives_visible_settings(tmp_path, monkeypatch):
 def test_profile_roundtrip(tmp_path, monkeypatch):
     """State written by _profile_dict must be read back by _apply_profile_data."""
     app_qt, w = _window(tmp_path, monkeypatch)
+    w._restore_session_on_launch = True   # observe the scene round-trip in the live UI
     w._theme_mode = "light"
     w._when_done = "quit"
     w._blender_path = "/opt/blender/blender"

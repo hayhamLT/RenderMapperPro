@@ -25,6 +25,9 @@ def test_profile_round_trip_is_lossless(tmp_path, monkeypatch):
     import app_qt
 
     w1 = _make_window(app_qt, tmp_path, monkeypatch)
+    # Restore-on-launch so the loaded session is observable in the live UI (clean
+    # launch is tested separately in test_session_launch.py).
+    w1._restore_session_on_launch = True
     # Set distinctive values across subsystems so defaults can't mask drift.
     w1._blender_path = "/opt/blender/blender"
     w1._c4dpy_path = "/opt/maxon/c4dpy"
