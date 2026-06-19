@@ -1366,6 +1366,26 @@ class RenderPanel(QWidget):
         ))
         adv.addWidget(self.color_box)
 
+        # ── Ambient occlusion (Blender EEVEE/Cycles only) ────────────────
+        self.ao_box = QWidget()
+        ao_lay = QVBoxLayout(self.ao_box)
+        ao_lay.setContentsMargins(0, 0, 0, 0)
+        ao_lay.setSpacing(10)
+        ao_lay.addWidget(section("AMBIENT OCCLUSION"))
+        self.ao_cb = QCheckBox("Ambient occlusion")
+        self.ao_cb.setToolTip("Adds soft contact-shadow depth where surfaces meet — "
+                              "occludes ambient light in creases. Off keeps the flat look.")
+        ao_lay.addWidget(self.ao_cb)
+        self.ao_distance_edit = QLineEdit("0.2")
+        self.ao_distance_edit.setToolTip("How far occlusion reaches, in world units. Larger = broader, softer.")
+        self.ao_factor_edit = QLineEdit("1.0")
+        self.ao_factor_edit.setToolTip("Strength (EEVEE-Legacy / Cycles; EEVEE Next uses distance).")
+        ao_lay.addLayout(two_col(
+            labeled("AO Distance", self.ao_distance_edit),
+            labeled("AO Factor", self.ao_factor_edit),
+        ))
+        adv.addWidget(self.ao_box)
+
         # ── Scene lighting (web / three.js only) ─────────────────────────
         self.web_light_box = QWidget()
         wl = QVBoxLayout(self.web_light_box)
@@ -1482,6 +1502,7 @@ class RenderPanel(QWidget):
         # Blender-only controls — also hidden for the web/three.js backend.
         self.device_box.setVisible(not is_c4d and not is_web)   # Redshift/web are GPU-only
         self.color_box.setVisible(not is_c4d and not is_web)    # Blender color management
+        self.ao_box.setVisible(not is_c4d and not is_web)       # Blender EEVEE/Cycles AO
         # Samples + denoise are path-tracer concepts — not three.js (no path tracing).
         self.samples_label.setVisible(not is_web)
         self.samples_edit.setVisible(not is_web)
@@ -1663,6 +1684,9 @@ class RenderPanel(QWidget):
                 self.web_light_preset_combo.currentText(), "auto"),
             web_lighting_intensity=self.web_light_intensity_slider.value() / 100.0,
             web_respect_scene_lights=self.web_respect_lights_cb.isChecked(),
+            ao_enabled=self.ao_cb.isChecked(),
+            ao_distance=to_float(self.ao_distance_edit.text(), 0.2),
+            ao_factor=to_float(self.ao_factor_edit.text(), 1.0),
         )
 
     def settings_dict(self) -> dict:
@@ -1735,6 +1759,10 @@ class RenderPanel(QWidget):
                 _log.debug("could not apply web_lighting_intensity setting", exc_info=True)
         if "web_respect_scene_lights" in d:
             self.web_respect_lights_cb.setChecked(bool(d["web_respect_scene_lights"]))
+        if "ao_enabled" in d:
+            self.ao_cb.setChecked(bool(d["ao_enabled"]))
+        setnum(self.ao_distance_edit, "ao_distance")
+        setnum(self.ao_factor_edit, "ao_factor")
 
 
 class DeadlinePanel(QWidget):

@@ -238,6 +238,56 @@ def _apply_cycles_device(scene, device: str) -> None:
             pass
 
 
+def _apply_ambient_occlusion(scene, render, log) -> None:
+    """Enable ambient occlusion when requested — adds contact-shadow depth where
+    surfaces meet. Version-defensive: EEVEE Next (Blender 4.2+/5.x) needs ray
+    tracing on and uses fast-GI AO; EEVEE Legacy (<=4.1) uses GTAO; Cycles uses
+    fast-GI. Every attribute is hasattr-guarded so it can never crash a render,
+    and AO-off leaves the scene untouched."""
+    if not render.get("ao_enabled"):
+        return
+    distance = float(render.get("ao_distance", 0.2) or 0.2)
+    factor = float(render.get("ao_factor", 1.0) or 1.0)
+    engine = getattr(scene.render, "engine", "")
+    try:
+        ee = getattr(scene, "eevee", None)
+        if engine.startswith("BLENDER_EEVEE") and ee is not None:
+            if hasattr(ee, "use_gtao"):                       # EEVEE Legacy (<= 4.1)
+                ee.use_gtao = True
+                if hasattr(ee, "gtao_distance"):
+                    ee.gtao_distance = distance
+                if hasattr(ee, "gtao_factor"):
+                    ee.gtao_factor = factor
+                log(f"[ao] EEVEE GTAO on — distance={distance} factor={factor}")
+                return
+            if hasattr(ee, "use_fast_gi"):                    # EEVEE Next (4.2+ / 5.x)
+                if hasattr(ee, "use_raytracing"):
+                    ee.use_raytracing = True                  # required for fast-GI to do anything
+                ee.use_fast_gi = True
+                if hasattr(ee, "fast_gi_method"):
+                    try:
+                        ee.fast_gi_method = "AMBIENT_OCCLUSION_ONLY"
+                    except (TypeError, ValueError):
+                        pass
+                if hasattr(ee, "fast_gi_distance"):
+                    ee.fast_gi_distance = distance
+                log(f"[ao] EEVEE Next fast-GI AO on — distance={distance}")
+                return
+        if engine == "CYCLES" and hasattr(scene, "cycles"):
+            cy = scene.cycles
+            if hasattr(cy, "use_fast_gi"):
+                cy.use_fast_gi = True
+                if hasattr(cy, "ao_bounces_render"):
+                    cy.ao_bounces_render = max(1, round(factor))
+                if hasattr(cy, "ao_bounces"):
+                    cy.ao_bounces = max(1, round(factor))
+                log("[ao] Cycles fast-GI AO on")
+                return
+        log(f"[ao] ambient occlusion not available for engine {engine}")
+    except Exception as exc:
+        log(f"[ao] could not enable ambient occlusion: {exc}")
+
+
 def setup_audio(scene, audio_paths) -> None:
     """Mux one or more source clips' audio into the render via sequencer sound
     strips (one per clip, mixed), while keeping the 3D scene (not the VSE) as
@@ -548,6 +598,8 @@ def configure_render(config: dict) -> None:
         except Exception as exc:
             log(f"Could not set denoising: {exc}")
         _apply_cycles_device(scene, str(render.get("device", "AUTO")).upper())
+
+    _apply_ambient_occlusion(scene, render, log)
 
     # Color management controls for predictable output between runs.
     scene.view_settings.view_transform = str(render.get("color_view_transform", "Filmic"))

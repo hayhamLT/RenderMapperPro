@@ -92,6 +92,10 @@ class RenderOptions:
     web_lighting_preset: str = "auto"        # auto | studio | outdoor | flat | none
     web_lighting_intensity: float = 1.0      # 0.0–2.0 dimmer on env + light rig
     web_respect_scene_lights: bool = True    # skip the rig if the .glb ships its own lights
+    # Ambient occlusion (Blender EEVEE/Cycles — contact-shadow depth on geometry)
+    ao_enabled: bool = False
+    ao_distance: float = 0.2                 # occlusion reach in world units
+    ao_factor: float = 1.0                   # strength (EEVEE-Legacy / Cycles; Next uses distance)
 
 
 @dataclass
