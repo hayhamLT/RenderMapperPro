@@ -1539,6 +1539,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self.render_panel.web_light_intensity_slider.valueChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.web_respect_lights_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.burn_in_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.ao_cb.stateChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.ao_distance_edit.textChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.ao_factor_edit.textChanged.connect(lambda _v: self._on_settings_changed())
 
         self.deadline_panel.settings_changed.connect(lambda: self._on_settings_changed(preview=False))
         self.deadline_panel.test_connection_requested.connect(self._test_deadline_connection)
@@ -2862,6 +2865,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             sp.camera_combo.currentText(),
             o.engine, o.width, o.height,
             o.samples, o.use_denoise, o.film_transparent, o.burn_in,
+            o.ao_enabled, o.ao_distance, o.ao_factor,
             o.color_view_transform, o.color_exposure, o.color_gamma,
             o.frame_start, o.frame_end,
             o.rs_min_samples, o.rs_threshold, o.rs_gi_enabled,
