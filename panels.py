@@ -1451,7 +1451,7 @@ class RenderPanel(QWidget):
     # Friendly renderer names in the UI; the enum value Blender/C4D expects is
     # carried as itemData so configs/profiles keep the real identifier.
     ENGINE_LABELS: ClassVar = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
-                               "WEB_THREEJS": "three.js (WebGPU)"}
+                               "WEB_THREEJS": "three.js (WebGL)"}
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()
