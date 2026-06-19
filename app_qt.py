@@ -86,6 +86,8 @@ import theme as T
 from app_window.deadline_mixin import DeadlineMixin
 from app_window.preset_mixin import PRESETS_DIR, PresetMixin
 from app_window.queue_mixin import QueueMixin
+from core.asset_grouping import GroupingConfig as AssetGroupingConfig
+from core.asset_grouping import group_clips
 from core.jobs import disk_space_warnings, migrate_profile
 from core.logging_setup import get_logger
 from core.metrics import (
@@ -631,6 +633,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._autorender_output = ""          # where PREVIZ renders go (≠ watch folder)
         self._autorender_pattern = "{clip}_PREVIZ"
         self._deliver_dir = ""           # blank = no post-render delivery copy
+        self._asset_grouping = AssetGroupingConfig()   # filename-convention previz assembly
+        self._asset_group_jobs: dict = {}   # (setup, asset) → job id, for grouped-watch dedup
         self._material_aspects: dict = {}   # material → screen aspect (from discovery)
         self._aspect_warned: set = set()    # (material, clip) pairs already warned about
         self._autorender_start = False        # auto-start vs queue-only
@@ -1458,6 +1462,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
         self.scene_panel.watch_changed.connect(lambda *_: self._save_and_refresh_status())
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
+        self.scene_panel.watch_clips_ready.connect(self._on_watch_clips_ready)
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
@@ -2713,6 +2718,83 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 self._append_log("[app] Auto-render will start when the current render finishes.")
             else:
                 self._start_render(only_job_ids={job.id})   # start just this auto-render job
+
+    def _sync_grouping_mode(self) -> None:
+        """Switch the watch folder between auto-map (normal) and asset-grouping."""
+        if hasattr(self, "scene_panel"):
+            self.scene_panel.set_grouping_mode(self._asset_grouping.enabled)
+
+    def _on_watch_clips_ready(self, paths: list) -> None:
+        """Asset-grouping watch path: parse the ready clips by the naming
+        convention and build one previz render job per (setup, asset). The newest
+        version of each screen wins; an existing job for that asset is updated
+        in place when a newer version lands, so re-renders don't pile up."""
+        if not self._asset_grouping.enabled or not paths:
+            return
+        try:
+            groups = group_clips(list(paths), self._asset_grouping)
+        except Exception as exc:
+            self._append_log(f"[app] Asset grouping failed: {exc}")
+            return
+        if not groups:
+            return
+        cur_scene = self.scene_panel.scene_edit.text().strip()
+        watch_folder, _en = self.scene_panel.get_watch_folder()
+        touched: set[int] = set()
+        created = updated = 0
+        for g in groups:
+            scene = (self._asset_grouping.setup_to_scene.get(g.setup) or cur_scene).strip()
+            if not scene:
+                self._append_log(
+                    f"[app] {g.prj} S{g.setup:02d} A{g.asset:03d}: no scene mapped for this "
+                    f"setup — set one in Properties → Watch & Auto-render. Skipped.")
+                continue
+            key = (g.setup, g.asset)
+            prev = self._asset_group_jobs.get(key)
+            existing = None
+            if prev is not None:
+                prev_id, prev_ver = prev
+                existing = next((j for j in self._jobs if j.id == prev_id), None)
+                if existing is not None and prev_ver >= g.version:
+                    continue   # already queued at this version or newer
+            asn = [MaterialVideoAssignment(mat, clip, VIDEO_MAPPING_MODE_EMISSION)
+                   for mat, clip in g.material_assignments(self._asset_grouping.screen_to_material)]
+            if not asn:
+                continue
+            if existing is None:
+                job = RenderJob(id=self._next_job_id)
+                self._next_job_id += 1
+                self._jobs.insert(0, job)
+                created += 1
+            else:
+                job = existing
+                updated += 1
+            job.video_path = asn[0].video_path
+            self._make_job_snapshot(job, asn)
+            job.scene_path = scene   # override: this setup's scene, not the loaded one
+            base = g.output_name(self._asset_grouping.output_template)
+            out_fmt, _c = OUTPUT_PROFILES.get(job.output_profile or "H264 MP4", ("MPEG4", "H264"))
+            ext = ext_for_format(out_fmt) or ".mp4"
+            out_dir = self._autorender_output or (
+                os.path.join(watch_folder, "PREVIZ") if watch_folder
+                else str(Path(scene).parent / "PREVIZ"))
+            self.scene_panel.set_watch_ignore_dir(out_dir)   # never re-ingest our own renders
+            job.output_path = str(Path(out_dir) / f"{base}{ext}")
+            job.output_input = job.output_path
+            job.custom_label = True
+            job.label = base
+            job.status, job.progress, job.error, job.selected = "idle", 0.0, "", True
+            self._asset_group_jobs[key] = (job.id, g.version)
+            touched.add(job.id)
+        if not touched:
+            return
+        self._refresh_queue_view()
+        self._schedule_save()
+        self._append_log(
+            f"[app] Asset grouping: {created} new + {updated} updated previz job(s) "
+            f"from {len(groups)} asset group(s).")
+        if self._autorender_start and not self._is_rendering:
+            self._start_render(only_job_ids=touched)
 
     def _request_auto_preview(self) -> None:
         """Debounced trigger: when Auto is on, re-render the preview a moment
@@ -4262,6 +4344,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             "autorender_output": self._autorender_output,
             "autorender_pattern": self._autorender_pattern,
             "deliver_dir": self._deliver_dir,
+            "asset_grouping": self._asset_grouping.to_dict(),
             "render_targets": self.scene_panel.get_targets(),
             "custom_layout": self._custom_layout_state,
             "recent_scenes": self._recent_scenes,
@@ -4535,6 +4618,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._autorender_output = str(d.get("autorender_output", "") or "")
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
         self._deliver_dir = str(d.get("deliver_dir", "") or "")
+        self._asset_grouping = AssetGroupingConfig.from_dict(d.get("asset_grouping"))
+        self._sync_grouping_mode()
         tg = d.get("render_targets", [])
         if isinstance(tg, list):
             self.scene_panel.set_targets(tg)

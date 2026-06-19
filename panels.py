@@ -111,6 +111,7 @@ class ScenePanel(QWidget):
     watch_changed = Signal(str, bool)  # (folder, enabled) — for persistence
     _watch_scanned = Signal(list)    # internal: background scan results → UI thread
     target_set_ready = Signal(list)  # all targets have clips + set changed → auto-render
+    watch_clips_ready = Signal(list)  # grouping mode: ready clip paths → app builds previz jobs
     targets_changed = Signal(list)   # render-target materials changed (persist)
     assignments_cleared = Signal(list)  # mappings about to be cleared (for undo)
     videos_removed = Signal(int, dict)  # (count, pre-removal snapshot) for undo
@@ -137,6 +138,7 @@ class ScenePanel(QWidget):
         self._targets: list[str] = []            # materials marked as render targets
         self._autorender_last: frozenset | None = None   # last target version-set emitted
         self._watch_idle_polls = 0               # consecutive no-change polls (drives back-off)
+        self._grouping_mode = False              # asset-grouping: emit ready clips instead of auto-mapping
         self._build_ui()
         self._watch_timer = QTimer(self)
         self._watch_timer.setInterval(self._watch_interval_ms)   # poll (robust on network shares)
@@ -793,6 +795,14 @@ class ScenePanel(QWidget):
     def get_watch_options(self) -> tuple[int, float]:
         return self._watch_interval_ms, self._watch_settle
 
+    def set_grouping_mode(self, on: bool) -> None:
+        """When on, the watch folder emits ready clips for asset-grouping instead
+        of auto-mapping them onto the current scene."""
+        on = bool(on)
+        if on != self._grouping_mode:
+            self._grouping_mode = on
+            self._watch_seen = {}   # force a fresh emit/scan under the new mode
+
     def _scan_watch_folder(self) -> None:
         """Kick off a directory listing on a worker thread (so a slow network
         share never blocks the UI); results are applied back on the UI thread."""
@@ -856,6 +866,20 @@ class ScenePanel(QWidget):
                 ready.append(path)
                 mtimes[path] = mtime
         self._watch_sizes = sizes           # remember sizes for next poll's stability check
+
+        # Asset-grouping mode: don't auto-map onto the current scene — hand the
+        # ready clips to the app, which parses the naming convention and builds
+        # one previz render job per (setup, asset).
+        if self._grouping_mode:
+            gsig = tuple(sorted((p, mtimes.get(p, 0.0)) for p in ready))
+            if gsig == self._watch_seen:
+                self._note_idle_poll()
+                return
+            self._watch_seen = gsig
+            self._reset_poll_interval()
+            self.watch_clips_ready.emit(list(ready))
+            return
+
         sig = (dict(mtimes), tuple(sorted(gone)))
         if sig == self._watch_seen:
             self._note_idle_poll()          # quiet → let the poll cadence back off

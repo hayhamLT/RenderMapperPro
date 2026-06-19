@@ -299,6 +299,44 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     dlv_row.addWidget(dlv_edit, 1)
     dlv_row.addWidget(dlv_browse)
     lay.addLayout(dlv_row)
+
+    lay.addWidget(section_title("ASSET GROUPING (ADVANCED)"))
+    lay.addWidget(hint("Build one previz render per asset from a filename convention like "
+                       "PRJ001_D01_S01_A017_CENTER_ANIM_V003 — dropped clips are grouped by "
+                       "setup + asset, each screen maps to its material, and the newest "
+                       "version of each screen wins. Replaces auto-map while it's on."))
+    _ag = win._asset_grouping
+    ag_enable_cb = QCheckBox("Group watch-folder clips into previz renders by filename")
+    ag_enable_cb.setChecked(_ag.enabled)
+    lay.addWidget(ag_enable_cb)
+
+    lay.addWidget(QLabel("Filename pattern (regex, named groups):"))
+    ag_pat_edit = QLineEdit(_ag.pattern)
+    ag_pat_edit.setPlaceholderText("groups: prj, day, setup, asset, screen, type, version")
+    lay.addWidget(ag_pat_edit)
+
+    ag_row = QHBoxLayout()
+    ag_type_edit = QLineEdit(_ag.content_type)
+    ag_type_edit.setFixedWidth(90)
+    ag_type_edit.setPlaceholderText("ANIM")
+    ag_tmpl_edit = QLineEdit(_ag.output_template)
+    ag_tmpl_edit.setPlaceholderText("{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}")
+    ag_row.addWidget(QLabel("Content type:"))
+    ag_row.addWidget(ag_type_edit)
+    ag_row.addSpacing(12)
+    ag_row.addWidget(QLabel("Output name:"))
+    ag_row.addWidget(ag_tmpl_edit, 1)
+    lay.addLayout(ag_row)
+
+    lay.addWidget(QLabel("Screen → material overrides (optional):"))
+    ag_screen_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in _ag.screen_to_material.items()))
+    ag_screen_edit.setPlaceholderText("CENTER=Center_Screen, LEFT=Left_Screen   (blank = code is the material name)")
+    lay.addWidget(ag_screen_edit)
+
+    lay.addWidget(QLabel("Setup → scene (optional):"))
+    ag_setup_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in sorted(_ag.setup_to_scene.items())))
+    ag_setup_edit.setPlaceholderText("1=/scenes/StageA.blend, 2=/scenes/StageB.blend   (blank = current scene)")
+    lay.addWidget(ag_setup_edit)
     lay.addStretch()
 
     # ── Updates ──────────────────────────────────────────────────────
@@ -482,6 +520,26 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         win._autorender_output = ar_out_edit.text().strip()
         win._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
         win._deliver_dir = dlv_edit.text().strip()
+
+        # Asset grouping
+        def _parse_pairs(text: str) -> dict:
+            out: dict[str, str] = {}
+            for part in text.split(","):
+                part = part.strip()
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    if k.strip():
+                        out[k.strip()] = v.strip()
+            return out
+        _ag = win._asset_grouping
+        _ag.enabled = ag_enable_cb.isChecked()
+        _ag.pattern = ag_pat_edit.text().strip() or _ag.pattern
+        _ag.content_type = ag_type_edit.text().strip()
+        _ag.output_template = ag_tmpl_edit.text().strip() or _ag.output_template
+        _ag.screen_to_material = _parse_pairs(ag_screen_edit.text())
+        _ag.setup_to_scene = {int(k): v for k, v in _parse_pairs(ag_setup_edit.text()).items()
+                              if k.isdigit()}
+        win._sync_grouping_mode()
 
         # Updates
         win._check_updates_on_launch = launch_check_cb.isChecked()
