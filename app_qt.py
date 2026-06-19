@@ -1164,6 +1164,31 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         <p class="muted"><b>Tip:</b> watch + targets + auto-start + a delivery folder =
         a fully automatic "new footage → rendered preview in the review folder"
         pipeline.</p>
+
+        <h3>Asset grouping → previz auto-export (advanced)</h3>
+        <p class="muted">If your show uses a structured filename convention, the watch
+        folder can export <b>one multi-screen previz render per asset</b> instead of
+        mapping onto the current scene — drop 10 clips, get 5 assets. Turn it on in
+        <a href="action:properties/Watch">Properties → Watch &amp; Auto-render → Asset
+        grouping</a>.</p>
+        <p class="muted">From a name like
+        <code>PRJ001_D01_S01_A017_CENTER_ANIM_V003</code> it reads:</p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Setup (S##)</td><td>routes the render to that setup's
+              <b>scene</b> (or the current scene if none is mapped).</td></tr>
+          <tr><td class="fname">Asset (A###)</td><td>the <b>group key</b> — every screen
+              of one asset assembles into a single render.</td></tr>
+          <tr><td class="fname">Screen</td><td>maps to the <b>material</b> of the same name
+              (or an override you set).</td></tr>
+          <tr><td class="fname">Type (ANIM)</td><td>only this content type feeds a render;
+              stills/maps are ignored.</td></tr>
+          <tr><td class="fname">Version (V###)</td><td><b>newest wins</b>; a newer version
+              updates that asset's job in place instead of piling up.</td></tr>
+        </table>
+        <p class="muted">Each asset exports as
+        <code>{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}</code> (the name template,
+        parser regex, content type, screen→material map and per-setup scene are all
+        editable). Queue-only by default, or auto-start with the toggle above.</p>
         """),
             ("Render Farm", """
         <h2>Render Farm (Deadline)</h2>
