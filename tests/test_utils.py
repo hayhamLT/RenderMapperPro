@@ -7,11 +7,43 @@ from core.utils import (
     atomic_write_text,
     expand_output_tokens,
     ext_for_format,
+    ffmpeg_movie_av_args,
     is_cloud_placeholder,
     resolve_output_path,
     slugify_filename,
     terminate_process,
 )
+
+
+def test_av_args_no_audio_is_silent_path():
+    # No audio → the old -vf path, byte-identical (no audio inputs).
+    ins, out = ffmpeg_movie_av_args([], "scale=2:2")
+    assert ins == []
+    assert out == ["-vf", "scale=2:2"]
+    assert ffmpeg_movie_av_args([]) == ([], [])
+
+
+def test_av_args_single_audio_maps_and_aac():
+    ins, out = ffmpeg_movie_av_args(["/a.mp4"], "scale=2:2")
+    assert ins == ["-i", "/a.mp4"]
+    assert "-filter_complex" in out
+    fc = out[out.index("-filter_complex") + 1]
+    assert "[0:v]scale=2:2[v]" in fc and "[1:a]anull[a]" in fc
+    assert out[-4:] == ["-c:a", "aac", "-b:a", "192k"] or "-shortest" in out
+    assert "-map" in out and "[v]" in out and "[a]" in out
+
+
+def test_av_args_multiple_audio_uses_amix():
+    ins, out = ffmpeg_movie_av_args(["/a.mp4", "/b.mp4"])
+    assert ins == ["-i", "/a.mp4", "-i", "/b.mp4"]
+    fc = out[out.index("-filter_complex") + 1]
+    assert "amix=inputs=2" in fc
+    assert "[1:a][2:a]" in fc
+
+
+def test_av_args_skips_blank_paths():
+    ins, _ = ffmpeg_movie_av_args(["", None, "/a.mp4"])
+    assert ins == ["-i", "/a.mp4"]
 
 
 def test_atomic_write_creates_and_replaces(tmp_path):

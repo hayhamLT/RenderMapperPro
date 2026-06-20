@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .logging_setup import get_logger
 from .models import JobConfig, SceneBackend, scene_backend
-from .utils import subprocess_creation_flags, terminate_process
+from .utils import ffmpeg_movie_av_args, subprocess_creation_flags, terminate_process
 
 _log = get_logger(__name__)
 
@@ -484,9 +484,15 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     suffix = out_path.suffix.lower()
     if suffix in (".mp4", ".mov", ".mkv", ".webm"):
-        cmd = [ff, "-y", "-framerate", str(fps), "-i", str(out_dir / "out_%05d.png")]
+        # Mux audio from the source clips (already muting-filtered upstream).
+        audio_paths = [p for p in (getattr(job, "audio_paths", None) or []) if p]
+        audio_inputs, av_out = ffmpeg_movie_av_args(audio_paths)
+        cmd = [ff, "-y", "-framerate", str(fps), "-i", str(out_dir / "out_%05d.png"),
+               *audio_inputs, *av_out]
         if suffix == ".webm":
             cmd += ["-pix_fmt", "yuv420p"]      # let ffmpeg pick VP9; webm can't carry H.264
+            if audio_inputs:
+                cmd += ["-c:a", "libopus"]      # …and webm can't carry AAC either
         else:
             cmd += _web_video_args(r)           # honour the job's codec + quality
             if suffix in (".mp4", ".mov"):

@@ -17,6 +17,36 @@ from core.logging_setup import get_logger
 _log = get_logger(__name__)
 
 
+def ffmpeg_movie_av_args(audio_paths, video_filter: str = "") -> tuple[list[str], list[str]]:
+    """Build the ffmpeg arg lists to mux source-clip audio onto a PNG-sequence
+    movie whose VIDEO is input 0 — shared by the C4D and web backends so they
+    agree (Blender muxes via its own sequencer). Returns
+    ``(audio_inputs, av_out)``: ``audio_inputs`` are the extra ``-i clip`` pairs
+    (placed right after the video input); ``av_out`` carries the video filter,
+    stream maps, AAC audio and ``-shortest``.
+
+    With no audio it returns ``([], ["-vf", video_filter])`` — byte-identical to
+    the old silent path. With audio it switches to a ``-filter_complex`` (which
+    can't coexist with ``-vf``) so the even-scale and the audio mix live together;
+    a single clip is passed through, several are mixed with ``amix``.
+    """
+    paths = [str(p) for p in (audio_paths or []) if p]
+    if not paths:
+        return [], (["-vf", video_filter] if video_filter else [])
+    audio_inputs: list[str] = []
+    for p in paths:
+        audio_inputs += ["-i", p]
+    vchain = f"[0:v]{video_filter}[v]" if video_filter else "[0:v]null[v]"
+    if len(paths) == 1:
+        fc = f"{vchain};[1:a]anull[a]"
+    else:
+        amix = "".join(f"[{i + 1}:a]" for i in range(len(paths)))
+        fc = f"{vchain};{amix}amix=inputs={len(paths)}:duration=longest[a]"
+    av_out = ["-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+              "-c:a", "aac", "-b:a", "192k", "-shortest"]
+    return audio_inputs, av_out
+
+
 def atomic_write_text(path, data: str, *, encoding: str = "utf-8", mode: int | None = None) -> None:
     """Write text so a crash / power-loss / full-disk / mid-write cloud sync can
     never leave a truncated or corrupted file. Writes a sibling temp file, fsyncs
