@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -31,7 +30,6 @@ from PySide6.QtCore import (
     QEvent,
     QSize,
     Qt,
-    QThread,
     QTimer,
     QUrl,
     Signal,
@@ -63,7 +61,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QSystemTrayIcon,
     QTabBar,
@@ -81,6 +78,7 @@ import theme as T
 from app_window.deadline_mixin import DeadlineMixin
 from app_window.preset_mixin import PRESETS_DIR, PresetMixin
 from app_window.queue_mixin import QueueMixin
+from app_window.runtime_mixin import RuntimeMixin
 from app_window.update_mixin import UpdateMixin
 from core.asset_grouping import GroupingConfig as AssetGroupingConfig
 from core.asset_grouping import group_clips
@@ -102,6 +100,11 @@ from core.models import (
     uses_web_backend,
 )
 from core.reporting import format_duration, friendly_error_hint
+from core.runtime import (
+    _managed_blender_executable,
+    _norm_blender,
+    _runtime_download_spec,
+)
 from core.utils import (
     OUTPUT_PROFILES,
     VIDEO_EXTENSIONS,
@@ -150,8 +153,6 @@ REPORTS_DIR = Path.home() / ".blender_video_mapper" / "reports"
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
 APP_NAME = app_version.APP_NAME
 APP_VERSION: str = app_version.__version__  # single source of truth (see app_version.py)
-RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
-BLENDER_RUNTIME_VERSION = "5.1.0"
 PROFILE_VERSION = 3
 LOG_MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 
@@ -160,65 +161,6 @@ _log = get_logger(__name__)
 
 def _make_app_icon() -> QIcon:
     return icons.app_icon()
-
-
-def _norm_blender(candidate: str) -> str | None:
-    candidate = candidate.strip()
-    if not candidate:
-        return None
-    exp = Path(os.path.expanduser(candidate))
-    if exp.suffix.lower() == ".app":
-        for p in (exp / "Contents/MacOS/Blender", exp / "Contents/MacOS/blender"):
-            if p.exists() and p.is_file():
-                return str(p)
-    if exp.exists() and exp.is_file():
-        return str(exp)
-    return shutil.which(candidate)
-
-
-def _managed_blender_executable() -> str | None:
-    current = RUNTIME_ROOT / "current"
-    if not current.exists():
-        return None
-
-    if sys.platform == "darwin":
-        cands = [
-            current / "Blender.app" / "Contents" / "MacOS" / "Blender",
-            current / "Contents" / "MacOS" / "Blender",
-        ]
-        for c in cands:
-            if c.exists() and c.is_file():
-                return str(c)
-    elif os.name == "nt":
-        for c in current.rglob("blender.exe"):
-            if c.exists() and c.is_file():
-                return str(c)
-    else:
-        for c in current.rglob("blender"):
-            if c.exists() and c.is_file() and os.access(str(c), os.X_OK):
-                return str(c)
-    return None
-
-
-def _runtime_download_spec() -> tuple[str, str] | None:
-    v = BLENDER_RUNTIME_VERSION
-    parts = v.split(".")
-    release_train = ".".join(parts[:2]) if len(parts) >= 2 else v
-    base = f"https://download.blender.org/release/Blender{release_train}/blender-{v}"
-    machine = platform.machine().lower()
-
-    if sys.platform == "darwin":
-        arch = "arm64" if "arm" in machine or "aarch64" in machine else "x64"
-        name = f"blender-{v}-macos-{arch}.dmg"
-        return f"{base}-macos-{arch}.dmg", name
-    if os.name == "nt":
-        name = f"blender-{v}-windows-x64.zip"
-        return f"{base}-windows-x64.zip", name
-    if sys.platform.startswith("linux"):
-        arch = "arm64" if "arm" in machine or "aarch64" in machine else "x64"
-        name = f"blender-{v}-linux-{arch}.tar.xz"
-        return f"{base}-linux-{arch}.tar.xz", name
-    return None
 
 
 # Version tag for QMainWindow.saveState()/restoreState(). A saved dock layout is
@@ -324,216 +266,7 @@ def _resolve_runtime_script(name: str) -> str:
     raise FileNotFoundError(f"Runtime script not found: {name}")
 
 
-class RuntimeInstallThread(QThread):
-    log = Signal(str)
-    progress = Signal(int, int)            # (bytes_read, bytes_total); total 0 = unknown
-    finished_install = Signal(str, str)    # (path, error); error == "cancelled" when aborted
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        """Request abort; the in-flight download stops at its next chunk."""
-        self._cancelled = True
-
-    def _download(self, url: str, dest: Path) -> None:
-        from core.download import download_with_progress
-        self.log.emit(f"[runtime] Downloading {url}")
-        self.log.emit("[runtime] This is a ~300–700 MB download and can take several minutes.")
-        download_with_progress(url, dest, self.log.emit,
-                               on_progress=self.progress.emit,
-                               should_cancel=lambda: self._cancelled)
-
-    def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
-        from core.archive import safe_extract_tar, safe_extract_zip
-        name = archive_path.name.lower()
-        if name.endswith(".zip"):
-            safe_extract_zip(archive_path, staging_dir)   # rejects Zip-Slip members
-            return
-        if name.endswith(".tar.xz"):
-            safe_extract_tar(archive_path, staging_dir)   # 3.12 'data' filter
-            return
-        if name.endswith(".dmg") and sys.platform == "darwin":
-            # Try hdiutil mount/copy; fall back to treating as zip if unavailable
-            if not shutil.which("hdiutil"):
-                raise RuntimeError("hdiutil not found — cannot mount .dmg. Try installing via Homebrew or download a .zip build.")
-            mount = ""
-            try:
-                result = subprocess.run(
-                    ["hdiutil", "attach", "-nobrowse", "-readonly", str(archive_path)],
-                    capture_output=True, text=True, timeout=120,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"hdiutil attach failed: {result.stderr.strip()}")
-                for ln in result.stdout.splitlines():
-                    if "/Volumes/" in ln:
-                        parts = ln.split("\t")
-                        mount = parts[-1].strip() if parts else ""
-                if not mount:
-                    raise RuntimeError("Could not determine mount point from hdiutil output")
-
-                apps = sorted(Path(mount).glob("*.app"))
-                if not apps:
-                    raise RuntimeError("Blender.app not found in downloaded disk image")
-                self.log.emit(f"[runtime] Copying {apps[0].name} from mounted image")
-                shutil.copytree(apps[0], staging_dir / "Blender.app", dirs_exist_ok=True)
-            finally:
-                if mount:
-                    subprocess.run(["hdiutil", "detach", mount, "-force"],
-                                   capture_output=True, timeout=30)
-            return
-        raise RuntimeError(f"Unsupported runtime archive format: {archive_path.name}")
-
-    def _locate_executable(self, root: Path) -> str:
-        if sys.platform == "darwin":
-            cands = [
-                root / "Blender.app" / "Contents" / "MacOS" / "Blender",
-            ]
-            for c in cands:
-                if c.exists() and c.is_file():
-                    return str(c)
-            for c in root.rglob("Blender.app"):
-                exe = c / "Contents" / "MacOS" / "Blender"
-                if exe.exists() and exe.is_file():
-                    return str(exe)
-        elif os.name == "nt":
-            for c in root.rglob("blender.exe"):
-                if c.exists() and c.is_file():
-                    return str(c)
-        else:
-            for c in root.rglob("blender"):
-                if c.exists() and c.is_file() and os.access(str(c), os.X_OK):
-                    return str(c)
-        raise RuntimeError("Installed runtime executable not found")
-
-    def run(self) -> None:
-        from core.download import DownloadCancelled
-        try:
-            spec = _runtime_download_spec()
-            if not spec:
-                raise RuntimeError("Managed runtime is not supported on this OS")
-            url, archive_name = spec
-
-            RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-            downloads = RUNTIME_ROOT / "downloads"
-            downloads.mkdir(parents=True, exist_ok=True)
-
-            archive_path = downloads / archive_name
-            if not archive_path.exists() or archive_path.stat().st_size == 0:
-                self._download(url, archive_path)
-            else:
-                self.log.emit("[runtime] Using cached runtime archive")
-            if self._cancelled:
-                raise DownloadCancelled()
-
-            with tempfile.TemporaryDirectory(prefix="blender-runtime-") as td:
-                staging_dir = Path(td) / "staging"
-                staging_dir.mkdir(parents=True, exist_ok=True)
-                self.log.emit("[runtime] Installing runtime files")
-                self._extract_archive(archive_path, staging_dir)
-
-                exe = self._locate_executable(staging_dir)
-                exe_path = Path(exe)
-
-                final_dir = RUNTIME_ROOT / "current"
-                old_dir = RUNTIME_ROOT / "previous"
-                tmp_dir = RUNTIME_ROOT / ".next"
-                if tmp_dir.exists():
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-                root_source = staging_dir
-                if exe_path.is_relative_to(staging_dir):
-                    parts = exe_path.relative_to(staging_dir).parts
-                    if "Blender.app" in parts:
-                        root_source = staging_dir / "Blender.app"
-                shutil.copytree(root_source, tmp_dir, dirs_exist_ok=True)
-
-                if old_dir.exists():
-                    shutil.rmtree(old_dir, ignore_errors=True)
-                if final_dir.exists():
-                    final_dir.rename(old_dir)
-                tmp_dir.rename(final_dir)
-
-            installed = _managed_blender_executable()
-            if not installed:
-                raise RuntimeError("Runtime install completed but executable was not detected")
-            self.finished_install.emit(installed, "")
-        except DownloadCancelled:
-            self.finished_install.emit("", "cancelled")
-        except Exception as exc:
-            self.finished_install.emit("", str(exc))
-
-
-class _RuntimeProgressDialog(QDialog):
-    """Modern progress UI for the one-time managed-Blender download (hundreds of
-    MB): a live bar with MB / speed / ETA and a Cancel button. Non-modal, so the
-    user can read Quick Start while it runs."""
-
-    cancelled = Signal()
-
-    def __init__(self, parent, version: str, palette) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Setting up Blender")
-        self.setMinimumWidth(460)
-        self._t0 = time.monotonic()
-        self._done = False
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 22, 24, 18)
-        lay.setSpacing(10)
-        title = QLabel(f"Setting up Blender {version}")
-        title.setStyleSheet(f"color:{palette.text}; font-size:15px; font-weight:700;")
-        sub = QLabel("Downloading a managed Blender runtime so you don't have to install "
-                     "anything yourself. This happens once.")
-        sub.setWordWrap(True)
-        sub.setStyleSheet(f"color:{palette.text_muted}; font-size:12px;")
-        self._bar = QProgressBar()
-        self._bar.setRange(0, 0)            # indeterminate until the first byte lands
-        self._bar.setTextVisible(False)
-        self._status = QLabel("Starting…")
-        self._status.setStyleSheet(f"color:{palette.text_muted}; font-size:12px;")
-        self._cancel_btn = QPushButton("Cancel")
-        self._cancel_btn.clicked.connect(self._on_cancel)
-        row = QHBoxLayout()
-        row.addStretch()
-        row.addWidget(self._cancel_btn)
-        for w in (title, sub, self._bar, self._status):
-            lay.addWidget(w)
-        lay.addLayout(row)
-
-    def _on_cancel(self) -> None:
-        self._cancel_btn.setEnabled(False)
-        self._status.setText("Cancelling…")
-        self.cancelled.emit()
-
-    def set_progress(self, read: int, total: int) -> None:
-        if self._done:
-            return
-        mb = 1024 * 1024
-        if total > 0 and read >= total:
-            self._bar.setRange(0, 0)         # busy spinner for the extract/install phase
-            self._status.setText("Installing…")
-            return
-        if total > 0:
-            self._bar.setRange(0, 100)
-            self._bar.setValue(int(read / total * 100))
-            elapsed = max(0.001, time.monotonic() - self._t0)
-            speed = read / elapsed
-            eta = int((total - read) / speed) if speed > 0 else 0
-            self._status.setText(
-                f"Downloading… {read // mb} / {total // mb} MB · "
-                f"{speed / mb:.1f} MB/s · ~{eta}s left")
-        else:
-            self._bar.setRange(0, 0)
-            self._status.setText(f"Downloading… {read // mb} MB")
-
-    def finish(self) -> None:
-        self._done = True
-        self.close()
-
-
-class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, UpdateMixin):
+class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, UpdateMixin, RuntimeMixin):
     _update_checked = Signal(object, bool, str)   # (manifest dict | None, was-manual, error-text)
     _delivery_log = Signal(str, str)         # (message, kind) from the delivery-copy thread
     _sheets_built = Signal(int)              # count of contact sheets generated post-render
@@ -569,8 +302,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         self._render_thread: RenderThread | None = None
         self._discovery_thread: DiscoveryThread | None = None
-        self._runtime_install_thread: RuntimeInstallThread | None = None
-        self._runtime_progress_dialog: _RuntimeProgressDialog | None = None
+        self._runtime_install_thread = None   # set by RuntimeMixin; typed in app_window/base.py
+        self._runtime_progress_dialog = None
         self._runtime_prompted = False
         self._save_timer: QTimer | None = None
 
@@ -1887,68 +1620,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         if ans == QMessageBox.StandardButton.No:
             self._show_properties_dialog()
         return _find_blender(self._blender_path)
-
-    def _prompt_install_runtime(self) -> None:
-        if self._runtime_prompted:
-            return
-        self._runtime_prompted = True
-        ans = QMessageBox.question(
-            self,
-            "Install Blender Runtime",
-            "No Blender installation was found.\n"
-            "Would you like to download and install a managed Blender runtime now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ans == QMessageBox.StandardButton.Yes:
-            self._install_managed_runtime()
-
-    def _install_managed_runtime(self) -> None:
-        if self._runtime_install_thread and self._runtime_install_thread.isRunning():
-            dlg = getattr(self, "_runtime_progress_dialog", None)
-            if dlg is not None:
-                dlg.show()
-                dlg.raise_()
-            return
-        if _runtime_download_spec() is None:
-            QMessageBox.warning(
-                self, "Automatic Setup Unavailable",
-                "Automatic Blender download isn't supported on this OS. Please install "
-                "Blender and point the app at it in Properties → Render Engines.")
-            return
-
-        self._append_log(f"[runtime] Installing Blender {BLENDER_RUNTIME_VERSION}...")
-        thread = RuntimeInstallThread(self)
-        self._runtime_install_thread = thread
-        dlg = _RuntimeProgressDialog(self, BLENDER_RUNTIME_VERSION, self._palette)
-        self._runtime_progress_dialog = dlg
-        thread.progress.connect(dlg.set_progress)
-        thread.log.connect(self._append_log)
-        thread.finished_install.connect(self._on_runtime_installed)
-        dlg.cancelled.connect(thread.cancel)
-        thread.start()
-        dlg.show()
-
-    def _on_runtime_installed(self, blender_path: str, error: str) -> None:
-        dlg = getattr(self, "_runtime_progress_dialog", None)
-        if dlg is not None:
-            dlg.finish()
-            self._runtime_progress_dialog = None
-        if error == "cancelled":
-            self._append_log("[runtime] Blender setup cancelled.")
-            return
-        if error:
-            self._append_log(f"[runtime] Install failed: {error}")
-            QMessageBox.warning(
-                self, "Blender Setup Failed",
-                f"{error}\n\nYou can retry, or install Blender yourself and point the "
-                f"app at it in Properties → Render Engines.")
-            return
-        self._blender_path = blender_path
-        self._append_log(f"[runtime] Installed Blender runtime: {blender_path}")
-        self._schedule_save()
-        self._show_toast("Blender is ready — the app is fully set up", "success")
-
 
     def _show_properties_dialog(self, initial_tab: str | None = None) -> None:
         from dialogs import build_properties_dialog
