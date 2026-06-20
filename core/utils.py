@@ -16,6 +16,28 @@ from core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
+
+def atomic_write_text(path, data: str, *, encoding: str = "utf-8", mode: int | None = None) -> None:
+    """Write text so a crash / power-loss / full-disk / mid-write cloud sync can
+    never leave a truncated or corrupted file. Writes a sibling temp file, fsyncs
+    it, then atomically renames over the target (POSIX rename / NTFS replace) —
+    the reader always sees either the old file or the complete new one. Especially
+    important for files living in a synced folder (Dropbox/OneDrive). ``mode`` (e.g.
+    0o600) restricts permissions on the temp file before the rename."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding=encoding) as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    if mode is not None:
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            _log.debug("could not chmod %s", tmp, exc_info=True)
+    tmp.replace(path)
+
 # Windows file attributes marking a cloud "online-only" placeholder.
 _FILE_ATTRIBUTE_OFFLINE = 0x1000
 _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000

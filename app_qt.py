@@ -30,9 +30,7 @@ if getattr(sys, "frozen", False):
 
 from PySide6.QtCore import (
     QByteArray,
-    QEasingCurve,
     QEvent,
-    QPropertyAnimation,
     QSize,
     Qt,
     QThread,
@@ -75,7 +73,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextBrowser,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -109,6 +106,7 @@ from core.reporting import format_duration, friendly_error_hint
 from core.utils import (
     OUTPUT_PROFILES,
     VIDEO_EXTENSIONS,
+    atomic_write_text,
     ext_for_format,
     file_exists,
 )
@@ -613,8 +611,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._theme_mode = "dark"
         self._accent = T.ACCENT_ORANGE
         self._palette: T.Palette = T.build_palette(self._theme_mode, self._accent)
-        self._toast: QWidget | None = None
-        self._toast_anim: QPropertyAnimation | None = None
 
         self._preview_enabled = True
         self._preview_path = ""
@@ -675,7 +671,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._build_status_bar()
         self._build_tray()
         self._load_profile()
-        self._update_health()
         self._update_status_bar()
         # Check for a newer release a few seconds after launch (if the user hasn't
         # turned the on-launch check off). A newer version pops the offer dialog.
@@ -729,8 +724,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             if panel is not None and hasattr(panel, "restyle"):
                 panel.restyle(self._palette)
         self.setWindowIcon(_make_app_icon())
-        if hasattr(self, "_flow_steps"):
-            self._update_health()
         # Rebuild the queue so per-row progress bars pick up the new palette.
         if getattr(self, "_jobs", None) is not None and hasattr(self, "queue_panel"):
             self._refresh_queue_view()
@@ -1661,74 +1654,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 tb.setDocumentMode(True)
 
     # ── Guided flow / health bar ─────────────────────────────────────────
-    def _build_flowbar(self) -> None:
-        bar = QToolBar("Workflow Status", self)
-        bar.setObjectName("FlowBar")
-        bar.setMovable(False)
-        bar.setFloatable(False)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
-
-        container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(12, 3, 12, 3)
-        row.setSpacing(8)
-
-        self._flow_steps: dict[str, tuple[QLabel, QLabel]] = {}
-        chips = (("blender", "Blender"), ("scene", "Scene"), ("map", "Mapping"), ("queue", "Queue"))
-        for i, (key, text) in enumerate(chips):
-            if i:
-                sep = QLabel("›")
-                sep.setObjectName("HintLabel")
-                row.addWidget(sep)
-            chip = QWidget()
-            ch = QHBoxLayout(chip)
-            ch.setContentsMargins(0, 0, 0, 0)
-            ch.setSpacing(6)
-            icon_lbl = QLabel()
-            icon_lbl.setFixedSize(16, 16)
-            txt_lbl = QLabel(text)
-            txt_lbl.setObjectName("FieldLabel")
-            ch.addWidget(icon_lbl)
-            ch.addWidget(txt_lbl)
-            row.addWidget(chip)
-            self._flow_steps[key] = (icon_lbl, txt_lbl)
-        row.addStretch()
-        bar.addWidget(container)
-
-    def _update_health(self) -> None:
-        if not hasattr(self, "_flow_steps"):
-            return
-        pal = self._palette
-
-        def set_chip(key: str, state: str, text: str) -> None:
-            icon_lbl, txt_lbl = self._flow_steps[key]
-            color = {"ok": pal.success, "warn": pal.warning, "idle": pal.text_faint}[state]
-            name = {"ok": "check", "warn": "alert", "idle": "circle"}[state]
-            icon_lbl.setPixmap(icons.pixmap(name, color, 15))
-            txt_lbl.setText(text)
-
-        blender = _find_blender(self._blender_path)
-        set_chip("blender", "ok" if blender else "warn", "Blender ready" if blender else "No Blender")
-
-        scene = self.scene_panel.scene_edit.text().strip()
-        if scene and file_exists(scene):
-            set_chip("scene", "ok", Path(scene).name)
-        else:
-            set_chip("scene", "idle", "No scene")
-
-        n_map = len(self.scene_panel.get_assignments())
-        n_vid = len(self.scene_panel.get_videos())
-        if n_map:
-            set_chip("map", "ok", f"{n_map} mapping{'s' if n_map != 1 else ''}")
-        elif n_vid:
-            set_chip("map", "idle", f"{n_vid} video{'s' if n_vid != 1 else ''}")
-        else:
-            set_chip("map", "idle", "No videos")
-
-        n_job = len(self._jobs)
-        set_chip("queue", "ok" if n_job else "idle", f"{n_job} job{'s' if n_job != 1 else ''}")
-
-    # ── Toast notifications ──────────────────────────────────────────────
     def _show_toast(self, message: str, kind: str = "info") -> None:
         # Pop-up notifications were removed by request. Messages go to the Live
         # Logs panel AND flash briefly in the status bar — so feedback is always
@@ -1739,32 +1664,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         if bar is not None:
             icon = {"error": "✗ ", "warning": "⚠ ", "success": "✓ "}.get(kind, "")
             bar.showMessage(icon + message, 5000)
-
-    def _position_toast(self, toast: QWidget) -> None:
-        margin = 26
-        x = self.width() - toast.width() - margin
-        y = self.height() - toast.height() - margin
-        toast.move(max(margin, x), max(margin, y))
-
-    def _dismiss_toast(self, toast: QWidget) -> None:
-        if toast is None:
-            return
-        eff = toast.graphicsEffect()
-        if eff is None:
-            toast.deleteLater()
-            if toast is self._toast:
-                self._toast = None
-            return
-        anim = QPropertyAnimation(eff, b"opacity", self)
-        anim.setDuration(320)
-        anim.setStartValue(1.0)
-        anim.setEndValue(0.0)
-        anim.setEasingCurve(QEasingCurve.Type.InCubic)
-        anim.finished.connect(toast.deleteLater)
-        anim.start()
-        self._toast_anim = anim
-        if toast is self._toast:
-            self._toast = None
 
     def _reset_layout(self) -> None:
         self._apply_layout("default")
@@ -1979,7 +1878,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             # prompt); for a returning user with no Blender, ask here.
             if not getattr(self, "_is_first_run", False):
                 self._prompt_install_runtime()
-        self._update_health()
 
         # Auto-scan a restored scene so materials/cameras are ready on launch.
         scene = self.scene_panel.scene_edit.text().strip()
@@ -2083,7 +1981,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         self._blender_path = blender_path
         self._append_log(f"[runtime] Installed Blender runtime: {blender_path}")
         self._schedule_save()
-        self._update_health()
         self._show_toast("Blender is ready — the app is fully set up", "success")
 
 
@@ -3547,15 +3444,23 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         if self._is_rendering:
             self._update_progress_caption()
 
-    @staticmethod
-    def _load_history() -> list[dict]:
+    def _load_history(self) -> list[dict]:
+        """Render history, cached in memory — _job_etas reads this on every (per-
+        frame) queue refresh, so re-parsing the JSON from disk each time put real
+        I/O on the UI thread. The cache is invalidated whenever history is written."""
+        cache = getattr(self, "_history_cache", None)
+        if cache is not None:
+            return cache
+        data: list[dict] = []
         try:
             if HISTORY_PATH.exists():
-                data = json.loads(HISTORY_PATH.read_text())
-                return data if isinstance(data, list) else []
+                parsed = json.loads(HISTORY_PATH.read_text())
+                if isinstance(parsed, list):
+                    data = parsed
         except Exception:
             _log.debug("could not read render history file", exc_info=True)
-        return []
+        self._history_cache = data
+        return data
 
     def _log_eta_prediction(self, entries: list[dict]) -> None:
         """Before a render, estimate total time from prior runs of the same
@@ -3620,12 +3525,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         entry["kwh"] = round(kwh, 3)
         entry["cost"] = round(cost, 2)
         try:
-            HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-            hist = []
-            if HISTORY_PATH.exists():
-                hist = json.loads(HISTORY_PATH.read_text())
+            hist = list(self._load_history())   # cached + isinstance-guarded
             hist.insert(0, entry)
-            HISTORY_PATH.write_text(json.dumps(hist[:200], indent=2))
+            hist = hist[:200]
+            atomic_write_text(HISTORY_PATH, json.dumps(hist, indent=2))
+            self._history_cache = hist           # keep the cache in step with disk
         except Exception:
             _log.warning("failed to save render history", exc_info=True)
 
@@ -3906,13 +3810,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
                 ],
             }
             path = REPORTS_DIR / f"run_report_{stamp}.json"
-            path.write_text(json.dumps(report, indent=2))
+            atomic_write_text(path, json.dumps(report, indent=2))
             self._last_report_path = str(path)
             if hasattr(self, "_open_report_action"):
                 self._open_report_action.setEnabled(True)
             try:
                 html_path = REPORTS_DIR / f"run_report_{stamp}.html"
-                html_path.write_text(self._build_html_report(), encoding="utf-8")
+                atomic_write_text(html_path, self._build_html_report())
                 self._last_html_report_path = str(html_path)
                 if hasattr(self, "_open_html_action"):
                     self._open_html_action.setEnabled(True)
@@ -4008,7 +3912,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
         if not p.lower().endswith(PROJECT_EXT):
             p += PROJECT_EXT
         try:
-            Path(p).write_text(json.dumps(self._profile_dict(), indent=2))
+            # A project file is meant to be shared — strip machine-local secrets
+            # (the Discord webhook) so they never travel with it.
+            data = self._profile_dict()
+            data.pop("discord_webhook", None)
+            atomic_write_text(p, json.dumps(data, indent=2))
             self._show_toast("Project saved", "success")
         except Exception as exc:
             self._show_toast(f"Save failed: {exc}", "error")
@@ -4271,7 +4179,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
         def do_clear() -> None:
             try:
-                HISTORY_PATH.write_text("[]")
+                atomic_write_text(HISTORY_PATH, "[]")
+                self._history_cache = []
             except Exception:
                 _log.warning("failed to clear render history", exc_info=True)
             table.setRowCount(0)
@@ -4951,21 +4860,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
 
     def _save_profile(self) -> None:
         try:
-            PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            data = json.dumps(self._profile_dict(), indent=2)
-            # Atomic write: a crash/power-loss/full-disk mid-write must never
-            # corrupt the existing profile. Write to a sibling temp file, fsync,
-            # then atomically rename over the target (POSIX rename / NTFS replace).
-            tmp = PROFILE_PATH.with_name(PROFILE_PATH.name + ".tmp")
-            with tmp.open("w", encoding="utf-8") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            try:
-                os.chmod(tmp, 0o600)   # owner-only: the profile may hold a webhook secret
-            except OSError:
-                _log.debug("could not restrict profile file permissions", exc_info=True)
-            tmp.replace(PROFILE_PATH)
+            # Atomic + owner-only (the profile may hold a webhook secret).
+            atomic_write_text(PROFILE_PATH, json.dumps(self._profile_dict(), indent=2), mode=0o600)
         except Exception as exc:
             self._append_log(f"[app] Could not save settings: {exc}")
 
