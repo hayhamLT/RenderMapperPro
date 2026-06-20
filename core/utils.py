@@ -125,6 +125,20 @@ def ca_bundle_path() -> str | None:
     return None
 
 
+def bundled_asset_path(name: str) -> Path | None:
+    """Find a file under ``assets/`` in the source tree or a frozen bundle.
+    The source root is the repo root (this module lives in ``core/``); a frozen
+    build looks in ``_MEIPASS`` first. Returns None if not found."""
+    roots = [Path(__file__).resolve().parent.parent]
+    if getattr(sys, "frozen", False):
+        roots.insert(0, Path(getattr(sys, "_MEIPASS", "")))
+    for root in roots:
+        p = root / "assets" / name
+        if p.exists():
+            return p
+    return None
+
+
 def ssl_context() -> ssl.SSLContext:
     """A verifying SSL context that trusts the bundled CA bundle when present.
     Building it explicitly (vs the SSL_CERT_FILE env var) is bulletproof — it

@@ -5,3 +5,4 @@ CI, so the version lives in exactly one place. CI fails a ``v<X.Y.Z>`` release
 tag whose value doesn't match this string.
 """
 __version__ = "1.8.18"
+APP_NAME = "Render Mapper Pro"   # display name; single source shared by the app + mixins

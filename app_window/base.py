@@ -12,12 +12,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PySide6.QtWidgets import QWidget
+    from PySide6.QtCore import SignalInstance
+    from PySide6.QtWidgets import QLabel, QWidget
 
     from core.models import RenderJob
     from panels import DeadlinePanel, PresetBrowserPanel, QueuePanel, RenderPanel, ScenePanel
     from theme import Palette
-    from workers import DeadlineQueryThread
+    from workers import DeadlineQueryThread, FuncThread
 
     # For typing, mixins ARE a QWidget (the concrete window is a QMainWindow), so
     # `QMessageBox(self, …)` type-checks. At runtime the base is plain ``object``
@@ -44,6 +45,13 @@ class _WindowMembers(_Base):
         _farm_nodes_thread: DeadlineQueryThread | None
         _blender_path: str
         _palette: Palette
+        # ── Updates (UpdateMixin) ──────────────────────────────────────────
+        _update_checked: SignalInstance       # Signal lives on the window (QObject)
+        _update_check_thread: FuncThread | None
+        _shutting_down: bool
+        _check_updates_on_launch: bool
+        _skipped_update: str
+        _sb_update: QLabel
         scene_panel: ScenePanel
         render_panel: RenderPanel
         deadline_panel: DeadlinePanel
@@ -59,6 +67,7 @@ class _WindowMembers(_Base):
         def _show_toast(self, message: str, kind: str = ...) -> None: ...
         def _show_properties_dialog(self, initial_tab: str | None = ...) -> None: ...
         def _schedule_save(self) -> None: ...
+        def _save_profile(self) -> None: ...
         def _push_undo(self, desc: str, restore) -> None: ...
         def _update_status_bar(self) -> None: ...
         def _update_progress_caption(self) -> None: ...
