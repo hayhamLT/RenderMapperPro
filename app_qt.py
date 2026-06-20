@@ -2327,18 +2327,47 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             return
         token = _update_token()
         tag = str(info.get("tag_name", "") or "update").lstrip("v") or "update"
+        url = str(asset.get("url") or "")
+        expected = str(asset.get("digest") or "").strip().lower()   # GitHub-published "sha256:<hex>"
         dest = Path.home() / "Downloads" / want
+        tmp = dest.with_name(dest.name + ".part")
         try:
+            import hashlib
+            import hmac
+            import urllib.parse
             import urllib.request
-            # Public repo → asset downloads work anonymously; only add auth when a
-            # dev token is present (never sent as an empty Bearer header).
             headers = {"Accept": "application/octet-stream", "User-Agent": APP_NAME}
-            if token:
+            # Host-pin the credential: only ever attach the token when the asset
+            # URL is on GitHub's own hosts (defence against a redirected/tampered
+            # URL leaking the token elsewhere).
+            host = (urllib.parse.urlparse(url).hostname or "").lower()
+            if token and (host == "api.github.com" or host.endswith(".github.com")
+                          or host.endswith(".githubusercontent.com")):
                 headers["Authorization"] = f"Bearer {token}"
-            req = urllib.request.Request(asset["url"], headers=headers)
+            req = urllib.request.Request(url, headers=headers)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with urllib.request.urlopen(req, timeout=300, context=_ssl_context()) as r, open(dest, "wb") as f:
-                shutil.copyfileobj(r, f)
+            # Download to a temp file while hashing — the final path only ever
+            # holds a fully-downloaded, integrity-checked installer.
+            h = hashlib.sha256()
+            with urllib.request.urlopen(req, timeout=300, context=_ssl_context()) as r, open(tmp, "wb") as f:
+                for chunk in iter(lambda: r.read(1 << 16), b""):
+                    h.update(chunk)
+                    f.write(chunk)
+            got = "sha256:" + h.hexdigest()
+            # Verify against GitHub's authoritative digest. A mismatch means the
+            # bytes were tampered with or corrupted in flight — refuse to run it.
+            if expected and not hmac.compare_digest(got, expected):
+                tmp.unlink(missing_ok=True)
+                self._append_log(f"[update] Integrity check FAILED for {want}: "
+                                 f"expected {expected}, got {got}")
+                QMessageBox.critical(self, "Update Blocked",
+                    "The downloaded installer failed its integrity check and was discarded — "
+                    "it does not match the checksum published with the release.\n\n"
+                    "Please download the update manually from the GitHub Releases page.")
+                return
+            if not expected:
+                self._append_log(f"[update] No published checksum for {want} — integrity not verified.")
+            os.replace(tmp, dest)
             # Hand off to the platform installer — it replaces the running app
             # itself (no extract-over-a-locked-exe problem).
             if sys.platform == "win32":
@@ -2348,10 +2377,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin):
             else:
                 reveal_in_file_manager(dest)
             QMessageBox.information(self, "Update Ready",
-                f"{APP_NAME} {tag} downloaded to:\n\n{dest}\n\n"
+                f"{APP_NAME} {tag} downloaded and verified to:\n\n{dest}\n\n"
                 f"The installer is opening — follow its prompts. You may be asked to "
                 f"quit {APP_NAME} first so it can be replaced.")
         except Exception as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             QMessageBox.warning(self, "Update Failed", str(exc))
 
     def _update_renderer_for_scene(self) -> None:

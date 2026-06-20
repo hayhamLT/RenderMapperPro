@@ -121,23 +121,49 @@ def ensure_web_chromium(on_log: LogCallback | None = None,
     pat = re.compile(rb"(\d{1,3})%")
     buf, last = b"", -1
     assert proc.stdout is not None
-    while True:
-        if should_cancel and should_cancel():
-            terminate_process(proc)
-            raise RuntimeError("cancelled")
-        chunk = proc.stdout.read(256)
-        if not chunk:
-            break
-        buf += chunk
-        while True:   # the progress bar uses \r, so split on \r and \n
-            i = min((j for j in (buf.find(b"\r"), buf.find(b"\n")) if j != -1), default=-1)
-            if i == -1:
+    # Watchdogs: the blocking read can hang forever if the network stalls. A stall
+    # timer (reset on every byte of progress) and a hard wall-clock cap kill the
+    # process so the read returns EOF and we fail cleanly instead of hanging.
+    import threading
+    _stall_s, _hard_s = 180, 1800
+    timed_out = {"stall": False, "hard": False}
+
+    def _kill(kind: str) -> None:
+        timed_out[kind] = True
+        terminate_process(proc)
+    hard = threading.Timer(_hard_s, _kill, ("hard",))
+    hard.daemon = True
+    hard.start()
+    stall = threading.Timer(_stall_s, _kill, ("stall",))
+    stall.daemon = True
+    stall.start()
+    try:
+        while True:
+            if should_cancel and should_cancel():
+                terminate_process(proc)
+                raise RuntimeError("cancelled")
+            chunk = proc.stdout.read(256)
+            if not chunk:
                 break
-            line, buf = buf[:i], buf[i + 1:]
-            m = pat.search(line)
-            if m and int(m.group(1)) != last:
-                last = int(m.group(1))
-                log(f"[web] Chromium download {last}%")
+            stall.cancel()           # progress arrived → reset the stall watchdog
+            stall = threading.Timer(_stall_s, _kill, ("stall",))
+            stall.daemon = True
+            stall.start()
+            buf += chunk
+            while True:   # the progress bar uses \r, so split on \r and \n
+                i = min((j for j in (buf.find(b"\r"), buf.find(b"\n")) if j != -1), default=-1)
+                if i == -1:
+                    break
+                line, buf = buf[:i], buf[i + 1:]
+                m = pat.search(line)
+                if m and int(m.group(1)) != last:
+                    last = int(m.group(1))
+                    log(f"[web] Chromium download {last}%")
+    finally:
+        stall.cancel()
+        hard.cancel()
+    if timed_out["stall"] or timed_out["hard"]:
+        raise RuntimeError("Chromium download timed out (network stalled) — check your connection and retry.")
     if proc.wait() != 0:
         raise RuntimeError("Chromium download failed — check your network and try again.")
     if not web_chromium_installed():
