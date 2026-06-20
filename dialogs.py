@@ -39,14 +39,13 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     """The Properties & Settings dialog. Operates on the main window ``win``."""
     from app_qt import (
         APP_VERSION,
-        BLENDER_RUNTIME_VERSION,
         LOG_PATH,
         PROFILE_PATH,
         _blender_version_status,
         _find_blender,
         _find_c4dpy,
-        _norm_blender,
     )
+    from core.runtime import BLENDER_RUNTIME_VERSION, _norm_blender
 
     dlg = QDialog(win)
     dlg.setWindowTitle("Properties & Settings")

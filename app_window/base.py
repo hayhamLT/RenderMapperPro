@@ -12,8 +12,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PySide6.QtCore import SignalInstance
-    from PySide6.QtWidgets import QLabel, QWidget
+    from PySide6.QtCore import QThread, SignalInstance
+    from PySide6.QtWidgets import QDialog, QLabel, QWidget
 
     from core.models import RenderJob
     from panels import DeadlinePanel, PresetBrowserPanel, QueuePanel, RenderPanel, ScenePanel
@@ -52,6 +52,10 @@ class _WindowMembers(_Base):
         _check_updates_on_launch: bool
         _skipped_update: str
         _sb_update: QLabel
+        # ── Managed runtime install (RuntimeMixin) ─────────────────────────
+        _runtime_prompted: bool
+        _runtime_install_thread: QThread | None
+        _runtime_progress_dialog: QDialog | None
         scene_panel: ScenePanel
         render_panel: RenderPanel
         deadline_panel: DeadlinePanel
