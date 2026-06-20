@@ -321,16 +321,38 @@ def _stamp_png(ffmpeg: str, png: str, cfg, render, yr: int, frame: int) -> None:
         log(f"  burn-in error on frame {frame}: {exc}")
 
 
+def _audio_av_args(audio_paths, video_filter):
+    """ffmpeg (audio_inputs, av_out) to mux source-clip audio onto a movie whose
+    video is input 0 — kept in step with core.utils.ffmpeg_movie_av_args (this
+    worker is standalone under c4dpy and can't import the app's core package)."""
+    paths = [str(p) for p in (audio_paths or []) if p]
+    if not paths:
+        return [], (["-vf", video_filter] if video_filter else [])
+    audio_inputs = []
+    for p in paths:
+        audio_inputs += ["-i", p]
+    vchain = f"[0:v]{video_filter}[v]" if video_filter else "[0:v]null[v]"
+    if len(paths) == 1:
+        fc = f"{vchain};[1:a]anull[a]"
+    else:
+        amix = "".join(f"[{i + 1}:a]" for i in range(len(paths)))
+        fc = f"{vchain};{amix}amix=inputs={len(paths)}:duration=longest[a]"
+    return audio_inputs, ["-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                          "-c:a", "aac", "-b:a", "192k", "-shortest"]
+
+
 def _mux_movie(ffmpeg: str, frames_dir: str, fps: int, out_file: str,
-               out_fmt: str, codec: str, quality: str) -> bool:
-    """Assemble the rendered PNG frames into a movie with the chosen codec/quality."""
+               out_fmt: str, codec: str, quality: str, audio_paths=None) -> bool:
+    """Assemble the rendered PNG frames into a movie with the chosen codec/quality.
+    ``audio_paths`` (source clips with unmuted audio) are muxed in if present."""
     crf = {"LOSSLESS": "0", "HIGH": "18", "MEDIUM": "23", "LOW": "28", "LOWEST": "32"}
     pattern = os.path.join(frames_dir, "%06d.png")
     os.makedirs(os.path.dirname(out_file) or ".", exist_ok=True)
     # Force even dimensions — H.264/H.265 with yuv420p (and ProRes) reject odd
     # width/height, which a fractional render scale can produce.
     even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    cmd = [ffmpeg, "-y", "-framerate", str(fps or 30), "-i", pattern, "-vf", even]
+    audio_inputs, av_out = _audio_av_args(audio_paths, even)
+    cmd = [ffmpeg, "-y", "-framerate", str(fps or 30), "-i", pattern, *audio_inputs, *av_out]
     if str(codec).upper() == "PRORES" or out_fmt == "QUICKTIME":
         cmd += ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
     else:
@@ -487,7 +509,8 @@ def main() -> None:
         log(f"Encoding movie -> {out_path}")
         if not _mux_movie(ffmpeg, frame_dir, fps, out_path, out_fmt,
                           str(render.get("video_codec", "")) or str(render.get("codec", "H264")),
-                          str(render.get("video_quality", "HIGH"))):
+                          str(render.get("video_quality", "HIGH")),
+                          audio_paths=cfg.get("audio_paths", [])):
             raise RuntimeError(f"ffmpeg failed to encode the movie -> {out_path}")
         log(f"Movie written: {out_path}")
         shutil.rmtree(frame_dir, ignore_errors=True)
