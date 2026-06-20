@@ -12,7 +12,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from PySide6.QtCore import QThread, SignalInstance
+    from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QDialog, QLabel, QWidget
 
     from core.models import RenderJob
@@ -56,6 +59,15 @@ class _WindowMembers(_Base):
         _runtime_prompted: bool
         _runtime_install_thread: QThread | None
         _runtime_progress_dialog: QDialog | None
+        # ── Post-run reporting (ReportMixin) ───────────────────────────────
+        _job_durations: dict[int, float]
+        _job_metrics: dict[int, dict]
+        _power_watts: float
+        _power_rate: float
+        _last_report_path: str
+        _last_html_report_path: str
+        _open_report_action: QAction
+        _open_html_action: QAction
         scene_panel: ScenePanel
         render_panel: RenderPanel
         deadline_panel: DeadlinePanel
@@ -77,5 +89,10 @@ class _WindowMembers(_Base):
         def _update_progress_caption(self) -> None: ...
         def _unsaved_floating_changes(self) -> bool: ...
         def _effective_chunk_size(self, job: RenderJob) -> int: ...
+        def _fmt_dur(self, seconds: float) -> str: ...               # window (ReportMixin uses)
+        @staticmethod
+        def _sheet_path_for(output: str) -> Path | None: ...         # window (ReportMixin uses)
+        @staticmethod
+        def _open_path(path: str) -> None: ...                       # window (ReportMixin uses)
         @staticmethod
         def _friendly_error_hint(text: str) -> str: ...
