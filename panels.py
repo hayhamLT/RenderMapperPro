@@ -65,6 +65,7 @@ import icons
 import theme as T
 from core.logging_setup import get_logger
 from core.models import (
+    VIDEO_MAPPING_MODE_BASE_COLOR,
     VIDEO_MAPPING_MODE_EMISSION,
     MaterialVideoAssignment,
     RenderJob,
@@ -656,7 +657,31 @@ class ScenePanel(QWidget):
         menu = QMenu(self)
         act = menu.addAction("Unmark Render Target" if mat in self._targets else "Mark as Render Target")
         act.triggered.connect(lambda: self._toggle_target(mat))
+        # Mapping mode — only when the material has a clip (it's a property of the
+        # mapping). Honoured on the Blender path; C4D/three.js render emissive.
+        assignment = next((a for a in self._assignments if a.material_name == mat), None)
+        if assignment is not None:
+            menu.addSeparator()
+            sub = menu.addMenu("Mapping mode")
+            for label, mode in (("Emission (full-bright)", VIDEO_MAPPING_MODE_EMISSION),
+                                 ("Base colour (with alpha)", VIDEO_MAPPING_MODE_BASE_COLOR)):
+                a2 = sub.addAction(label)
+                a2.setCheckable(True)
+                a2.setChecked(assignment.mapping_mode == mode)
+                a2.triggered.connect(lambda _c=False, m=mode: self._set_mapping_mode(mat, m))
         menu.exec(self.mat_list.mapToGlobal(pos))
+
+    def _set_mapping_mode(self, material: str, mode: str) -> None:
+        """Switch how a mapped clip drives its material — full-bright emission
+        (default, screen-like) or base colour with alpha. Persists with the job."""
+        changed = False
+        for i, a in enumerate(self._assignments):
+            if a.material_name == material and a.mapping_mode != mode:
+                self._assignments[i] = MaterialVideoAssignment(a.material_name, a.video_path, mode)
+                changed = True
+        if changed:
+            self._refresh_lists()
+            self.assignments_changed.emit(self.get_assignments())
 
     def _auto_target_and_check(self) -> None:
         """Linking a clip auto-targets its material, then re-check the set."""
