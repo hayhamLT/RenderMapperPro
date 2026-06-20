@@ -49,14 +49,18 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(WEB_RUNTIME_ROOT)
 # blocklisting. The UNMASKED_RENDERER probe below verifies a real GPU bound and
 # falls back to software if not, so a wrong/absent backend degrades gracefully.
 _ANGLE_BACKEND = {"darwin": "metal", "win32": "d3d11"}.get(sys.platform)
+# Vendored three.js is loaded as ES modules from the file:// scene page; Chromium
+# blocks file://→file:// module imports under CORS (origin 'null') unless this
+# flag is set. Safe here — the page and every script are our own bundled assets.
+_LOCAL_MODULES = "--allow-file-access-from-files"
 _GPU_LAUNCH = {"headless": False,
-               "args": ["--headless=new", "--ignore-gpu-blocklist"]
+               "args": ["--headless=new", "--ignore-gpu-blocklist", _LOCAL_MODULES]
                + ([f"--use-angle={_ANGLE_BACKEND}"] if _ANGLE_BACKEND else [])}
 # Deliberate software fallback for GPU-less / no-GUI-session / blocklisted machines.
 # Chrome 137+ dropped the automatic SwiftShader fallback, so it must be explicit.
 _SOFTWARE_LAUNCH = {"headless": False,
                     "args": ["--headless=new", "--enable-unsafe-swiftshader",
-                             "--use-angle=swiftshader"]}
+                             "--use-angle=swiftshader", _LOCAL_MODULES]}
 
 # Reads the true GL device string; "SwiftShader"/"software"/empty ⇒ no real GPU.
 _GL_PROBE_JS = """() => {
