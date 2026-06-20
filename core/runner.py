@@ -5,7 +5,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -409,10 +408,6 @@ def run_c4d_job(
     if on_log:
         on_log("[app] Executing C4D: " + " ".join(command))
 
-    out_path = Path(job.output_path).expanduser()
-    before = set(out_path.glob("*.png")) if out_path.is_dir() else set()
-    start_ts = time.time()
-
     process = subprocess.Popen(
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, bufsize=1,
@@ -423,11 +418,14 @@ def run_c4d_job(
             process.stdin.write(C4D_LICENSE_INPUT)
             process.stdin.flush()
             process.stdin.close()
+        saw_success = False
         if process.stdout is not None:
             for line in process.stdout:
                 if should_cancel and should_cancel():
                     terminate_process(process)
                     break
+                if "Render finished successfully" in line:
+                    saw_success = True
                 if on_log:
                     on_log(line.rstrip())
         rc = process.wait()
@@ -436,16 +434,15 @@ def run_c4d_job(
             terminate_process(process)
         config_path.unlink(missing_ok=True)   # don't leak the temp job config
 
-    # c4dpy often crashes on exit after a successful render — treat the job as
-    # successful if it produced output: new frames in a sequence folder, or a
-    # freshly written movie file at the output path.
-    produced_seq = (set(out_path.glob("*.png")) - before) if out_path.is_dir() else set()
-    produced_movie = (
-        out_path.is_file() and out_path.stat().st_size > 0
-        and out_path.stat().st_mtime >= start_ts - 1
-    )
-    if produced_seq or produced_movie:
+    # The worker prints its success marker as its final action, BEFORE c4dpy's
+    # frequent crash-on-exit — so the marker (not the exit code, and not mere
+    # output existence) is the source of truth. A worker that failed a frame
+    # raises and never prints it, so a partial/garbage render correctly fails
+    # instead of being judged green by leftover frame files.
+    if saw_success:
         return 0
+    if on_log:
+        on_log("[c4d] Render did not report success — failing the job.")
     return rc if rc != 0 else 1
 
 

@@ -451,6 +451,7 @@ def main() -> None:
 
     log(f"Rendering {len(frames)} frame(s) at {xr}x{yr} with Redshift"
         + (f" -> {out_fmt} movie" if is_movie else " (image sequence)"))
+    failed_frames = []
     for idx, f in enumerate(frames, start=1):
         # Swap in this frame's still for every mapped material.
         for (graph, port, vid, tag) in mapped:
@@ -463,17 +464,32 @@ def main() -> None:
         bmp.Init(xr, yr, 24)
         res = documents.RenderDocument(doc, rd.GetDataInstance(), bmp, c4d.RENDERFLAGS_EXTERNAL)
         frame_path = os.path.join(frame_dir, f"{idx:06d}.png" if is_movie else f"{f:04d}.png")
-        bmp.Save(frame_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
+        saved = bmp.Save(frame_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
+        # Don't trust a green job blindly: the render must have returned OK AND a
+        # non-empty file must exist. A failed/garbage frame now fails the job.
+        ok = (res == c4d.RENDERRESULT_OK
+              and os.path.exists(frame_path) and os.path.getsize(frame_path) > 0)
+        if not ok:
+            failed_frames.append(f)
+            log(f"ERROR: frame {f} did not render — result={res} saved={saved} "
+                f"file={'present' if os.path.exists(frame_path) else 'MISSING'}")
+            continue
         if render.get("burn_in"):
             _stamp_png(ffmpeg, frame_path, cfg, render, yr, f)
-        log(f"Frame {f} -> {frame_path} (ok={res == c4d.RENDERRESULT_OK})")
+        log(f"Frame {f} -> {frame_path} (ok)")
+
+    if failed_frames:
+        raise RuntimeError(
+            f"{len(failed_frames)} of {len(frames)} frame(s) failed to render: "
+            f"{failed_frames[:10]}{'…' if len(failed_frames) > 10 else ''}")
 
     if is_movie:
         log(f"Encoding movie -> {out_path}")
-        if _mux_movie(ffmpeg, frame_dir, fps, out_path, out_fmt,
-                      str(render.get("video_codec", "")) or str(render.get("codec", "H264")),
-                      str(render.get("video_quality", "HIGH"))):
-            log(f"Movie written: {out_path}")
+        if not _mux_movie(ffmpeg, frame_dir, fps, out_path, out_fmt,
+                          str(render.get("video_codec", "")) or str(render.get("codec", "H264")),
+                          str(render.get("video_quality", "HIGH"))):
+            raise RuntimeError(f"ffmpeg failed to encode the movie -> {out_path}")
+        log(f"Movie written: {out_path}")
         shutil.rmtree(frame_dir, ignore_errors=True)
     shutil.rmtree(tmp_dir, ignore_errors=True)   # per-frame extracted stills scratch
     log("Render finished successfully")
