@@ -71,10 +71,31 @@ jobs:
         # deadlocks, so the runner never hangs indefinitely on it.
         run: pytest -q tests/test_smoke_ui.py --timeout=120
 
+  # Render one real frame through the headless three.js backend, end to end. The
+  # three.js graph is vendored (no CDN), so this runs fully offline — it guards
+  # the web path, which lint/ui-smoke don't touch, against silent breakage.
+  web-smoke:
+    name: Web render smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        # Playwright pinned to the build version; core is PySide6-free so the
+        # smoke needs only the browser driver + pytest.
+        run: python -m pip install --upgrade pip "pytest==9.1.0" "pytest-timeout==2.4.0" "playwright==1.60.0"
+      - name: Install Chromium
+        run: python -m playwright install chromium --with-deps
+      - name: Render one frame (offline, vendored three.js)
+        run: pytest -q tests/test_web_render_smoke.py --timeout=180
+
   # Fast, reliable runners — these gate the Release.
   build:
     name: Build (${{ matrix.label }})
-    needs: [lint-test, ui-smoke]
+    needs: [lint-test, ui-smoke, web-smoke]
     if: github.event_name != 'pull_request'   # PRs run gates only, not full builds
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45   # PyInstaller + Playwright bundling; fail before the 6h cap
