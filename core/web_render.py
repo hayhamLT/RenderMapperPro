@@ -171,6 +171,17 @@ def ensure_web_chromium(on_log: LogCallback | None = None,
     log("[web] Web render runtime ready.")
 
 
+def _run_ff(cmd: list, timeout: float, what: str):
+    """subprocess.run for ffmpeg with a hard timeout — a stuck/corrupt clip must
+    fail the render, not hang the render thread forever."""
+    try:
+        return subprocess.run(cmd, check=True, capture_output=True, timeout=timeout,
+                              creationflags=subprocess_creation_flags())
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{what} timed out after {int(timeout)}s — the clip may be "
+                           f"corrupt or unreadable.") from exc
+
+
 def is_web_scene(scene_path: str) -> bool:
     return scene_backend(scene_path) is SceneBackend.WEB
 
@@ -384,19 +395,18 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
         if preview_frame > 0:
             idx = max(0, preview_frame - fs)
             log(f"[web] Extracting preview frame from {Path(vp).name}")
-            subprocess.run([ff, "-y", "-i", vp, "-vf", f"select=eq(n\\,{idx})",
-                            "-frames:v", "1", "-fps_mode", "vfr", str(cdir / "f_00000.png")],
-                           check=True, capture_output=True, creationflags=subprocess_creation_flags())
+            _run_ff([ff, "-y", "-i", vp, "-vf", f"select=eq(n\\,{idx})",
+                     "-frames:v", "1", "-fps_mode", "vfr", str(cdir / "f_00000.png")],
+                    180, "Preview frame extraction")
             got = sorted(cdir.glob("*.png"))
             if not got:   # idx past the clip end → fall back to the first frame
-                subprocess.run([ff, "-y", "-i", vp, "-frames:v", "1", str(cdir / "f_00000.png")],
-                               check=True, capture_output=True, creationflags=subprocess_creation_flags())
+                _run_ff([ff, "-y", "-i", vp, "-frames:v", "1", str(cdir / "f_00000.png")],
+                        180, "Preview frame extraction")
                 got = sorted(cdir.glob("*.png"))
             clip_frames[vp], clip_offset[vp] = got, idx
         else:
             log(f"[web] Extracting frames: {Path(vp).name}")
-            subprocess.run([ff, "-y", "-i", vp, str(cdir / "f_%05d.png")],
-                           check=True, capture_output=True, creationflags=subprocess_creation_flags())
+            _run_ff([ff, "-y", "-i", vp, str(cdir / "f_%05d.png")], 1800, "Clip frame extraction")
             clip_frames[vp], clip_offset[vp] = sorted(cdir.glob("*.png")), 0
 
     # 2) Render.
@@ -449,12 +459,18 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                     base64.b64decode(data_url.split(",", 1)[1]))
                 if out_i % 20 == 0:
                     log(f"[web] frame {out_i + 1}/{total}")
+            # Surface any error the page recorded during rendering instead of
+            # silently shipping a partial result.
+            page_err = page.evaluate("window.__error")
+            if page_err:
+                raise RuntimeError(f"web scene reported an error: {page_err}")
         finally:
             browser.close()
 
     rendered = sorted(out_dir.glob("*.png"))
-    if not rendered:
-        raise RuntimeError("Web render produced no frames.")
+    if len(rendered) != total:
+        raise RuntimeError(
+            f"Web render produced {len(rendered)} of {total} expected frame(s) — incomplete.")
 
     # 3) Output: a single PNG for a preview, else a movie or an image sequence.
     out_path = Path(job.output_path).expanduser()
@@ -475,8 +491,7 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
             cmd += _web_video_args(r)           # honour the job's codec + quality
             if suffix in (".mp4", ".mov"):
                 cmd += ["-movflags", "+faststart"]
-        subprocess.run([*cmd, str(out_path)], check=True, capture_output=True,
-                       creationflags=subprocess_creation_flags())
+        _run_ff([*cmd, str(out_path)], 1800, "Movie encode")
         log(f"[web] Wrote {out_path}")
     else:
         seq = out_path if out_path.suffix == "" else out_path.parent
