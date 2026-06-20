@@ -102,13 +102,27 @@ def darken(h: str, t: float) -> str:
 
 
 def _relative_luminance(h: str) -> float:
-    r, g, b = (c / 255.0 for c in _to_rgb(h))
+    """WCAG 2.x relative luminance — sRGB channels are gamma-EXPANDED to linear
+    first (the previous version skipped this, mis-ranking mid-tones like orange)."""
+    def lin(c: float) -> float:
+        c /= 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(c) for c in _to_rgb(h))
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
+def _contrast_ratio(a: str, b: str) -> float:
+    la, lb = _relative_luminance(a), _relative_luminance(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
 def best_text_on(bg: str) -> str:
-    """Pick black or white text for readable contrast on a background."""
-    return "#0b0e14" if _relative_luminance(bg) > 0.55 else "#ffffff"
+    """Pick the foreground (near-black or white) with the higher WCAG contrast on
+    ``bg`` — correct for any accent. The old luminance>0.55 threshold returned
+    white on the brand orange at only 2.77:1 (fails AA); this picks ~7:1 instead."""
+    black, white = "#0b0e14", "#ffffff"
+    return black if _contrast_ratio(black, bg) >= _contrast_ratio(white, bg) else white
 
 
 # ── Base palettes ────────────────────────────────────────────────────────────

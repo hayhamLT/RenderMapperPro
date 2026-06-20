@@ -333,9 +333,12 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
     exposure = float(getattr(r, "color_exposure", 0.0) or 0.0)
     do_burn = bool(getattr(r, "burn_in", False))
 
-    # Single-frame preview vs. full render.
+    # Single-frame preview vs. full render. frame_step decimates (renders every
+    # Nth frame), matching Blender/C4D — the kept frames are muxed at the same fps,
+    # so a step > 1 produces the same faster-motion result on every backend.
+    frame_step = max(1, int(getattr(r, "frame_step", 1) or 1))
     preview_frame = int(getattr(job, "preview_frame", 0) or 0)
-    out_frames = [preview_frame] if preview_frame > 0 else list(range(fs, fe + 1))
+    out_frames = [preview_frame] if preview_frame > 0 else list(range(fs, fe + 1, frame_step))
     total = len(out_frames)
 
     work = Path(tempfile.mkdtemp(prefix="webrender_"))

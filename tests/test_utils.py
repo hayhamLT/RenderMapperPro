@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from core.utils import (
+    atomic_write_text,
     expand_output_tokens,
     ext_for_format,
     is_cloud_placeholder,
@@ -11,6 +12,29 @@ from core.utils import (
     slugify_filename,
     terminate_process,
 )
+
+
+def test_atomic_write_creates_and_replaces(tmp_path):
+    p = tmp_path / "sub" / "f.json"
+    atomic_write_text(p, '{"a": 1}')        # also creates the parent dir
+    assert p.read_text() == '{"a": 1}'
+    atomic_write_text(p, '{"a": 2}')        # replaces in place
+    assert p.read_text() == '{"a": 2}'
+    assert not (p.parent / "f.json.tmp").exists()   # temp cleaned up by rename
+
+
+def test_atomic_write_mode(tmp_path):
+    p = tmp_path / "secret.json"
+    atomic_write_text(p, "x", mode=0o600)
+    assert (os.stat(p).st_mode & 0o777) == 0o600
+
+
+def test_atomic_write_no_partial_on_replace(tmp_path):
+    # The original survives intact until the new content is fully written.
+    p = tmp_path / "f.txt"
+    atomic_write_text(p, "original")
+    atomic_write_text(p, "x" * 100000)
+    assert p.read_text() == "x" * 100000
 
 
 class _FakeStat:

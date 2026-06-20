@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from app_window.base import _WindowMembers
 from core.logging_setup import get_logger
 from core.models import RenderOptions
+from core.utils import atomic_write_text
 
 _log = get_logger(__name__)
 
@@ -35,7 +36,7 @@ class PresetMixin(_WindowMembers):
             p = PRESETS_DIR / f"{safe}{PRESET_EXT}"
             # A preset is a reusable render recipe (settings only) — not the
             # scene/clips/queue. Use Profile → Save Project for the full setup.
-            p.write_text(json.dumps(self.render_panel.settings_dict(), indent=2))
+            atomic_write_text(p, json.dumps(self.render_panel.settings_dict(), indent=2))
             self._refresh_preset_browser()
             self._show_toast(f"Preset “{safe}” saved", "success")
         except Exception as exc:

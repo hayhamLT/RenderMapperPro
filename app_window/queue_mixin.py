@@ -173,7 +173,6 @@ class QueueMixin(_WindowMembers):
         self.queue_panel.set_jobs(self._jobs, self._job_etas())
         if self._active_job_id is not None:
             self.queue_panel.select_job(self._active_job_id)
-        self._update_health()
         self._update_status_bar()
 
     def _on_queue_job_selected(self, job_id: int) -> None:
