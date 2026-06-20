@@ -36,3 +36,15 @@ The user interface is built with **PySide6** (the official Python bindings for
 the Qt framework), distributed under the **GNU Lesser General Public License
 (LGPL) v3**. See https://www.qt.io/licensing and
 https://www.gnu.org/licenses/lgpl-3.0.html
+
+## three.js
+
+The headless web-render backend bundles **three.js** (r171) — the core module
+plus the `GLTFLoader`, `RoomEnvironment`, and `BufferGeometryUtils` add-ons,
+vendored under `assets/vendor/three/` so renders don't depend on a live CDN.
+three.js is distributed under the **MIT License**, Copyright © 2010–2025
+three.js authors. See https://github.com/mrdoob/three.js/blob/dev/LICENSE
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction… THE SOFTWARE IS PROVIDED "AS IS".

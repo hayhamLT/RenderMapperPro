@@ -3,11 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <style>html, body { margin: 0; background: #000; overflow: hidden; }</style>
+  <!-- three.js is VENDORED under assets/vendor/three (bundled by PyInstaller), so a
+       render never depends on a live CDN — offline machines and farm/Deadline
+       nodes work. Pinned to 0.171.0; refresh via tools/vendor_three.py. -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+      "three": "./vendor/three/three.module.js",
+      "three/addons/": "./vendor/three/addons/"
     }
   }
   </script>
