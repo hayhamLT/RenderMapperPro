@@ -137,7 +137,7 @@ def _dark(accent: str) -> Palette:
         border_strong="#3c424d",
         text="#e6e8ec",
         text_muted="#9aa1ad",
-        text_faint="#6b7280",
+        text_faint="#828b99",   # lightened to clear WCAG AA (4.5:1) for hints/placeholders
         accent=accent,
         accent_hover=lighten(accent, 0.12),
         accent_text=best_text_on(accent),
@@ -145,8 +145,8 @@ def _dark(accent: str) -> Palette:
         neutral_btn_hover="#343a45",
         success="#3fb950",
         warning="#d8a23a",
-        danger="#f15a4f",
-        danger_hover="#f5736a",
+        danger="#f4716a",       # nudged up to clear WCAG AA (was 4.43:1)
+        danger_hover="#f6857f",
         info="#58a6ff",
         selection=mix(accent, "#15171c", 0.62),
         disabled_bg="#22262e",
@@ -256,6 +256,20 @@ def stylesheet(p: Palette) -> str:
         border-color: {p.border};
     }}
     QLineEdit::placeholder {{ color: {p.text_faint}; }}
+
+    /* ── Keyboard focus — a visible accent ring on every interactive widget.
+       On a fully-styled dark Qt app the OS focus rect is suppressed, so without
+       this, Tab-ing through the window shows nothing (keyboard users are blind). */
+    QPushButton:focus, QToolButton:focus, QListWidget:focus, QListView:focus,
+    QTableWidget:focus, QTableView:focus, QTreeView:focus, QCheckBox:focus,
+    QRadioButton:focus, QTabBar::tab:focus {{
+        border: 1px solid {p.accent};
+        outline: 1px solid {p.accent};
+        outline-offset: 1px;
+    }}
+    QListWidget::item:focus, QTableView::item:focus {{
+        border: 1px solid {p.accent};
+    }}
 
     QComboBox::drop-down {{
         subcontrol-origin: padding;
