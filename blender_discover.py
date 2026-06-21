@@ -90,6 +90,26 @@ def discover_settings() -> dict:
             s["gamma"] = float(vs.gamma)
     except Exception as exc:  # never let settings probing break discovery
         log(f"settings probe warning: {exc}")
+    # Lighting: a scene with no lamp AND no lit world renders everything non-
+    # emissive black in EEVEE/Cycles (common after importing a glTF/FBX that
+    # carried no lights). The app warns before such a render. Emissive screens
+    # still show — this is about the rest of the scene going dark.
+    try:
+        has_lamp = any(o.type == "LIGHT" for o in bpy.data.objects)
+        world_lit = False
+        w = bpy.context.scene.world
+        if w is not None:
+            if getattr(w, "use_nodes", False) and getattr(w, "node_tree", None):
+                bg = w.node_tree.nodes.get("Background")
+                if bg is not None:
+                    strength = float(bg.inputs["Strength"].default_value)
+                    color = bg.inputs["Color"].default_value
+                    world_lit = strength > 0.0 and any(c > 0.001 for c in color[:3])
+            else:
+                world_lit = any(c > 0.001 for c in tuple(getattr(w, "color", (0.0, 0.0, 0.0)))[:3])
+        s["has_lighting"] = bool(has_lamp or world_lit)
+    except Exception as exc:
+        log(f"lighting probe warning: {exc}")
     return s
 
 

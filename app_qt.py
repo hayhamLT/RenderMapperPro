@@ -335,6 +335,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._last_session: dict = {}      # snapshot of the previous session, for Reopen Last Session
         self._material_aspects: dict = {}   # material → screen aspect (from discovery)
         self._aspect_warned: set = set()    # (material, clip) pairs already warned about
+        # Render-preflight inputs from the last scan (None = unknown).
+        self._scene_has_lighting: bool | None = None       # Blender: any lamp/world light?
+        self._redshift_materials: set | None = None        # C4D: materials that take a clip
+        self._scanned_scene: str = ""                      # the scene those two describe
         self._autorender_start = False        # auto-start vs queue-only
         self._last_report_path = ""
         self._last_html_report_path = ""
@@ -1805,6 +1809,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
     def _on_discovery(self, materials: list, cameras: list, settings: dict) -> None:
         self._material_aspects = dict(settings.get("material_aspects") or {})
+        # Render-preflight inputs (None = unknown / not reported for this backend).
+        self._scene_has_lighting = settings.get("has_lighting")
+        rs = settings.get("redshift_materials")
+        self._redshift_materials = set(rs) if rs is not None else None
+        self._scanned_scene = self.scene_panel.scene_edit.text().strip()
         self._aspect_warned.clear()
         clean_materials = [str(m).strip() for m in materials if str(m).strip()]
         clean_cameras = [str(c).strip() for c in cameras if str(c).strip()]
@@ -2355,6 +2364,35 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
     def _disk_space_warnings(self, pending: list[RenderJob]) -> list[str]:
         return disk_space_warnings(pending)   # logic in core.jobs (UI-free, tested)
 
+    def _render_quality_warnings(self, pending: list[RenderJob]) -> list[str]:
+        """Non-blocking heads-up that a render will likely look wrong, from the last
+        scan: a Blender scene with no lighting renders non-emissive geometry black,
+        and a C4D clip only shows on a Redshift node material. Only the currently-
+        scanned scene is checked — that's the one we have discovery info for."""
+        warns: list[str] = []
+        scanned = (self._scanned_scene or "").strip()
+        using = [j for j in pending if scanned and (j.scene_path or "").strip() == scanned]
+        if not using:
+            return warns
+        if is_c4d_scene(scanned):
+            if self._redshift_materials is not None:
+                for j in using:
+                    bad = sorted({a.material_name for a in j.material_assignments
+                                  if a.material_name and a.video_path
+                                  and a.material_name not in self._redshift_materials})
+                    if bad:
+                        warns.append(
+                            f"“{j.label or f'Job {j.id}'}”: {', '.join(bad)} isn't a Redshift "
+                            "material — its clip won't appear. Convert it to a Redshift node "
+                            "material in Cinema 4D.")
+        elif self._scene_has_lighting is False and any(
+                not uses_web_backend(scanned, j.render_options.engine if j.render_options else "")
+                for j in using):
+            warns.append(
+                f"“{Path(scanned).name}” has no lights or world lighting — non-emissive geometry "
+                "will render black. Add a light (or world lighting) in the scene.")
+        return warns
+
     def _recent_spf_for_scene(self, scene_path: str) -> float:
         """Most-recent measured sec/frame for this scene, from history (0 if none)."""
         name = Path(scene_path).name
@@ -2473,31 +2511,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             )
             return
 
-        # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) renders in a
-        # headless browser (no Blender/c4dpy); everything else via Blender.
-        _scene_now = self.scene_panel.scene_edit.text().strip()
-        _is_c4d = is_c4d_scene(_scene_now)
-        # A .glb uses Blender unless three.js is the chosen engine.
-        _is_web = uses_web_backend(_scene_now, self.render_panel.engine_value())
-        if _is_web:
-            c4dpy = ""
-            blender = ""
-        elif _is_c4d:
-            c4dpy = self._ensure_c4dpy(interactive=True)
-            if not c4dpy:
-                return
-            blender = self._blender_path
-        else:
-            c4dpy = ""
-            blender = self._ensure_blender(interactive=True) or ""
-            if not blender:
-                return
-
-        errs = self._preflight()
-        if errs:
-            QMessageBox.critical(self, "Preflight Failed", "\n".join(errs))
-            return
-
+        # Which jobs are we actually rendering? Each carries its OWN scene, so the
+        # render backends are resolved from THESE jobs — a queue can mix .blend /
+        # .glb / .c4d, and each needs its own executable. (Picking the backend from
+        # just the active scene left other-backend jobs with an empty/wrong one,
+        # so a queued .c4d would wrongly fall through to Blender, etc.)
         if only_job_ids is not None:
             selected_ids = set(only_job_ids)
         else:
@@ -2505,6 +2523,33 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         pending = [j for j in self._jobs if j.id in selected_ids and j.status != "success"]
         if not pending:
             QMessageBox.information(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
+            return
+
+        # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) in a headless
+        # browser (no Blender/c4dpy); everything else via Blender.
+        def _job_engine(j: RenderJob) -> str:
+            return j.render_options.engine if j.render_options else ""
+        _needs_c4d = any(is_c4d_scene(j.scene_path) for j in pending)
+        _needs_blender = any(
+            not is_c4d_scene(j.scene_path) and not uses_web_backend(j.scene_path, _job_engine(j))
+            for j in pending)
+        if _needs_c4d:
+            c4dpy = self._ensure_c4dpy(interactive=True)
+            if not c4dpy:
+                return
+        else:
+            c4dpy = ""
+        if _needs_blender:
+            blender = self._ensure_blender(interactive=True) or ""
+            if not blender:
+                return
+        else:
+            blender = ""
+        _is_c4d = _needs_c4d   # the c4d worker script is resolved from this below
+
+        errs = self._preflight()
+        if errs:
+            QMessageBox.critical(self, "Preflight Failed", "\n".join(errs))
             return
 
         # Claim the rendering state NOW — the modal dialogs below spin the Qt event
@@ -2516,7 +2561,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # the output disk looks too small, or a Deadline pool/group is unknown.
         warnings = (self._frame_range_warnings(pending)
                     + self._disk_space_warnings(pending)
-                    + self._deadline_warnings(pending))
+                    + self._deadline_warnings(pending)
+                    + self._render_quality_warnings(pending))
         if warnings:
             ans = QMessageBox.warning(
                 self, "Frame Range Warning",
@@ -2542,7 +2588,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 f"damaged. Reinstall Render Mapper Pro.\n\nDetails: {exc}")
             self._is_rendering = False
             return
-        _ffmpeg = (find_ffmpeg_tool("ffmpeg") or "") if _is_c4d else ""
+        # Bundled ffmpeg path for the workers: C4D always muxes its movie with it,
+        # and the Blender worker needs it for its PNG-sequence movie fallback when
+        # Blender's own FFMPEG writer is unavailable (version-dependent).
+        _ffmpeg = find_ffmpeg_tool("ffmpeg") or ""
 
         # Live preview: one temp JPEG the worker rewrites each frame.
         self._preview_path = ""
@@ -2597,7 +2646,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 preview_path=self._preview_path if not j.use_deadline else "",
                 audio_paths=self._audio_paths_for(audio_src),
                 material_assignments=asn,
-                ffmpeg_path=(_ffmpeg if is_c4d_scene(j.scene_path) else ""),
+                ffmpeg_path=_ffmpeg,
                 force_submit=self._c4d_force_submit,
             )
             entries.append({"id": j.id, "label": j.label, "cfg": cfg})

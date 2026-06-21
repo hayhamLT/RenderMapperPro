@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -15,6 +16,74 @@ VIDEO_MAPPING_MODE_EMISSION = "EMISSION_FULL_BRIGHT"
 VIDEO_MAPPING_MODE_BASE_COLOR = "BASE_COLOR_ALPHA"
 
 _RENDER_TEMP_DIR: Path | None = None
+
+# Set when Blender can't enable its internal FFMPEG movie writer (the 5.x
+# file_format setter rejects 'FFMPEG' and the ctypes byte-poke fails on some
+# builds). We then render a PNG sequence and mux it to the movie ourselves with
+# the bundled ffmpeg — the same approach the web/C4D backends already use — so a
+# movie render never hard-fails on a Blender-version quirk.
+_MOVIE_MUX: dict | None = None
+
+
+def _worker_ffmpeg(config: dict) -> str:
+    """The ffmpeg binary for the movie fallback: the bundled path the app passes,
+    else the copy beside this worker (vendor/ffmpeg/<platform>/), else PATH."""
+    p = str(config.get("ffmpeg_path", "")).strip()
+    if p and Path(p).exists():
+        return p
+    plat = {"darwin": "darwin", "win32": "windows"}.get(sys.platform, "linux")
+    arch = "arm64" if (os.uname().machine if hasattr(os, "uname") else "").lower() in ("arm64", "aarch64") else "x64"
+    for cand in (Path(__file__).resolve().parent / "vendor" / "ffmpeg" / f"{plat}-{arch}"
+                 / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"),):
+        if cand.exists():
+            return str(cand)
+    return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _audio_av_args(audio_paths, video_filter):
+    """ffmpeg (audio_inputs, av_out) to mux source-clip audio onto a movie whose
+    video is input 0 — kept in step with core.utils.ffmpeg_movie_av_args (this
+    worker is standalone under Blender's Python and can't import core)."""
+    paths = [str(p) for p in (audio_paths or []) if p]
+    if not paths:
+        return [], (["-vf", video_filter] if video_filter else [])
+    audio_inputs = []
+    for p in paths:
+        audio_inputs += ["-i", p]
+    vchain = f"[0:v]{video_filter}[v]" if video_filter else "[0:v]null[v]"
+    if len(paths) == 1:
+        fc = f"{vchain};[1:a]anull[a]"
+    else:
+        amix = "".join(f"[{i + 1}:a]" for i in range(len(paths)))
+        fc = f"{vchain};{amix}amix=inputs={len(paths)}:duration=longest[a]"
+    return audio_inputs, ["-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+                          "-c:a", "aac", "-b:a", "192k", "-shortest"]
+
+
+def _mux_sequence_to_movie(ffmpeg, frames_dir, fps, out_file, out_fmt, codec,
+                           quality, audio_paths=None) -> None:
+    """Assemble rendered PNG frames (any zero-padding) into a movie with the chosen
+    codec/quality, muxing unmuted source-clip audio if present. Raises on failure."""
+    crf = {"LOSSLESS": "0", "HIGH": "18", "MEDIUM": "23", "LOW": "28", "LOWEST": "32"}
+    Path(out_file).parent.mkdir(parents=True, exist_ok=True)
+    # Force even dimensions — H.264/H.265 with yuv420p reject odd width/height.
+    even = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    audio_inputs, av_out = _audio_av_args(audio_paths, even)
+    # glob input — padding-agnostic, so Blender's frame numbering can't break it.
+    cmd = [ffmpeg, "-y", "-framerate", str(fps or 30),
+           "-pattern_type", "glob", "-i", os.path.join(frames_dir, "*.png"),
+           *audio_inputs, *av_out]
+    if str(codec).upper() == "PRORES" or str(out_fmt).upper() == "QUICKTIME":
+        cmd += ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+    else:
+        cmd += ["-c:v", "libx265" if str(codec).upper() == "H265" else "libx264",
+                "-crf", crf.get(str(quality).upper(), "18"), "-pix_fmt", "yuv420p"]
+    cmd += ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+            "-movflags", "+faststart", str(out_file)]
+    log(f"[fallback] Muxing PNG sequence -> {out_file}")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    if not (Path(out_file).exists() and Path(out_file).stat().st_size > 0):
+        raise RuntimeError(f"ffmpeg failed to assemble the movie: {(r.stderr or '')[-600:]}")
 
 
 def _render_temp_dir() -> Path:
@@ -504,64 +573,29 @@ def configure_render(config: dict) -> None:
 
     output_format = str(render.get("output_format", "MPEG4")).upper()
     codec = str(render.get("codec", "H264")).upper()
-    supported_file_formats = {
-        item.identifier for item in scene.render.image_settings.bl_rna.properties["file_format"].enum_items
-    }
-
     if output_format in {"MPEG4", "QUICKTIME"}:
-        if "FFMPEG" not in supported_file_formats:
-            raise RuntimeError(
-                "FFMPEG movie output unavailable in this Blender runtime. "
-                f"Requested profile={output_format}/{codec}. "
-                f"Supported image file formats: {sorted(supported_file_formats)}"
-            )
-        try:
-            scene.render.image_settings.file_format = "FFMPEG"
-        except (TypeError, AttributeError):
-            # Blender 5.x bug: the Python property setter for file_format rejects
-            # 'FFMPEG' even when the binary supports it and enum_items lists it.
-            # Work around it by writing the enum's integer value straight to the
-            # C-level imtype byte. The value is read dynamically from the RNA enum
-            # (never hardcoded) so it survives Blender enum/layout changes.
-            blender_version = tuple(bpy.app.version[:2])
-            if blender_version >= (4, 0):
-                _fmt = scene.render.image_settings
-                try:
-                    ffmpeg_val = _fmt.bl_rna.properties["file_format"].enum_items["FFMPEG"].value
-                    ctypes.c_int8.from_address(_fmt.as_pointer()).value = ffmpeg_val
-                except Exception as exc:
-                    raise RuntimeError(
-                        "Could not enable FFMPEG movie output on Blender "
-                        f"{'.'.join(map(str, bpy.app.version))}: {exc}") from exc
-                # Read back: the C struct must now report FFMPEG, confirming the
-                # poke took. A mismatch means the enum layout changed — fail loud
-                # instead of silently rendering to the wrong format.
-                if _fmt.file_format != "FFMPEG":
-                    raise RuntimeError(
-                        "FFMPEG movie output could not be enabled on Blender "
-                        f"{'.'.join(map(str, bpy.app.version))} (imtype byte-poke did "
-                        f"not take; file_format is {_fmt.file_format!r}).") from None
-        except Exception as exc:
-            current_supported_formats = {
-                item.identifier
-                for item in scene.render.image_settings.bl_rna.properties["file_format"].enum_items
+        # Assemble the movie ourselves: render a lossless PNG sequence, then encode
+        # it with the bundled ffmpeg. Richer than Blender's internal writer
+        # (H.265 / ProRes, proper rec.709 tagging), consistent with the C4D + web
+        # backends, and immune to Blender's version-fragile FFMPEG-format setter
+        # (the Python setter rejects 'FFMPEG' on 5.x and the imtype byte-poke
+        # silently stopped taking on recent builds). Prepare/export mode renders
+        # nothing here, so it just leaves the .blend on a PNG sequence.
+        global _MOVIE_MUX
+        scene.render.image_settings.file_format = "PNG"
+        if str(config.get("prepared_blend_path", "")).strip():
+            log("Movie output: the prepared .blend will render a PNG sequence — "
+                "assemble it to a movie with ffmpeg on the farm.")
+        else:
+            _MOVIE_MUX = {
+                "format": output_format,
+                "codec": str(render.get("video_codec", "")).strip().upper() or codec,
+                "fps": int(render["fps"]),
+                "quality": str(render.get("video_quality", "HIGH")).strip().upper() or "HIGH",
+                "seq_dir": Path(tempfile.mkdtemp(prefix="blender-movieseq-")),
             }
-            raise RuntimeError(
-                "Blender rejected movie output format FFMPEG at runtime. "
-                f"Requested profile={output_format}/{codec}. "
-                f"Current file_format={scene.render.image_settings.file_format}. "
-                f"Supported image file formats now: {sorted(current_supported_formats)}. "
-                f"Original error: {exc}"
-            ) from exc
-        scene.render.ffmpeg.format = output_format
-        # Optional codec override (e.g. H265); blank keeps the profile default.
-        codec_override = str(render.get("video_codec", "")).strip().upper()
-        scene.render.ffmpeg.codec = codec_override or codec
-        crf = str(render.get("video_quality", "HIGH")).strip().upper() or "HIGH"
-        try:
-            scene.render.ffmpeg.constant_rate_factor = crf
-        except Exception:
-            scene.render.ffmpeg.constant_rate_factor = "HIGH"
+            log("Movie output: rendering a PNG sequence and encoding to the movie "
+                "with the bundled ffmpeg.")
     elif output_format in {"PNG", "OPEN_EXR"}:
         scene.render.image_settings.file_format = output_format
     else:
@@ -648,7 +682,12 @@ def configure_render(config: dict) -> None:
     else:
         actual_output_path = original_output_path
 
-    if output_format in {"PNG", "OPEN_EXR"}:
+    if _MOVIE_MUX is not None:
+        # Movie fallback: render the PNG sequence to a temp dir; main() muxes it
+        # to the real movie path (actual_output_path) once the render completes.
+        _MOVIE_MUX["target"] = str(actual_output_path)
+        scene.render.filepath = str(_MOVIE_MUX["seq_dir"]) + os.sep
+    elif output_format in {"PNG", "OPEN_EXR"}:
         actual_output_path.mkdir(parents=True, exist_ok=True)
         scene.render.filepath = str(actual_output_path) + os.sep
     else:
@@ -806,6 +845,21 @@ def main() -> None:
 
     log("Starting headless animation render")
     bpy.ops.render.render(animation=True)
+
+    # Movie fallback: Blender just rendered a PNG sequence because its FFMPEG
+    # writer was unavailable. Assemble it into the requested movie (with audio)
+    # using the bundled ffmpeg, then drop the temp sequence.
+    if _MOVIE_MUX is not None:
+        seq_dir = _MOVIE_MUX["seq_dir"]
+        frames = sorted(Path(seq_dir).glob("*.png"))
+        if not frames:
+            raise RuntimeError("Movie fallback: Blender wrote no frames to assemble.")
+        _mux_sequence_to_movie(
+            _worker_ffmpeg(config), str(seq_dir), _MOVIE_MUX["fps"],
+            _MOVIE_MUX["target"], _MOVIE_MUX["format"], _MOVIE_MUX["codec"],
+            _MOVIE_MUX["quality"], audio_paths=config.get("audio_paths") or [])
+        shutil.rmtree(seq_dir, ignore_errors=True)
+
     log("Render finished successfully")
 
     original_output_path = Path(config["output_path"]).expanduser().resolve()
