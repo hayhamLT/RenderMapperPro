@@ -26,6 +26,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QPainter,
     QPixmap,
+    QShortcut,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -320,8 +321,16 @@ class ScenePanel(QWidget):
         self.mat_list.itemEntered.connect(self._on_mat_entered)
         self.mat_list.viewport().installEventFilter(self)
         self.mat_list.scene_dropped.connect(self._on_scene_file_dropped)
+        # Direct manipulation: drag a clip onto a material to map it; double-click
+        # either side of a selected pair to map them.
+        self.mat_list.clip_dropped.connect(self._map_pair)
+        self.mat_list.itemDoubleClicked.connect(lambda *_: self._map_selected())
         self.mat_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.mat_list.customContextMenuRequested.connect(self._show_material_context_menu)
+        # ⌘L links the selected material + clip (Qt maps Ctrl→⌘ on macOS).
+        _map_sc = QShortcut(QKeySequence("Ctrl+L"), self)
+        _map_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        _map_sc.activated.connect(self._map_selected)
         left.addWidget(self.mat_search)
         left.addWidget(self.mat_list)
 
@@ -374,6 +383,7 @@ class ScenePanel(QWidget):
         self.vid_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.vid_list.customContextMenuRequested.connect(self._show_video_context_menu)
         self.vid_list.currentItemChanged.connect(lambda *_: self._recompute_cross_highlight())
+        self.vid_list.itemDoubleClicked.connect(lambda *_: self._map_selected())
         self.vid_list.itemEntered.connect(self._on_vid_entered)
         self.vid_list.viewport().installEventFilter(self)
         self.vid_list.files_dropped.connect(self._add_video_paths)
@@ -568,14 +578,12 @@ class ScenePanel(QWidget):
         self.videos_changed.emit(list(self._videos))
         self.assignments_changed.emit(list(self._assignments))
 
-    def _map_selected(self) -> None:
-        mat_item = self.mat_list.currentItem()
-        vid_item = self.vid_list.currentItem()
-        if mat_item is None or vid_item is None:
-            return
-        material = mat_item.text()
-        video = vid_item.data(Qt.ItemDataRole.UserRole) or vid_item.text()
-        if str(video).startswith("__add_video__"):
+    def _map_pair(self, material: str, video: str) -> None:
+        """Map a clip onto a material (create or replace its assignment). Shared by
+        the link button, double-click, the ⌘L shortcut, and drag-clip-onto-material."""
+        material = (material or "").strip()
+        video = str(video or "")
+        if not material or not video or video.startswith("__add_video__"):
             return
         replacement = MaterialVideoAssignment(material, video, VIDEO_MAPPING_MODE_EMISSION)
         for i, a in enumerate(self._assignments):
@@ -586,6 +594,14 @@ class ScenePanel(QWidget):
             self._assignments.append(replacement)
         self._refresh_lists()
         self.assignments_changed.emit(list(self._assignments))
+
+    def _map_selected(self) -> None:
+        mat_item = self.mat_list.currentItem()
+        vid_item = self.vid_list.currentItem()
+        if mat_item is None or vid_item is None:
+            return
+        video = vid_item.data(Qt.ItemDataRole.UserRole) or vid_item.text()
+        self._map_pair(mat_item.text(), video)
 
     def _unmap_selected_material(self) -> None:
         mat_item = self.mat_list.currentItem()

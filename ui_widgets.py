@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -248,20 +248,40 @@ class _ImageView(QWidget):
         painter.drawPixmap(0, 0, self._pm)
 
 
+# Mime type carrying dragged clip path(s), so a clip can be dragged out of the
+# video list and dropped onto a material to map it (distinct from a Finder file
+# drop, which arrives as text/uri-list).
+CLIP_MIME = "application/x-rmp-clip"
+
+
 class VideoListWidget(QListWidget):
     files_dropped = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        # Disable Qt's own drag-drop handling so external Finder drops
-        # reach our custom event filter on the viewport instead.
-        self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        # External Finder drops reach our viewport event filter; DragOnly makes
+        # this list a drag SOURCE (never an internal drop target) so a clip can be
+        # dragged onto a material row to map it.
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.setDragEnabled(True)
         self.setAcceptDrops(False)
         self.setMouseTracking(True)
         vp = self.viewport()
         vp.setMouseTracking(True)
         vp.setAcceptDrops(True)
         vp.installEventFilter(self)
+
+    def mimeData(self, items):  # type: ignore[override]
+        """Carry the dragged clip path(s) for a drop onto a material."""
+        md = super().mimeData(items)
+        paths = [str(it.data(ROLE_VIDEO_PATH)) for it in items
+                 if it.data(ROLE_VIDEO_PATH)
+                 and not str(it.data(ROLE_VIDEO_PATH)).startswith("__add_video__")]
+        if paths:
+            joined = "\n".join(paths)
+            md.setText(joined)
+            md.setData(CLIP_MIME, QByteArray(joined.encode("utf-8")))
+        return md
 
     def _update_badge_hover(self, pos) -> None:
         """Track whether the cursor is over an audio badge and tell the delegate
@@ -380,6 +400,7 @@ class MaterialListWidget(QListWidget):
     drag-drop hint while empty."""
 
     scene_dropped = Signal(str)
+    clip_dropped = Signal(str, str)   # (material_name, clip_path) — drag a clip here to map it
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -397,19 +418,53 @@ class MaterialListWidget(QListWidget):
                     return str(p)
         return ""
 
+    @staticmethod
+    def _clip_path(event) -> str:
+        md = event.mimeData()
+        if md and md.hasFormat(CLIP_MIME):
+            raw = bytes(md.data(CLIP_MIME).data()).decode("utf-8", "ignore")
+            for line in raw.splitlines():
+                if line.strip():
+                    return line.strip()
+        return ""
+
+    def _item_at(self, event):
+        try:
+            pos = event.position().toPoint()
+        except Exception:
+            pos = event.pos()
+        return self.itemAt(pos)
+
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        if self._scene_path(event):
+        if self._clip_path(event) or self._scene_path(event):
             event.acceptProposedAction()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if self._clip_path(event):
+            it = self._item_at(event)
+            if it is not None:
+                self.setCurrentItem(it)   # highlight the material the clip will map to
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
         if self._scene_path(event):
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
+        clip = self._clip_path(event)
+        if clip:
+            it = self._item_at(event)
+            if it is not None:
+                self.clip_dropped.emit(it.text(), clip)
+                event.acceptProposedAction()
+                return
+            event.ignore()
+            return
         path = self._scene_path(event)
         if path:
             self.scene_dropped.emit(path)
