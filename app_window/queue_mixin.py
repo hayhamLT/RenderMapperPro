@@ -78,6 +78,7 @@ class QueueMixin(_WindowMembers):
         job.target_camera = self.scene_panel.camera_combo.currentText()
         job.output_input = self.render_panel.output_edit.text().strip()
         job.output_profile = self.render_panel.profile_combo.currentText()
+        job.extra_output_profiles = self.render_panel.extra_output_profiles()
         job.render_options = self.render_panel.render_options()
         job.safe_mode = self.render_panel.safe_mode_cb.isChecked()
         job.use_deadline = self.deadline_panel.use_dl_cb.isChecked()
@@ -254,6 +255,7 @@ class QueueMixin(_WindowMembers):
             pidx = self.render_panel.profile_combo.findText(job.output_profile or "H264 MP4")
             if pidx >= 0:
                 self.render_panel.profile_combo.setCurrentIndex(pidx)
+            self.render_panel.set_extra_output_profiles(getattr(job, "extra_output_profiles", []))
 
             self.render_panel.output_edit.setText(job.output_input or "")
         finally:

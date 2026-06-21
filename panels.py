@@ -1225,6 +1225,21 @@ class RenderPanel(QWidget):
         self.profile_combo.addItems(list(OUTPUT_PROFILES.keys()))
         format_col.addWidget(self.profile_combo)
 
+        # Extra deliverables produced from the SAME render (e.g. a ProRes master
+        # plus an H.264 review proxy) — transcoded from the primary output, so one
+        # render emits multiple formats without re-rendering the 3D scene.
+        self.extra_output_checks: dict[str, QCheckBox] = {}
+        _movie_profiles = [n for n, (fmt, _c) in OUTPUT_PROFILES.items() if fmt in ("MPEG4", "QUICKTIME")]
+        if _movie_profiles:
+            also = QLabel("Also export:")
+            also.setObjectName("FieldLabel")
+            format_col.addWidget(also)
+            for name in _movie_profiles:
+                cb = QCheckBox(name)
+                cb.setToolTip(f"Also produce a {name}, transcoded from the primary render")
+                self.extra_output_checks[name] = cb
+                format_col.addWidget(cb)
+
         ro_row.addLayout(renderer_col, 1)
         ro_row.addLayout(format_col, 1)
         root.addLayout(ro_row)
@@ -1550,6 +1565,16 @@ class RenderPanel(QWidget):
 
     def engine_values(self) -> list[str]:
         return [str(self.engine_combo.itemData(i)) for i in range(self.engine_combo.count())]
+
+    def extra_output_profiles(self) -> list[str]:
+        """Checked 'also export' profiles, minus the primary (no self-transcode)."""
+        primary = self.profile_combo.currentText()
+        return [n for n, cb in self.extra_output_checks.items() if cb.isChecked() and n != primary]
+
+    def set_extra_output_profiles(self, profiles: list[str] | None) -> None:
+        wanted = set(profiles or [])
+        for n, cb in self.extra_output_checks.items():
+            cb.setChecked(n in wanted)
 
     def set_renderer(self, is_c4d: bool, is_web: bool = False) -> None:
         """Adapt the settings to the active renderer so every visible control is
