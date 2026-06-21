@@ -1411,18 +1411,18 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             self.resizeDocks([rd, dl], [480, 320], Qt.Orientation.Vertical)
             self.resizeDocks([q, pv, lg], [360, 320, 180], Qt.Orientation.Vertical)
         elif preset == "focus":
-            # Big render-monitoring layout: Scene+Render left, Queue+Preview
-            # large on the right, Logs underneath.
+            # Big render-monitoring layout: Scene+Render left; on the right the
+            # Queue and the live Preview are STACKED (both visible at once) above
+            # the Logs — you watch the batch and the frame together.
             self.splitDockWidget(sc, q, Qt.Orientation.Horizontal)
             self.splitDockWidget(sc, rd, Qt.Orientation.Vertical)
-            self.splitDockWidget(q, lg, Qt.Orientation.Vertical)
+            self.splitDockWidget(q, pv, Qt.Orientation.Vertical)
+            self.splitDockWidget(pv, lg, Qt.Orientation.Vertical)
             self.tabifyDockWidget(rd, dl)
             self.tabifyDockWidget(rd, pr)
-            self.tabifyDockWidget(q, pv)
             rd.raise_()
-            pv.raise_()
             self.resizeDocks([sc, q], [430, 870], Qt.Orientation.Horizontal)
-            self.resizeDocks([q, lg], [640, 220], Qt.Orientation.Vertical)
+            self.resizeDocks([q, pv, lg], [520, 380, 160], Qt.Orientation.Vertical)
         elif preset == "setup":
             # Configuration-focused: Scene + Render Settings side by side and
             # large; the render/monitor docks tabbed along the bottom.
@@ -1449,18 +1449,18 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 self.tabifyDockWidget(rd, d)
             rd.raise_()
             self.resizeDocks([sc, rd], [430, 1040], Qt.Orientation.Horizontal)
-        else:  # "default" — three columns
+        else:  # "default" — Scene | Render | (Queue over Live Preview over Logs)
             self.splitDockWidget(sc, rd, Qt.Orientation.Horizontal)
             self.splitDockWidget(rd, q, Qt.Orientation.Horizontal)
             self.splitDockWidget(rd, pr, Qt.Orientation.Vertical)
-            self.splitDockWidget(q, lg, Qt.Orientation.Vertical)
+            self.splitDockWidget(q, pv, Qt.Orientation.Vertical)   # queue on top, live frame below it
+            self.splitDockWidget(pv, lg, Qt.Orientation.Vertical)  # logs tucked under the preview
             self.tabifyDockWidget(rd, dl)
-            self.tabifyDockWidget(q, pv)
             rd.raise_()
             q.raise_()
             self.resizeDocks([sc, rd, q], [380, 480, 620], Qt.Orientation.Horizontal)
             self.resizeDocks([rd, pr], [520, 240], Qt.Orientation.Vertical)
-            self.resizeDocks([q, lg], [640, 200], Qt.Orientation.Vertical)
+            self.resizeDocks([q, pv, lg], [340, 320, 150], Qt.Orientation.Vertical)
 
         self._current_layout = preset
         self._schedule_titlebar_sync()
@@ -2672,10 +2672,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.queue_panel.set_progress(0, "Starting…")
         self._log_eta_prediction(entries)
 
+        # Surface the QUEUE so you watch the batch burn down (statuses/ETA/progress)
+        # rather than yanking focus to the single-frame preview. The live frame sits
+        # alongside the queue (split layouts) or one tab away (compact ones).
+        self.queue_dock.show()
+        self.queue_dock.raise_()
         if self._preview_path:
             self.preview_panel.clear_preview()
             self.preview_dock.show()
-            self.preview_dock.raise_()
             if self._preview_timer is None:
                 self._preview_timer = QTimer(self)
                 self._preview_timer.timeout.connect(self._poll_preview)
