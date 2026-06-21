@@ -177,6 +177,9 @@ class RenderJob(DeadlineFields):
     scene_path: str = ""
     target_camera: str = ""
     output_profile: str = "H264 MP4"
+    # Extra deliverables transcoded from the primary render (e.g. a master ProRes
+    # plus an H.264 review proxy) — profile names from OUTPUT_PROFILES.
+    extra_output_profiles: list[str] = field(default_factory=list)
     render_options: RenderOptions | None = None
     safe_mode: bool = True
     status: str = "idle"

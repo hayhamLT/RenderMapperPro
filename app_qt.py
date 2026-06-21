@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -113,6 +114,7 @@ from core.utils import (
     atomic_write_text,
     ext_for_format,
     file_exists,
+    subprocess_creation_flags,
 )
 from core.utils import ssl_context as _ssl_context
 from media import (
@@ -3048,6 +3050,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 j.progress = progress
                 if status == "success":
                     j.selected = False  # auto-uncheck completed jobs
+                    self._transcode_extra_outputs(j)   # master → proxy deliverables
                 if status in {"success", "failed", "cancelled"}:
                     j.attempts += 1
                     start = (started or {}).get(job_id)
@@ -3057,6 +3060,55 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 break
         self._refresh_queue_view()
         self._update_progress_caption()
+
+    def _transcode_extra_outputs(self, job: RenderJob) -> None:
+        """After a job's primary render succeeds, produce its extra deliverables by
+        transcoding the finished movie with the bundled ffmpeg (off-thread). One
+        render → many formats (e.g. a ProRes master plus an H.264 review proxy),
+        without re-rendering the 3D scene."""
+        extras = list(getattr(job, "extra_output_profiles", None) or [])
+        src = (job.output_path or "").strip()
+        if not extras or job.use_deadline or not src or not Path(src).exists():
+            return
+        ff = find_ffmpeg_tool("ffmpeg")
+        if not ff:
+            return
+        src_path = Path(src)
+        targets = []
+        for prof in extras:
+            spec = OUTPUT_PROFILES.get(prof)
+            if not spec:
+                continue
+            fmt, codec = spec
+            if fmt not in ("MPEG4", "QUICKTIME"):
+                continue   # only movie deliverables are transcoded from a movie
+            dst = src_path.with_name(f"{src_path.stem}_{prof.split()[0].lower()}{ext_for_format(fmt) or '.mp4'}")
+            if dst != src_path:
+                targets.append((dst, codec))
+        if not targets:
+            return
+        label = job.label or f"Job {job.id}"
+
+        def work() -> None:
+            for dst, codec in targets:
+                try:
+                    vcodec = "prores_ks" if codec == "PRORES" else (
+                        "libx265" if codec == "H265" else "libx264")
+                    cmd = [ff, "-y", "-loglevel", "error", "-i", str(src_path), "-c:v", vcodec]
+                    if codec == "PRORES":
+                        cmd += ["-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+                    else:
+                        cmd += ["-crf", "20", "-pix_fmt", "yuv420p"]
+                    cmd += ["-c:a", "aac", "-movflags", "+faststart", str(dst)]
+                    subprocess.run(cmd, capture_output=True, timeout=1800,
+                                   creationflags=subprocess_creation_flags())
+                    ok = dst.exists() and dst.stat().st_size > 0
+                    self._delivery_log.emit(
+                        f"[output] {label}: {'wrote' if ok else 'failed'} {dst.name}",
+                        "success" if ok else "warning")
+                except Exception as exc:
+                    self._delivery_log.emit(f"[output] {label}: {dst.name} failed — {exc}", "warning")
+        threading.Thread(target=work, daemon=True).start()
 
     def _record_history(self, job: RenderJob, status: str, duration: float) -> None:
         opts = job.render_options
