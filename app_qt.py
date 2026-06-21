@@ -82,7 +82,7 @@ from app_window.reporting_mixin import ReportMixin
 from app_window.runtime_mixin import RuntimeMixin
 from app_window.update_mixin import UpdateMixin
 from core.asset_grouping import GroupingConfig as AssetGroupingConfig
-from core.asset_grouping import group_clips
+from core.asset_grouping import group_clips, parse_clip
 from core.jobs import disk_space_warnings, migrate_profile
 from core.logging_setup import get_logger
 from core.metrics import (
@@ -107,6 +107,7 @@ from core.runtime import (
     _runtime_download_spec,
 )
 from core.utils import (
+    IMAGE_MEDIA_EXTENSIONS,
     OUTPUT_PROFILES,
     VIDEO_EXTENSIONS,
     atomic_write_text,
@@ -1743,7 +1744,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             _f, watching = self.scene_panel.get_watch_folder()
         except Exception:
             watching = False
-        self._sb_watch.setText("Watch: on" if watching else "")
+        if watching and self._asset_grouping.enabled:
+            n = len(self._asset_group_jobs)
+            done = sum(1 for jid, _v in self._asset_group_jobs.values()
+                       if any(j.id == jid and j.status == "success" for j in self._jobs))
+            self._sb_watch.setText(f"Watch ▸ {n} asset(s) · {done} done" if n else "Watch ▸ assembling")
+        else:
+            self._sb_watch.setText("Watch: on" if watching else "")
 
     # ── Undo for destructive actions ─────────────────────────────────────
     def _push_undo(self, desc: str, restore) -> None:
@@ -2146,6 +2153,90 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             f"from {len(groups)} asset group(s).")
         if self._autorender_start and not self._is_rendering:
             self._start_render(only_job_ids=touched)
+
+    def _preview_assembly(self, cfg: AssetGroupingConfig | None = None) -> None:
+        """Dry-run the asset-grouping on the watch folder's current clips and show
+        exactly what WOULD be assembled — per asset: screen → material → clip →
+        version — plus any skipped clips and why. Makes the auto-assembly trustable
+        before it ever fires a render. ``cfg`` lets the Properties dialog preview its
+        in-progress edits; defaults to the saved grouping config."""
+        cfg = cfg or self._asset_grouping
+        folder, _en = self.scene_panel.get_watch_folder()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.information(self, "Preview Assembly",
+                "Choose a watch folder first (the watch button in the Scene panel).")
+            return
+        exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
+        try:
+            clips = sorted(str(p) for p in Path(folder).iterdir()
+                           if p.is_file() and p.suffix.lower() in exts)
+        except OSError:
+            clips = []
+        groups = group_clips(clips, cfg)
+        known_mats = set(self._discovered_materials)
+        cur_scene = self.scene_panel.scene_edit.text().strip()
+
+        pal = self._palette
+        rows = []
+        used: set[str] = set()
+        for g in groups:
+            scene = (cfg.setup_to_scene.get(g.setup) or cur_scene).strip()
+            scene_name = Path(scene).name if scene else "⚠ no scene mapped"
+            out = g.output_name(cfg.output_template)
+            screen_rows = []
+            for material, clip in g.material_assignments(cfg.screen_to_material):
+                used.add(clip)
+                pc = parse_clip(clip, cfg.pattern)
+                ver = f"V{pc.version:03d}" if pc else "?"
+                screen = pc.screen if pc else "?"
+                warn = "" if (not known_mats or material in known_mats) else \
+                    f" <span style='color:{pal.danger}'>(not in scene)</span>"
+                screen_rows.append(
+                    f"<tr><td style='color:{pal.text_muted}'>{screen}</td>"
+                    f"<td>→ <b>{material}</b>{warn}</td>"
+                    f"<td style='color:{pal.text_muted}'>← {Path(clip).name} · {ver}</td></tr>")
+            rows.append(
+                f"<p style='margin:14px 0 2px'><b>Asset A{g.asset:03d}</b> "
+                f"<span style='color:{pal.text_muted}'>· setup {g.setup} · scene {scene_name}</span><br>"
+                f"<span style='color:{pal.accent}'>{out}</span></p>"
+                f"<table cellpadding='2'>{''.join(screen_rows)}</table>")
+
+        skipped = []
+        for c in clips:
+            if c in used:
+                continue
+            pc = parse_clip(c, cfg.pattern)
+            if pc is None:
+                why = "doesn't match the filename pattern"
+            elif (pc.type or "").upper() != (cfg.content_type or "ANIM").upper():
+                why = f"type={pc.type} (only {cfg.content_type} is grouped)"
+            else:
+                why = "superseded by a newer version"
+            skipped.append(f"<li>{Path(c).name} <span style='color:{pal.text_muted}'>— {why}</span></li>")
+
+        summary = (f"<b>{len(groups)} asset(s)</b> from {len(clips)} clip(s) in "
+                   f"<span style='color:{pal.text_muted}'>{folder}</span>")
+        body = "".join(rows) if rows else f"<p style='color:{pal.text_muted}'>No assets matched the pattern.</p>"
+        skip_html = (f"<p style='margin-top:16px'><b>Skipped ({len(skipped)})</b></p>"
+                     f"<ul style='margin:2px 0'>{''.join(skipped)}</ul>") if skipped else ""
+        html = (f"<div style='font-size:13px'><p>{summary}</p>{body}{skip_html}</div>")
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Preview Assembly — dry run")
+        dlg.setMinimumSize(560, 480)
+        lay = QVBoxLayout(dlg)
+        view = QTextBrowser()
+        view.setHtml(html)
+        view.setStyleSheet(f"QTextBrowser{{border:1px solid {pal.border}; border-radius:8px; "
+                           f"background:{pal.surface}; padding:10px;}}")
+        lay.addWidget(view)
+        close = QPushButton("Close")
+        close.clicked.connect(dlg.accept)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(close)
+        lay.addLayout(row)
+        dlg.exec()
 
     def _request_auto_preview(self) -> None:
         """Debounced trigger: when Auto is on, re-render the preview a moment

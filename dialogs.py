@@ -309,7 +309,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     dlv_row.addWidget(dlv_browse)
     lay.addLayout(dlv_row)
 
-    lay.addWidget(section_title("ASSET GROUPING (ADVANCED)"))
+    lay.addWidget(section_title("PREVIZ ASSEMBLY (WATCH FOLDER)"))
     lay.addWidget(hint("Build one previz render per asset from a filename convention like "
                        "PRJ001_D01_S01_A017_CENTER_ANIM_V003 — dropped clips are grouped by "
                        "setup + asset, each screen maps to its material, and the newest "
@@ -346,6 +346,30 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     ag_setup_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in sorted(_ag.setup_to_scene.items())))
     ag_setup_edit.setPlaceholderText("1=/scenes/StageA.blend, 2=/scenes/StageB.blend   (blank = current scene)")
     lay.addWidget(ag_setup_edit)
+
+    def _preview_assembly_dry_run() -> None:
+        from core.asset_grouping import GroupingConfig
+
+        def _pairs(text: str) -> dict:
+            out: dict[str, str] = {}
+            for part in text.split(","):
+                if "=" in part and part.split("=", 1)[0].strip():
+                    k, v = part.split("=", 1)
+                    out[k.strip()] = v.strip()
+            return out
+        tmp = GroupingConfig(
+            enabled=True,
+            pattern=ag_pat_edit.text().strip() or _ag.pattern,
+            content_type=ag_type_edit.text().strip() or "ANIM",
+            output_template=ag_tmpl_edit.text().strip() or _ag.output_template,
+            screen_to_material=_pairs(ag_screen_edit.text()),
+            setup_to_scene={int(k): v for k, v in _pairs(ag_setup_edit.text()).items() if k.isdigit()},
+        )
+        win._preview_assembly(tmp)
+    ag_preview_btn = QPushButton("Preview assembly (dry run)…")
+    ag_preview_btn.setToolTip("Show exactly what would be built from the watch folder's current clips")
+    ag_preview_btn.clicked.connect(_preview_assembly_dry_run)
+    lay.addWidget(ag_preview_btn)
     lay.addStretch()
 
     # ── Updates ──────────────────────────────────────────────────────
