@@ -7,17 +7,28 @@ PresetBrowserPanel, LogsPanel, and PreviewPanel (live frame preview + player).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QFileSystemWatcher,
+    QObject,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -82,8 +93,15 @@ from core.utils import (
     auto_match_media_to_materials,
     is_cloud_placeholder,
     reconcile_versions,
+    subprocess_creation_flags,
 )
-from media import MOD_LABEL, _audio_probe_cache, file_manager_name, video_has_audio
+from media import (
+    MOD_LABEL,
+    _audio_probe_cache,
+    file_manager_name,
+    find_ffmpeg_tool,
+    video_has_audio,
+)
 from theme import LINK_COLORS, active_palette
 from ui_widgets import (
     ROLE_HAS_AUDIO,
@@ -2083,6 +2101,78 @@ def _backend_badge(kind: str) -> QIcon:
     return _backend_badge_cache[kind]
 
 
+_THUMB_DIR = Path(tempfile.gettempdir()) / "rmp_thumbs"
+_THUMB_W, _THUMB_H = 58, 34
+
+
+def _extract_first_frame(clip: str) -> str:
+    """First-frame PNG for a clip, cached on disk by path+mtime ('' if none). Runs
+    ffmpeg, so call it OFF the UI thread."""
+    try:
+        p = Path(clip)
+        if not p.exists():
+            return ""
+        if p.suffix.lower() in IMAGE_MEDIA_EXTENSIONS:
+            return clip   # an image is its own thumbnail
+        ff = find_ffmpeg_tool("ffmpeg")
+        if not ff:
+            return ""
+        _THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        key = hashlib.md5(f"{p.resolve()}:{p.stat().st_mtime_ns}".encode()).hexdigest()[:16]
+        out = _THUMB_DIR / f"{key}.png"
+        if out.exists() and out.stat().st_size > 0:
+            return str(out)
+        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", "0", "-i", clip,
+                        "-frames:v", "1", "-vf", "scale=120:-1", str(out)],
+                       capture_output=True, timeout=20, creationflags=subprocess_creation_flags())
+        return str(out) if out.exists() and out.stat().st_size > 0 else ""
+    except Exception:
+        return ""
+
+
+class _ThumbnailLoader(QObject):
+    """Extracts clip first-frames on background threads and signals when each is
+    ready, so the queue fills in posters without blocking the UI."""
+
+    ready = Signal(str, str)   # (clip_path, png_path)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._inflight: set[str] = set()
+
+    def request(self, clip: str) -> None:
+        if not clip or clip in self._inflight:
+            return
+        self._inflight.add(clip)
+
+        def work() -> None:
+            png = _extract_first_frame(clip)
+            self._inflight.discard(clip)
+            if png:
+                self.ready.emit(clip, png)   # queued back to the UI thread
+        threading.Thread(target=work, daemon=True).start()
+
+
+def _compose_job_icon(png_path: str, kind: str) -> QIcon:
+    """A queue-row icon: the clip's first frame (or a neutral tile) with the backend
+    badge in the corner — one icon carrying both poster and renderer."""
+    pm = QPixmap(_THUMB_W, _THUMB_H)
+    pm.fill(QColor("#2a2f39"))
+    pr = QPainter(pm)
+    pr.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    src = QPixmap(png_path) if png_path else QPixmap()
+    if not src.isNull():
+        scaled = src.scaled(QSize(_THUMB_W, _THUMB_H), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation)
+        pr.drawPixmap((_THUMB_W - scaled.width()) // 2, (_THUMB_H - scaled.height()) // 2, scaled)
+    color = _BACKEND_INFO.get(kind, ("#888", ""))[0]
+    pr.setBrush(QColor(color))
+    pr.setPen(QColor(0, 0, 0, 150))
+    pr.drawRoundedRect(_THUMB_W - 13, _THUMB_H - 11, 11, 9, 2, 2)
+    pr.end()
+    return QIcon(pm)
+
+
 class QueuePanel(QWidget):
     queue_requested = Signal()
     start_selected_requested = Signal()
@@ -2163,9 +2253,22 @@ class QueuePanel(QWidget):
         self.table.setColumnWidth(3, 62)
         self.table.setColumnWidth(4, 82)    # ETA
         self.table.setColumnWidth(5, 110)   # Progress
-        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.verticalHeader().setDefaultSectionSize(40)   # room for a poster thumbnail
+        self.table.setIconSize(QSize(_THUMB_W, _THUMB_H))
+        self.table.setColumnWidth(1, 220)   # Job cell: thumbnail + name
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.itemSelectionChanged.connect(self._emit_job_selected)
+        # Async first-frame thumbnails: requested per clip in set_jobs, filled in
+        # (debounced) when ready so the queue reads like a contact sheet.
+        self._thumb_png: dict[str, str] = {}
+        self._last_jobs: list[RenderJob] = []
+        self._last_etas: dict[int, str] = {}
+        self._thumb_loader = _ThumbnailLoader(self)
+        self._thumb_loader.ready.connect(self._on_thumb_ready)
+        self._thumb_refresh = QTimer(self)
+        self._thumb_refresh.setSingleShot(True)
+        self._thumb_refresh.setInterval(120)
+        self._thumb_refresh.timeout.connect(lambda: self.set_jobs(self._last_jobs, self._last_etas))
         self.table.itemChanged.connect(self._on_item_changed)
         # Double-click the Job name to rename it inline.
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -2211,7 +2314,15 @@ class QueuePanel(QWidget):
         self.progress_bar.setValue(int(max(0, min(100, value))))
         self.progress_caption.setText(caption)
 
+    def _on_thumb_ready(self, clip: str, png: str) -> None:
+        """A clip's first-frame finished extracting — cache it and debounce a queue
+        refresh so the poster appears (coalesces a burst of thumbnails into one rebuild)."""
+        if png and self._thumb_png.get(clip) != png:
+            self._thumb_png[clip] = png
+            self._thumb_refresh.start()
+
     def set_jobs(self, jobs: list[RenderJob], etas: dict[int, str] | None = None) -> None:
+        self._last_jobs, self._last_etas = list(jobs), dict(etas or {})
         self._failed_ids = {j.id for j in jobs if j.status == "failed"}
         self._finished_ids = {j.id for j in jobs if j.status in ("failed", "cancelled", "success")}
         pal = active_palette()
@@ -2235,9 +2346,14 @@ class QueuePanel(QWidget):
             # carries the job id so the rename can be routed back.
             job_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
             job_item.setData(Qt.ItemDataRole.UserRole, j.id)
-            # Colored backend badge so a mixed Blender/C4D/three.js queue is legible.
+            # Poster thumbnail (clip first frame) + backend badge corner, so a mixed
+            # Blender/C4D/three.js queue reads like a contact sheet. The thumbnail
+            # loads async; until it's ready the icon is the neutral tile + badge.
             _bk = _job_backend(j)
-            job_item.setIcon(_backend_badge(_bk))
+            _clip = (j.material_assignments[0].video_path if j.material_assignments else j.video_path) or ""
+            job_item.setIcon(_compose_job_icon(self._thumb_png.get(_clip, ""), _bk))
+            if _clip and _clip not in self._thumb_png:
+                self._thumb_loader.request(_clip)
             job_item.setToolTip(f"{_BACKEND_INFO[_bk][1]} · double-click to rename")
             self.table.setItem(r, 1, job_item)
             prof_item = QTableWidgetItem(j.output_profile or "H264 MP4")
