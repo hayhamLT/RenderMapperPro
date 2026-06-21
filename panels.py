@@ -70,6 +70,8 @@ from core.models import (
     MaterialVideoAssignment,
     RenderJob,
     RenderOptions,
+    is_c4d_scene,
+    uses_web_backend,
 )
 from core.utils import (
     IMAGE_MEDIA_EXTENSIONS,
@@ -356,12 +358,12 @@ class ScenePanel(QWidget):
         self.add_video_btn = QPushButton("")
         self.add_video_btn.setObjectName("IconButton")
         self.add_video_btn.setToolTip("Add videos")
-        self.add_video_btn.setFixedSize(26, 20)
+        self.add_video_btn.setFixedSize(28, 28)   # >=24px hit target (WCAG 2.5.8)
         self.add_video_btn.clicked.connect(self._add_videos)
         right_top.addWidget(self.add_video_btn)
         right_top_w = QWidget()
         right_top_w.setLayout(right_top)
-        right_top_w.setFixedHeight(24)
+        right_top_w.setFixedHeight(30)
         self.vid_search = QLineEdit()
         self.vid_search.setPlaceholderText("Filter videos")
         self.vid_search.textChanged.connect(self._refresh_lists)
@@ -392,14 +394,14 @@ class ScenePanel(QWidget):
         self.watch_btn = QPushButton("")
         self.watch_btn.setObjectName("IconButton")
         self.watch_btn.setCheckable(True)
-        self.watch_btn.setFixedSize(26, 22)
+        self.watch_btn.setFixedSize(28, 28)
         self.watch_btn.setToolTip("Watch a folder — auto-import new clips and update to the latest version")
         self.watch_btn.toggled.connect(self._on_watch_toggled)
         self.watch_label = QLabel("No watch folder")
         self.watch_label.setObjectName("FieldLabel")
         self.watch_browse_btn = QPushButton("")
         self.watch_browse_btn.setObjectName("IconButton")
-        self.watch_browse_btn.setFixedSize(26, 22)
+        self.watch_browse_btn.setFixedSize(28, 28)
         self.watch_browse_btn.setToolTip("Choose watch folder")
         self.watch_browse_btn.clicked.connect(self._choose_watch_folder)
         watch_row.addWidget(self.watch_btn)
@@ -2028,6 +2030,43 @@ class DeadlinePanel(QWidget):
         self.dl_machines_list.blockSignals(False)
 
 
+# A 3-backend app should say which renderer each queued job uses at a glance.
+_BACKEND_INFO = {
+    "blender": ("#4a90d9", "Blender"),
+    "c4d": ("#e0533d", "Cinema 4D · Redshift"),
+    "web": ("#3fb950", "three.js (WebGL)"),
+}
+_backend_badge_cache: dict[str, QIcon] = {}
+
+
+def _job_backend(j: RenderJob) -> str:
+    """Which renderer a queued job will use — derived the same way the dispatcher
+    decides (web for a .glb on three.js, C4D for .c4d, Blender otherwise)."""
+    scene = j.scene_path or ""
+    engine = j.render_options.engine if j.render_options else ""
+    if is_c4d_scene(scene):
+        return "c4d"
+    if uses_web_backend(scene, engine):
+        return "web"
+    return "blender"
+
+
+def _backend_badge(kind: str) -> QIcon:
+    """A small colored rounded-square icon for a backend, cached per kind."""
+    if kind not in _backend_badge_cache:
+        color = _BACKEND_INFO.get(kind, ("#888", ""))[0]
+        pm = QPixmap(12, 12)
+        pm.fill(Qt.GlobalColor.transparent)
+        pr = QPainter(pm)
+        pr.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pr.setBrush(QColor(color))
+        pr.setPen(Qt.PenStyle.NoPen)
+        pr.drawRoundedRect(1, 1, 10, 10, 3, 3)
+        pr.end()
+        _backend_badge_cache[kind] = QIcon(pm)
+    return _backend_badge_cache[kind]
+
+
 class QueuePanel(QWidget):
     queue_requested = Signal()
     start_selected_requested = Signal()
@@ -2180,7 +2219,10 @@ class QueuePanel(QWidget):
             # carries the job id so the rename can be routed back.
             job_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
             job_item.setData(Qt.ItemDataRole.UserRole, j.id)
-            job_item.setToolTip("Double-click to rename")
+            # Colored backend badge so a mixed Blender/C4D/three.js queue is legible.
+            _bk = _job_backend(j)
+            job_item.setIcon(_backend_badge(_bk))
+            job_item.setToolTip(f"{_BACKEND_INFO[_bk][1]} · double-click to rename")
             self.table.setItem(r, 1, job_item)
             prof_item = QTableWidgetItem(j.output_profile or "H264 MP4")
             prof_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)

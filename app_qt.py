@@ -374,6 +374,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._build_layout()
         self._build_status_bar()
         self._build_tray()
+        self._apply_accessible_names()
         self._load_profile()
         self._update_status_bar()
         # Check for a newer release a few seconds after launch (if the user hasn't
@@ -1690,6 +1691,15 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._discovery_thread.error.connect(self._on_discovery_error)
         self._discovery_thread.finished.connect(self._on_discovery_done)
         self._discovery_thread.start()
+
+    def _apply_accessible_names(self) -> None:
+        """Give every icon-only button an accessible name so screen readers /
+        the macOS Accessibility Inspector / UI automation announce it (a tooltip
+        is NOT an accessible name in Qt). Reuses each button's existing tooltip."""
+        from PySide6.QtWidgets import QPushButton
+        for btn in self.findChildren(QPushButton):
+            if not btn.text().strip() and btn.toolTip().strip() and not btn.accessibleName().strip():
+                btn.setAccessibleName(btn.toolTip().strip())
 
     def _build_status_bar(self) -> None:
         """A bottom status bar summarising scene / renderer / mappings / queue /
