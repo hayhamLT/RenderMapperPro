@@ -19,7 +19,7 @@ import pathlib
 import re
 import urllib.request
 
-THREE_VERSION = "0.171.0"
+THREE_VERSION = "0.184.0"
 BASE = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}"
 VENDOR = pathlib.Path(__file__).resolve().parent.parent / "assets" / "vendor" / "three"
 # Entry points: the core module (a thin re-export that pulls in three.core.js
