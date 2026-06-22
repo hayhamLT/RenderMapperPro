@@ -1181,6 +1181,68 @@ class RenderPanel(QWidget):
             lbl.setObjectName("SectionLabel")
             return lbl
 
+        def labeled(text: str, w: QWidget) -> QVBoxLayout:
+            """A field label stacked above its input, matching the panel style."""
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            lbl = QLabel(text)
+            lbl.setObjectName("FieldLabel")
+            col.addWidget(lbl)
+            col.addWidget(w)
+            return col
+
+        def two_col(left: QVBoxLayout, right: QVBoxLayout | None = None) -> QHBoxLayout:
+            """Two compact, left-aligned field columns — the trailing stretch eats
+            the slack so the fields keep a sensible width and never span the panel,
+            and a hidden right column can't make the left one balloon."""
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            row.addLayout(left)
+            if right is not None:
+                row.addLayout(right)
+            row.addStretch(1)
+            return row
+
+        # ── Renderer — the engine + a one-line "what this is" summary ───
+        root.addWidget(section("RENDERER"))
+        self.engine_combo = QComboBox()
+        self.engine_combo.setToolTip("Render engine. Cycles = highest quality (slow); EEVEE = fast preview-grade. C4D scenes use Redshift.")
+        self.populate_engines(["CYCLES", "BLENDER_EEVEE"])
+        root.addWidget(self.engine_combo)
+        self.engine_summary = QLabel()
+        self.engine_summary.setObjectName("FieldLabel")
+        self.engine_summary.setTextFormat(Qt.TextFormat.RichText)
+        self.engine_summary.setWordWrap(True)
+        root.addWidget(self.engine_summary)
+        self.engine_combo.currentIndexChanged.connect(lambda _i: self._update_engine_summary())
+
+        # ── Format — ONE dropdown with every format the renderer can write.
+        #    Movie containers (MP4/MOV) expose Codec + Quality right beneath it
+        #    (AME-style); PNG/EXR sequences have neither. No "also deliver". ──
+        root.addWidget(section("FORMAT"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.setToolTip("Output format. Movie containers (MP4/MOV) show codec + quality below; PNG/EXR are image sequences.")
+        self.profile_combo.addItems(list(OUTPUT_PROFILES.keys()))
+        root.addWidget(self.profile_combo)
+        self.codec_combo = QComboBox()
+        self.codec_combo.setToolTip("Video codec inside the container.")
+        self.codec_combo.addItems(["Default", "H.264", "H.265"])
+        self.codec_combo.setMaximumWidth(_SEL_W)
+        self.quality_combo = QComboBox()
+        self.quality_combo.setToolTip("Movie bitrate / quality.")
+        self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
+        self.quality_combo.setCurrentText("High")
+        self.quality_combo.setMaximumWidth(_SEL_W)
+        self.movie_opts_row = QWidget()
+        _mo = QHBoxLayout(self.movie_opts_row)
+        _mo.setContentsMargins(0, 4, 0, 0)
+        _mo.setSpacing(12)
+        _mo.addLayout(labeled("Codec", self.codec_combo))
+        _mo.addLayout(labeled("Quality", self.quality_combo))
+        _mo.addStretch(1)
+        root.addWidget(self.movie_opts_row)
+        self.profile_combo.currentTextChanged.connect(lambda _v: self._sync_format_opts())
+
         # ── Resolution & FPS ──────────────────────────────────────────
         root.addWidget(section("RESOLUTION & FPS"))
         res_row = QHBoxLayout()
@@ -1226,56 +1288,6 @@ class RenderPanel(QWidget):
             fr_row.addLayout(col)
         root.addLayout(fr_row)
 
-        # ── Renderer + Output Format (side-by-side) ─────────────────
-        ro_row = QHBoxLayout()
-        ro_row.setSpacing(8)
-
-        renderer_col = QVBoxLayout()
-        renderer_col.setSpacing(2)
-        renderer_col.addWidget(section("RENDERER"))
-        self.engine_combo = QComboBox()
-        self.engine_combo.setToolTip("Render engine. Cycles = highest quality (slow); EEVEE = fast preview-grade. C4D scenes use Redshift.")
-        self.populate_engines(["CYCLES", "BLENDER_EEVEE"])
-        renderer_col.addWidget(self.engine_combo)
-        # A Premiere/AME-style summary under the picker: a backend-coloured badge
-        # plus a one-line description of what the selected engine actually is.
-        self.engine_summary = QLabel()
-        self.engine_summary.setObjectName("FieldLabel")
-        self.engine_summary.setTextFormat(Qt.TextFormat.RichText)
-        self.engine_summary.setWordWrap(True)
-        renderer_col.addWidget(self.engine_summary)
-        self.engine_combo.currentIndexChanged.connect(lambda _i: self._update_engine_summary())
-
-        format_col = QVBoxLayout()
-        format_col.setSpacing(2)
-        format_col.addWidget(section("MASTER"))
-        self.profile_combo = QComboBox()
-        self.profile_combo.setToolTip("The master deliverable's container: H264 MP4 for review, ProRes MOV for editorial, PNG/EXR sequences for comp.")
-        self.profile_combo.addItems(list(OUTPUT_PROFILES.keys()))
-        format_col.addWidget(self.profile_combo)
-
-        # Extra deliverables produced from the SAME render (e.g. a ProRes master
-        # plus an H.264 review proxy) — transcoded from the master output, so one
-        # render emits multiple formats without re-rendering the 3D scene. The
-        # master's own format is never offered here (no 'double MP4'), and formats
-        # the active renderer can't produce are hidden — see _sync_deliverables.
-        self.extra_output_checks: dict[str, QCheckBox] = {}
-        _movie_profiles = [n for n, (fmt, _c) in OUTPUT_PROFILES.items() if fmt in ("MPEG4", "QUICKTIME")]
-        self.also_label = QLabel("Also deliver:")
-        self.also_label.setObjectName("FieldLabel")
-        self.also_label.setToolTip("Extra files transcoded from the master render — no re-render.")
-        format_col.addWidget(self.also_label)
-        for name in _movie_profiles:
-            cb = QCheckBox(name)
-            cb.setToolTip(f"Also produce a {name}, transcoded from the master render")
-            self.extra_output_checks[name] = cb
-            format_col.addWidget(cb)
-        self.profile_combo.currentTextChanged.connect(lambda _v: self._sync_deliverables())
-
-        ro_row.addLayout(renderer_col, 1)
-        ro_row.addLayout(format_col, 1)
-        root.addLayout(ro_row)
-
         # ── Output Path ───────────────────────────────────────────────
         root.addWidget(section("PATH"))
         path_row = QHBoxLayout()
@@ -1313,29 +1325,7 @@ class RenderPanel(QWidget):
         adv.setContentsMargins(0, 2, 0, 0)
         adv.setSpacing(6)
 
-        def labeled(text: str, w: QWidget) -> QVBoxLayout:
-            """A field label stacked above its input, matching the panel style."""
-            col = QVBoxLayout()
-            col.setSpacing(3)
-            lbl = QLabel(text)
-            lbl.setObjectName("FieldLabel")
-            col.addWidget(lbl)
-            col.addWidget(w)
-            return col
-
-        def two_col(left: QVBoxLayout, right: QVBoxLayout | None = None) -> QHBoxLayout:
-            """Two compact, left-aligned field columns — the trailing stretch eats
-            the slack so the fields keep a sensible width and never span the panel,
-            and a hidden right column can't make the left one balloon."""
-            row = QHBoxLayout()
-            row.setSpacing(12)
-            row.addLayout(left)
-            if right is not None:
-                row.addLayout(right)
-            row.addStretch(1)
-            return row
-
-        # ── Sampling & quality (same slot for both renderers) ────────────
+        # ── Quality (per-renderer; Codec/Quality live under FORMAT above) ─
         self.quality_header = section("QUALITY")
         adv.addWidget(self.quality_header)
         # Speed preset (Redshift only) — sits at the top of sampling.
@@ -1382,65 +1372,32 @@ class RenderPanel(QWidget):
         _tr.addLayout(labeled("Noise threshold", self.rs_threshold_edit))
         _tr.addStretch(1)
         adv.addWidget(self.rs_threshold_row)
-        # Denoise (both) + transparent (Blender only).
-        self.denoise_cb = QCheckBox("Denoise")
-        self.denoise_cb.setToolTip("AI-denoise the render — lets you use far fewer samples for the same look.")
-        self.denoise_cb.setChecked(True)
-        self.transparent_cb = QCheckBox("Transparent (alpha)")
-        self.burn_in_cb = QCheckBox("Burn-in overlay")
-        self.burn_in_cb.setToolTip("Stamps the clip name/version, frame number, camera and date "
-                                   "onto every frame — so reviews always know which version "
-                                   "they're looking at. (Farm C4D renders: not yet.)")
-        self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
-        self.safe_mode_cb = QCheckBox("Validate paths")
-        self.safe_mode_cb.setChecked(True)
-        self.safe_mode_cb.setToolTip(
-            "Before rendering, check that the scene and every mapped clip exist, are "
-            "readable, and have a supported extension. Turn off only if you use "
-            "symlinks or relative paths that are valid on the render machine.")
-        # Stacked vertically (not one wide row) so the long labels never force a
-        # huge minimum width — that's what made opening Advanced stretch the dock.
-        cb_col = QVBoxLayout()
-        cb_col.setSpacing(5)
-        cb_col.setContentsMargins(0, 2, 0, 0)
-        for _cb in (self.denoise_cb, self.transparent_cb, self.burn_in_cb, self.safe_mode_cb):
-            cb_col.addWidget(_cb)
-        adv.addLayout(cb_col)
-
-        # ── Output (same slot for both renderers) ────────────────────────
-        adv.addWidget(section("ENCODING"))
+        # Render scale (all engines) + Device (Cycles only — EEVEE/Redshift/web
+        # are GPU). Render Scale was its own "ENCODING" section before; folding it
+        # into Quality removes a near-empty section.
         self.scale_combo = QComboBox()
         self.scale_combo.setMaximumWidth(_SEL_W)
         self.scale_combo.setToolTip("Render scale: 50% renders at half resolution — much faster drafts, same framing.")
         self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
-        self.quality_combo = QComboBox()
-        self.quality_combo.setMaximumWidth(_SEL_W)
-        self.quality_combo.setToolTip("Movie bitrate/quality (H264 only).")
-        self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
-        self.quality_combo.setCurrentText("High")
-        adv.addLayout(two_col(
-            labeled("Render Scale", self.scale_combo),
-            labeled("Video Quality", self.quality_combo),
-        ))
-        self.codec_combo = QComboBox()
-        self.codec_combo.setToolTip("Video codec inside the container.")
-        self.codec_combo.addItems(["Default", "H.264", "H.265"])
-        self.codec_combo.setMaximumWidth(_SEL_W)
         self.device_combo = QComboBox()
         self.device_combo.setToolTip("Render device: GPU is much faster when available.")
         self.device_combo.addItems(["Auto", "GPU", "CPU"])
         self.device_combo.setMaximumWidth(_SEL_W)
-        # Device is Cycles-only; wrap it so it can be hidden without ballooning Codec.
         self.device_box = QWidget()
         dev_lay = QVBoxLayout(self.device_box)
         dev_lay.setContentsMargins(0, 0, 0, 0)
         dev_lay.addLayout(labeled("Device", self.device_combo))
-        out_row = QHBoxLayout()
-        out_row.setSpacing(12)
-        out_row.addLayout(labeled("Codec", self.codec_combo))
-        out_row.addWidget(self.device_box)
-        out_row.addStretch(1)
-        adv.addLayout(out_row)
+        sd_row = QHBoxLayout()
+        sd_row.setSpacing(12)
+        sd_row.addLayout(labeled("Render Scale", self.scale_combo))
+        sd_row.addWidget(self.device_box)
+        sd_row.addStretch(1)
+        adv.addLayout(sd_row)
+        # Denoise — path-tracer quality (hidden for three.js in set_renderer).
+        self.denoise_cb = QCheckBox("Denoise")
+        self.denoise_cb.setToolTip("AI-denoise the render — lets you use far fewer samples for the same look.")
+        self.denoise_cb.setChecked(True)
+        adv.addWidget(self.denoise_cb)
 
         # ── Lighting & GI (Redshift only) ────────────────────────────────
         self.gi_box = QWidget()
@@ -1538,6 +1495,23 @@ class RenderPanel(QWidget):
         wl.addWidget(self.web_respect_lights_cb)
         adv.addWidget(self.web_light_box)
 
+        # ── Options (every renderer) ─────────────────────────────────────
+        adv.addWidget(section("OPTIONS"))
+        self.transparent_cb = QCheckBox("Transparent background (alpha)")
+        self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
+        self.burn_in_cb = QCheckBox("Burn-in overlay (clip · frame · date)")
+        self.burn_in_cb.setToolTip("Stamps the clip name/version, frame number, camera and date "
+                                   "onto every frame — so reviews always know which version "
+                                   "they're looking at. (Farm C4D renders: not yet.)")
+        self.safe_mode_cb = QCheckBox("Validate paths before rendering")
+        self.safe_mode_cb.setChecked(True)
+        self.safe_mode_cb.setToolTip(
+            "Before rendering, check that the scene and every mapped clip exist, are "
+            "readable, and have a supported extension. Turn off only if you use "
+            "symlinks or relative paths that are valid on the render machine.")
+        for _cb in (self.transparent_cb, self.burn_in_cb, self.safe_mode_cb):
+            adv.addWidget(_cb)
+
         # Preset wiring + initial renderer state (Blender layout by default).
         self._rs_applying = False
         self.rs_preset_combo.currentTextChanged.connect(self._apply_rs_preset)
@@ -1623,14 +1597,14 @@ class RenderPanel(QWidget):
         return [str(self.engine_combo.itemData(i)) for i in range(self.engine_combo.count())]
 
     def extra_output_profiles(self) -> list[str]:
-        """Checked 'also export' profiles, minus the primary (no self-transcode)."""
-        primary = self.profile_combo.currentText()
-        return [n for n, cb in self.extra_output_checks.items() if cb.isChecked() and n != primary]
+        """No multi-output 'also deliver' UI anymore — one Format is the output.
+        Kept (returning nothing) so the job snapshot / profile round-trip is
+        unchanged; the transcode step simply gets an empty list."""
+        return []
 
     def set_extra_output_profiles(self, profiles: list[str] | None) -> None:
-        wanted = set(profiles or [])
-        for n, cb in self.extra_output_checks.items():
-            cb.setChecked(n in wanted)
+        # Deliverables UI removed — nothing to restore.
+        return
 
     def set_renderer(self, engine: str) -> None:
         """Adapt every visible control to the chosen ENGINE so each renderer shows
@@ -1680,23 +1654,13 @@ class RenderPanel(QWidget):
             idx = self.profile_combo.findText(cur)
             self.profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.profile_combo.blockSignals(False)
-        self._sync_deliverables()
+        self._sync_format_opts()
 
-    def _sync_deliverables(self) -> None:
-        """Show an 'also deliver' checkbox only for movie formats that are (a) valid
-        for the current renderer and (b) not already the master — so the master's
-        own format never appears twice ('double MP4'). Hidden boxes are unchecked,
-        and the heading hides when no extra deliverable is possible."""
-        primary = self.profile_combo.currentText()
-        available = {self.profile_combo.itemText(i) for i in range(self.profile_combo.count())}
-        any_visible = False
-        for name, cb in self.extra_output_checks.items():
-            show = name in available and name != primary
-            cb.setVisible(show)
-            if not show and cb.isChecked():
-                cb.setChecked(False)
-            any_visible = any_visible or show
-        self.also_label.setVisible(any_visible)
+    def _sync_format_opts(self) -> None:
+        """Codec + Quality apply only to movie containers (MP4/MOV); image
+        sequences (PNG/EXR) have neither, so hide that row for them."""
+        fmt = OUTPUT_PROFILES.get(self.profile_combo.currentText(), ("", ""))[0]
+        self.movie_opts_row.setVisible(fmt in ("MPEG4", "QUICKTIME"))
 
     def restyle(self, pal: T.Palette) -> None:
         self.browse_out_btn.setIcon(icons.icon("folder", pal.text))
