@@ -24,7 +24,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-VERSION = os.environ.get("FFMPEG_STATIC_VERSION", "b6.0")
+VERSION = os.environ.get("FFMPEG_STATIC_VERSION", "b6.1.1")
 BASE = os.environ.get(
     "FFMPEG_STATIC_BASE",
     f"https://github.com/eugeneware/ffmpeg-static/releases/download/{VERSION}",
