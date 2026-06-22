@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from core import web_render as w
 
 
@@ -25,7 +27,9 @@ def test_driver_url_shape():
 
 
 def test_node_present_in_dev_tree():
-    # The installed playwright package ships node in the dev tree, so the app
-    # never downloads it from source — ensure_web_node is a no-op here.
+    # Needs the playwright package installed (the lint-test CI job doesn't install
+    # it — only the web-smoke job does). Where it IS present, node ships with it,
+    # so ensure_web_node is a no-op from source.
+    pytest.importorskip("playwright")
     assert w.web_node_installed() is True
     assert w._node_in_package() is not None
