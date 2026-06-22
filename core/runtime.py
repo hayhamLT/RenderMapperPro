@@ -41,6 +41,18 @@ def _runtime_download_spec() -> tuple[str, str] | None:
     return None
 
 
+def _runtime_checksum_url() -> str | None:
+    """URL of blender.org's published ``.sha256`` sidecar, which lists the
+    SHA-256 of every platform archive for this release as ``<digest>  <file>``
+    lines. Used to verify the managed-runtime download before extracting."""
+    if _runtime_download_spec() is None:
+        return None
+    v = BLENDER_RUNTIME_VERSION
+    parts = v.split(".")
+    release_train = ".".join(parts[:2]) if len(parts) >= 2 else v
+    return f"https://download.blender.org/release/Blender{release_train}/blender-{v}.sha256"
+
+
 def _norm_blender(candidate: str) -> str | None:
     """Normalise a user/auto candidate to a runnable Blender executable path
     (resolving a macOS .app bundle, an existing file, or a PATH lookup)."""
