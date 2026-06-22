@@ -17,6 +17,7 @@ import base64
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -94,15 +95,115 @@ def web_chromium_installed() -> bool:
     return any(WEB_RUNTIME_ROOT.glob("chromium-[0-9]*"))
 
 
+# Playwright's ``node`` driver (114 MB) is NOT bundled in the frozen app — only
+# the small cli.js is. It's downloaded on first web render into this per-user dir
+# and wired up via PLAYWRIGHT_NODEJS_PATH (which compute_driver_executable honors).
+WEB_DRIVER_DIR = WEB_RUNTIME_ROOT.parent / "driver"
+_WEB_NODE_NAME = "node.exe" if os.name == "nt" else "node"
+WEB_DRIVER_NODE = WEB_DRIVER_DIR / _WEB_NODE_NAME
+
+
+def _web_driver_platform() -> str | None:
+    """Playwright's driver-build platform token for this OS/arch, or None."""
+    import platform
+    arm = "arm" in platform.machine().lower() or "aarch64" in platform.machine().lower()
+    if sys.platform == "darwin":
+        return "mac-arm64" if arm else "mac"
+    if os.name == "nt":
+        return "win32_x64"
+    if sys.platform.startswith("linux"):
+        return "linux-arm64" if arm else "linux"
+    return None
+
+
+def _playwright_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("playwright")
+    except Exception:
+        return "1.60.0"
+
+
+def _web_driver_url() -> str | None:
+    plat = _web_driver_platform()
+    if not plat:
+        return None
+    return f"https://playwright.azureedge.net/builds/driver/playwright-{_playwright_version()}-{plat}.zip"
+
+
+def _node_in_package() -> Path | None:
+    """The node binary that ships with the installed playwright package (present in
+    the dev tree; absent from the slimmed frozen app), or None."""
+    try:
+        from playwright._impl._driver import compute_driver_executable
+        p = Path(compute_driver_executable()[0])
+        return p if p.exists() else None
+    except Exception:
+        return None
+
+
+def web_node_installed() -> bool:
+    """A usable Playwright ``node`` driver is available — bundled with the package
+    (dev tree) or already downloaded into the per-user dir (slimmed frozen app)."""
+    return _node_in_package() is not None or WEB_DRIVER_NODE.exists()
+
+
+def ensure_web_node(on_log: LogCallback | None = None,
+                    should_cancel: CancelCheck | None = None) -> None:
+    """Ensure a Playwright ``node`` driver exists and point Playwright at it.
+
+    No-op in the dev tree, where node ships inside the playwright package. The
+    frozen app drops that 114 MB binary to stay small and downloads it on first
+    use into ``WEB_DRIVER_DIR``, wiring it up via ``PLAYWRIGHT_NODEJS_PATH`` (the
+    cli.js stays bundled). The download is sanity-checked by running ``node
+    --version`` — a corrupt archive is discarded rather than cached."""
+    if _node_in_package() is not None:
+        return                                  # node ships with the package (dev tree)
+    log = on_log or (lambda *_: None)
+    dest = WEB_DRIVER_NODE
+    if not dest.exists() or dest.stat().st_size == 0:
+        url = _web_driver_url()
+        if not url:
+            raise RuntimeError("No Playwright driver build is available for this platform.")
+        from .archive import safe_extract_zip
+        from .download import download_with_progress
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pw-driver-") as td:
+            zip_path = Path(td) / "driver.zip"
+            log("[web] Downloading the web render driver (~40 MB, one time)…")
+            download_with_progress(url, zip_path, log, should_cancel=should_cancel, tag="[web]")
+            extracted = Path(td) / "x"
+            safe_extract_zip(zip_path, extracted)
+            src = extracted / _WEB_NODE_NAME
+            if not src.exists():
+                raise RuntimeError("Playwright driver archive did not contain a node binary.")
+            shutil.move(str(src), str(dest))
+        if os.name != "nt":
+            dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            if sys.platform == "darwin":
+                subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(dest)], check=False)
+                subprocess.run(["codesign", "--force", "-s", "-", str(dest)],
+                               check=False, capture_output=True)
+        try:
+            subprocess.run([str(dest), "--version"], check=True, capture_output=True,
+                           timeout=30, creationflags=subprocess_creation_flags())
+        except Exception as exc:
+            dest.unlink(missing_ok=True)        # never cache a broken node
+            raise RuntimeError("Downloaded web render driver failed to run.") from exc
+        log("[web] Web render driver ready.")
+    os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(dest)
+
+
 def ensure_web_chromium(on_log: LogCallback | None = None,
                         should_cancel: CancelCheck | None = None) -> None:
     """Download the full Chromium build into ``WEB_RUNTIME_ROOT`` if missing.
 
-    Frozen-safe: shells out to Playwright's bundled node + cli.js (resolved via
+    Frozen-safe: shells out to Playwright's node + cli.js (resolved via
     ``compute_driver_executable``), NOT ``python -m playwright`` (there is no
     python in a frozen .app). ``--no-shell`` fetches the full ~170 MB GPU-capable
     Chromium (NOT the SwiftShader-only headless shell, which can't reach the GPU).
     Progress (a ``\\r``-delimited percent bar) streams to ``on_log``."""
+    ensure_web_node(on_log, should_cancel)      # the slimmed frozen app fetches node first
     if web_chromium_installed():
         return
     log = on_log or (lambda *_: None)

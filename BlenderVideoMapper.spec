@@ -39,10 +39,11 @@ def _ffmpeg_binaries():
 
 
 def _playwright_driver():
-    """Bundle Playwright's node driver so the frozen app can run the browser
-    installer + the runtime. ``node`` ships via binaries (preserves the +x bit;
-    datas strip it); the rest of driver/ as datas. Browsers are NOT bundled —
-    they're downloaded on demand into a per-user dir. Returns (binaries, datas)."""
+    """Bundle Playwright's driver — EXCEPT the ~114 MB ``node`` binary, which is
+    downloaded on demand on first web render (core.web_render.ensure_web_node,
+    wired up via PLAYWRIGHT_NODEJS_PATH). The small cli.js + the rest of driver/
+    stay bundled as datas. Browsers are likewise fetched on demand. Returns
+    (binaries, datas) — binaries is always empty now (node is the only binary)."""
     try:
         import playwright
     except Exception:
@@ -51,13 +52,15 @@ def _playwright_driver():
     pw_root = os.path.dirname(playwright.__file__)
     driver = os.path.join(pw_root, "driver")
     node_name = "node.exe" if os.name == "nt" else "node"
-    bins, datas = [], []
+    datas = []
     for root, _dirs, files in os.walk(driver):
         for f in files:
+            if f == node_name:
+                continue   # 114 MB node → downloaded on demand, not shipped
             src = os.path.join(root, f)
             dest = os.path.join("playwright", os.path.relpath(root, pw_root))
-            (bins if f == node_name else datas).append((src, dest))
-    return bins, datas
+            datas.append((src, dest))
+    return [], datas
 
 
 _pw_bins, _pw_datas = _playwright_driver()
@@ -133,11 +136,23 @@ def _qt_unused(dest: str) -> bool:
     return any(f"Qt{m}" in d or f"Qt6{m}" in d for m in _QT_DROP_MODS)
 
 
+def _pw_node(dest: str) -> bool:
+    # PyInstaller's playwright hook collects the whole package — including the
+    # 114 MB driver/node — regardless of _playwright_driver(). Drop it; it's
+    # downloaded on demand (core.web_render.ensure_web_node). cli.js stays.
+    d = dest.replace("\\", "/")
+    return "playwright/driver/" in d and d.rsplit("/", 1)[-1] in ("node", "node.exe")
+
+
+def _drop(dest: str) -> bool:
+    return _qt_unused(dest) or _pw_node(dest)
+
+
 _before = len(a.binaries) + len(a.datas)
-a.binaries = [e for e in a.binaries if not _qt_unused(e[0])]
-a.datas = [e for e in a.datas if not _qt_unused(e[0])]
-print(f"[spec] dropped {_before - len(a.binaries) - len(a.datas)} unused Qt entries "
-      "(QtQml/QtQuick/QtPdf/QtVirtualKeyboard)")
+a.binaries = [e for e in a.binaries if not _drop(e[0])]
+a.datas = [e for e in a.datas if not _drop(e[0])]
+print(f"[spec] dropped {_before - len(a.binaries) - len(a.datas)} entries "
+      "(unused Qt modules + the on-demand Playwright node)")
 
 pyz = PYZ(a.pure)
 
