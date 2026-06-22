@@ -1161,7 +1161,7 @@ class RenderPanel(QWidget):
             return lbl
 
         # ── Resolution & FPS ──────────────────────────────────────────
-        root.addWidget(section("RESOLUTION & FRAME RATE"))
+        root.addWidget(section("RESOLUTION & FPS"))
         res_row = QHBoxLayout()
         res_row.setSpacing(6)
         self.width_edit = QLineEdit("1920")
@@ -1186,7 +1186,7 @@ class RenderPanel(QWidget):
         root.addLayout(res_row)
 
         # ── Frame Range ───────────────────────────────────────────────
-        root.addWidget(section("FRAME RANGE"))
+        root.addWidget(section("FRAMES"))
         fr_row = QHBoxLayout()
         fr_row.setSpacing(6)
         self.frame_start_edit = QLineEdit("1")
@@ -1227,7 +1227,7 @@ class RenderPanel(QWidget):
 
         format_col = QVBoxLayout()
         format_col.setSpacing(2)
-        format_col.addWidget(section("MASTER OUTPUT"))
+        format_col.addWidget(section("MASTER"))
         self.profile_combo = QComboBox()
         self.profile_combo.setToolTip("The master deliverable's container: H264 MP4 for review, ProRes MOV for editorial, PNG/EXR sequences for comp.")
         self.profile_combo.addItems(list(OUTPUT_PROFILES.keys()))
@@ -1240,7 +1240,7 @@ class RenderPanel(QWidget):
         # the active renderer can't produce are hidden — see _sync_deliverables.
         self.extra_output_checks: dict[str, QCheckBox] = {}
         _movie_profiles = [n for n, (fmt, _c) in OUTPUT_PROFILES.items() if fmt in ("MPEG4", "QUICKTIME")]
-        self.also_label = QLabel("Also deliver (same render):")
+        self.also_label = QLabel("Also deliver:")
         self.also_label.setObjectName("FieldLabel")
         self.also_label.setToolTip("Extra files transcoded from the master render — no re-render.")
         format_col.addWidget(self.also_label)
@@ -1256,7 +1256,7 @@ class RenderPanel(QWidget):
         root.addLayout(ro_row)
 
         # ── Output Path ───────────────────────────────────────────────
-        root.addWidget(section("OUTPUT PATH"))
+        root.addWidget(section("PATH"))
         path_row = QHBoxLayout()
         path_row.setSpacing(6)
         self.output_edit = QLineEdit()
@@ -1289,8 +1289,8 @@ class RenderPanel(QWidget):
         # section auto-shows only for the renderer(s) it applies to (set_renderer).
         self.adv_box = QWidget()
         adv = QVBoxLayout(self.adv_box)
-        adv.setContentsMargins(0, 6, 0, 0)
-        adv.setSpacing(10)
+        adv.setContentsMargins(0, 2, 0, 0)
+        adv.setSpacing(6)
 
         def labeled(text: str, w: QWidget) -> QVBoxLayout:
             """A field label stacked above its input, matching the panel style."""
@@ -1351,19 +1351,19 @@ class RenderPanel(QWidget):
         self.rs_threshold_row = QWidget()
         _tr = QVBoxLayout(self.rs_threshold_row)
         _tr.setContentsMargins(0, 0, 0, 0)
-        _tr.addLayout(labeled("Noise Threshold  (higher = faster)", self.rs_threshold_edit))
+        _tr.addLayout(labeled("Noise threshold", self.rs_threshold_edit))
         adv.addWidget(self.rs_threshold_row)
         # Denoise (both) + transparent (Blender only).
         self.denoise_cb = QCheckBox("Denoise")
         self.denoise_cb.setToolTip("AI-denoise the render — lets you use far fewer samples for the same look.")
         self.denoise_cb.setChecked(True)
-        self.transparent_cb = QCheckBox("Transparent background (alpha)")
-        self.burn_in_cb = QCheckBox("Burn-in overlay (clip · frame · date)")
+        self.transparent_cb = QCheckBox("Transparent (alpha)")
+        self.burn_in_cb = QCheckBox("Burn-in overlay")
         self.burn_in_cb.setToolTip("Stamps the clip name/version, frame number, camera and date "
                                    "onto every frame — so reviews always know which version "
                                    "they're looking at. (Farm C4D renders: not yet.)")
         self.transparent_cb.setToolTip("Render with a transparent background — needs PNG/EXR/ProRes output.")
-        self.safe_mode_cb = QCheckBox("Validate file paths (safe mode)")
+        self.safe_mode_cb = QCheckBox("Validate paths")
         self.safe_mode_cb.setChecked(True)
         self.safe_mode_cb.setToolTip(
             "Before rendering, check that the scene and every mapped clip exist, are "
@@ -1372,14 +1372,14 @@ class RenderPanel(QWidget):
         # Stacked vertically (not one wide row) so the long labels never force a
         # huge minimum width — that's what made opening Advanced stretch the dock.
         cb_col = QVBoxLayout()
-        cb_col.setSpacing(8)
+        cb_col.setSpacing(5)
         cb_col.setContentsMargins(0, 2, 0, 0)
         for _cb in (self.denoise_cb, self.transparent_cb, self.burn_in_cb, self.safe_mode_cb):
             cb_col.addWidget(_cb)
         adv.addLayout(cb_col)
 
         # ── Output (same slot for both renderers) ────────────────────────
-        adv.addWidget(section("OUTPUT"))
+        adv.addWidget(section("ENCODING"))
         self.scale_combo = QComboBox()
         self.scale_combo.setToolTip("Render scale: 50% renders at half resolution — much faster drafts, same framing.")
         self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
@@ -1412,7 +1412,7 @@ class RenderPanel(QWidget):
         self.gi_box = QWidget()
         gi_lay = QVBoxLayout(self.gi_box)
         gi_lay.setContentsMargins(0, 0, 0, 0)
-        gi_lay.setSpacing(10)
+        gi_lay.setSpacing(6)
         gi_lay.addWidget(section("LIGHTING & GI"))
         self.rs_gi_cb = QCheckBox("Global illumination")
         self.rs_gi_cb.setChecked(True)
@@ -1431,8 +1431,8 @@ class RenderPanel(QWidget):
         self.color_box = QWidget()
         color_lay = QVBoxLayout(self.color_box)
         color_lay.setContentsMargins(0, 0, 0, 0)
-        color_lay.setSpacing(10)
-        color_lay.addWidget(section("COLOR MANAGEMENT"))
+        color_lay.setSpacing(6)
+        color_lay.addWidget(section("COLOR"))
         self.view_transform_combo = QComboBox()
         self.view_transform_combo.setToolTip("Colour view transform: AgX/Filmic = cinematic tone-map, Standard = raw sRGB.")
         self.view_transform_combo.addItems(["AgX", "Filmic", "Standard", "Khronos PBR Neutral", "Raw", "False Color"])
@@ -1452,8 +1452,7 @@ class RenderPanel(QWidget):
         self.ao_box = QWidget()
         ao_lay = QVBoxLayout(self.ao_box)
         ao_lay.setContentsMargins(0, 0, 0, 0)
-        ao_lay.setSpacing(10)
-        ao_lay.addWidget(section("AMBIENT OCCLUSION"))
+        ao_lay.setSpacing(6)
         self.ao_cb = QCheckBox("Ambient occlusion")
         self.ao_cb.setToolTip("Adds soft contact-shadow depth where surfaces meet — "
                               "occludes ambient light in creases. Off keeps the flat look.")
@@ -1472,8 +1471,8 @@ class RenderPanel(QWidget):
         self.web_light_box = QWidget()
         wl = QVBoxLayout(self.web_light_box)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.setSpacing(10)
-        wl.addWidget(section("SCENE LIGHTING"))
+        wl.setSpacing(6)
+        wl.addWidget(section("LIGHTING"))
         self.web_light_preset_combo = QComboBox()
         self.web_light_preset_combo.addItems(["Auto", "Studio", "Outdoor", "Flat", "None"])
         self.web_light_preset_combo.setToolTip(
@@ -1485,7 +1484,7 @@ class RenderPanel(QWidget):
         self.web_light_intensity_val = QLabel("1.0x")
         self.web_light_intensity_slider.valueChanged.connect(
             lambda v: self.web_light_intensity_val.setText(f"{v / 100:.1f}x"))
-        self.web_respect_lights_cb = QCheckBox("Use lights already in the file")
+        self.web_respect_lights_cb = QCheckBox("Use scene lights")
         self.web_respect_lights_cb.setChecked(True)
         self.web_respect_lights_cb.setToolTip(
             "If the .glb ships its own lights, keep the artist's lighting and skip the preset rig.")
@@ -1549,23 +1548,22 @@ class RenderPanel(QWidget):
     # carried as itemData so configs/profiles keep the real identifier.
     ENGINE_LABELS: ClassVar = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
                                "WEB_THREEJS": "three.js (WebGL)"}
-    # Backend key (→ _BACKEND_INFO colour/badge) + a one-line "what this is" blurb,
-    # shown under the picker like an Adobe Media Encoder format summary.
+    # Backend key (→ _BACKEND_INFO colour) + a terse blurb, shown under the picker
+    # like an Adobe Media Encoder format summary. The coloured dot signals backend.
     ENGINE_DESC: ClassVar = {
-        "CYCLES": ("blender", "Photoreal · path-traced (slowest, best quality)"),
-        "BLENDER_EEVEE": ("blender", "Fast preview · real-time raster (seconds)"),
-        "Redshift": ("c4d", "GPU production renderer · Cinema 4D scenes"),
-        "WEB_THREEJS": ("web", "Real-time WebGL · instant, no 3D app needed"),
+        "CYCLES": ("blender", "Path-traced · best quality"),
+        "BLENDER_EEVEE": ("blender", "Real-time · fast preview"),
+        "Redshift": ("c4d", "GPU · Cinema 4D"),
+        "WEB_THREEJS": ("web", "Real-time · WebGL"),
     }
 
     def _update_engine_summary(self) -> None:
-        """Refresh the badge + blurb under the renderer picker for the current pick."""
+        """Refresh the blurb under the renderer picker for the current pick."""
         val = self.engine_value()
         key, desc = self.ENGINE_DESC.get(val, ("blender", ""))
-        color, name = _BACKEND_INFO.get(key, ("#888888", ""))
+        color = _BACKEND_INFO.get(key, ("#888888", ""))[0]
         self.engine_summary.setText(
-            f'<span style="color:{color};">&#9679;</span>&nbsp;'
-            f'<b style="color:{color};">{name}</b>&nbsp;&nbsp;{desc}')
+            f'<span style="color:{color};">&#9679;</span>&nbsp;{desc}')
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()

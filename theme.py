@@ -382,8 +382,8 @@ def stylesheet(p: Palette) -> str:
         font-size: {FONT_XS}px;
         font-weight: 700;
         letter-spacing: 1px;
-        margin-top: 10px;
-        margin-bottom: 2px;
+        margin-top: 5px;
+        margin-bottom: 1px;
     }}
     QLabel#FieldLabel {{ color: {p.text_muted}; font-size: {FONT_XS}px; }}
     QLabel#HintLabel {{ color: {p.text_faint}; font-size: {FONT_XS}px; }}
