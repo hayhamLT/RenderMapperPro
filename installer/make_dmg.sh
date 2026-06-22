@@ -18,6 +18,17 @@ BG="$(cd "$(dirname "$0")" && pwd)/dmg-background.png"
 
 [ -d "$APP" ] || { echo "App not found: $APP" >&2; exit 1; }
 
+detach_retry() {   # the volume is often briefly "Resource busy" right after Finder
+    local mnt="$1" i                         # closes it; retry, then force, before failing
+    for i in 1 2 3 4 5; do
+        hdiutil detach "$mnt" >/dev/null 2>&1 && return 0
+        sleep 2
+        hdiutil detach "$mnt" -force >/dev/null 2>&1 && return 0
+        sleep 2
+    done
+    return 1
+}
+
 bare_dmg() {   # simple, dependency-free, always works
     local stage; stage="$(mktemp -d)/dmg"; mkdir -p "$stage"
     cp -R "$APP" "$stage/"
@@ -82,17 +93,31 @@ OSA
     kill "$killer" 2>/dev/null || true
     [ "$osa_rc" -eq 0 ] || return 1
     sync
-    hdiutil detach "$mnt" >/dev/null
+    # Explicit failure on detach/convert: set -e is suppressed inside a function
+    # that's tested by && (the caller below), so a bare failure here would NOT
+    # abort — it would fall through to "Built (styled)" and ship NO dmg. Guard it.
+    detach_retry "$mnt" || return 1
     rm -f "$OUT"
-    hdiutil convert "$tmpdmg" -format UDZO -o "$OUT" >/dev/null
+    hdiutil convert "$tmpdmg" -format UDZO -o "$OUT" >/dev/null || return 1
     rm -rf "$tmpdir"
+    [ -f "$OUT" ] || return 1
     echo "Built (styled) $OUT"
 }
 
 # Try styled; on any failure, clean up a stray mount and fall back to plain.
-if [ -f "$BG" ] && ( set -e; styled_dmg ); then
-    exit 0
+if [ -f "$BG" ] && styled_dmg; then
+    :
+else
+    echo "Styled dmg unavailable — using a plain dmg." >&2
+    hdiutil detach "/Volumes/$VOL" >/dev/null 2>&1 || true
+    bare_dmg
 fi
-echo "Styled dmg unavailable — using a plain dmg." >&2
-hdiutil detach "/Volumes/$VOL" >/dev/null 2>&1 || true
-bare_dmg
+
+# A release must NEVER ship without a real installer. Verify the result is a
+# valid disk image; if not, fail loudly so a flaky hdiutil breaks CI instead of
+# silently dropping the .dmg and letting the build "succeed" with no installer.
+if ! hdiutil imageinfo "$OUT" >/dev/null 2>&1; then
+    echo "FATAL: no valid .dmg was produced at $OUT" >&2
+    exit 1
+fi
+echo "Verified $OUT is a valid disk image."
