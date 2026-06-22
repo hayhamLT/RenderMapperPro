@@ -1145,6 +1145,12 @@ class ScenePanel(QWidget):
             self.toggle_mute(item.data(ROLE_VIDEO_PATH))
 
 
+# Compact field widths so a single value never spans the panel: small numeric
+# inputs (samples, exposure, …) and the short dropdowns (codec, device, scale).
+_NUM_W = 88
+_SEL_W = 150
+
+
 class RenderPanel(QWidget):
     output_changed = Signal(str)
     tokens_requested = Signal()
@@ -1318,15 +1324,15 @@ class RenderPanel(QWidget):
             return col
 
         def two_col(left: QVBoxLayout, right: QVBoxLayout | None = None) -> QHBoxLayout:
-            """Two equal-width field columns; a missing right column leaves the
-            left field at half width so stacked rows stay aligned."""
+            """Two compact, left-aligned field columns — the trailing stretch eats
+            the slack so the fields keep a sensible width and never span the panel,
+            and a hidden right column can't make the left one balloon."""
             row = QHBoxLayout()
-            row.setSpacing(10)
-            row.addLayout(left, 1)
+            row.setSpacing(12)
+            row.addLayout(left)
             if right is not None:
-                row.addLayout(right, 1)
-            else:
-                row.addStretch(1)
+                row.addLayout(right)
+            row.addStretch(1)
             return row
 
         # ── Sampling & quality (same slot for both renderers) ────────────
@@ -1344,6 +1350,7 @@ class RenderPanel(QWidget):
         # Samples: 'Cycles Samples' (Blender) / 'Max Samples' + 'Min Samples' (RS).
         self.samples_edit = QLineEdit("64")
         self.samples_edit.setPlaceholderText("64")
+        self.samples_edit.setMaximumWidth(_NUM_W)
         self.samples_label = QLabel("Cycles Samples")
         self.samples_label.setObjectName("FieldLabel")
         samples_col = QVBoxLayout()
@@ -1351,22 +1358,29 @@ class RenderPanel(QWidget):
         samples_col.addWidget(self.samples_label)
         samples_col.addWidget(self.samples_edit)
         self.rs_min_samples_edit = QLineEdit("4")
+        self.rs_min_samples_edit.setMaximumWidth(_NUM_W)
         self.rs_min_box = QWidget()
         _mb = QVBoxLayout(self.rs_min_box)
         _mb.setContentsMargins(0, 0, 0, 0)
         _mb.addLayout(labeled("Min Samples", self.rs_min_samples_edit))
+        # Numeric fields are compact + left-aligned (a trailing stretch eats the
+        # slack) — a single count never spans the panel, and hiding Min Samples
+        # can't make Samples balloon to full width.
         samples_row = QHBoxLayout()
-        samples_row.setSpacing(10)
-        samples_row.addLayout(samples_col, 1)
-        samples_row.addWidget(self.rs_min_box, 1)
+        samples_row.setSpacing(12)
+        samples_row.addLayout(samples_col)
+        samples_row.addWidget(self.rs_min_box)
+        samples_row.addStretch(1)
         adv.addLayout(samples_row)
         # Noise threshold (Redshift only) — the biggest speed knob.
         self.rs_threshold_edit = QLineEdit("0.01")
         self.rs_threshold_edit.setToolTip("Adaptive noise threshold — higher renders faster (noisier).")
+        self.rs_threshold_edit.setMaximumWidth(_NUM_W)
         self.rs_threshold_row = QWidget()
-        _tr = QVBoxLayout(self.rs_threshold_row)
+        _tr = QHBoxLayout(self.rs_threshold_row)
         _tr.setContentsMargins(0, 0, 0, 0)
         _tr.addLayout(labeled("Noise threshold", self.rs_threshold_edit))
+        _tr.addStretch(1)
         adv.addWidget(self.rs_threshold_row)
         # Denoise (both) + transparent (Blender only).
         self.denoise_cb = QCheckBox("Denoise")
@@ -1396,9 +1410,11 @@ class RenderPanel(QWidget):
         # ── Output (same slot for both renderers) ────────────────────────
         adv.addWidget(section("ENCODING"))
         self.scale_combo = QComboBox()
+        self.scale_combo.setMaximumWidth(_SEL_W)
         self.scale_combo.setToolTip("Render scale: 50% renders at half resolution — much faster drafts, same framing.")
         self.scale_combo.addItems(["100%", "75%", "50%", "25%"])
         self.quality_combo = QComboBox()
+        self.quality_combo.setMaximumWidth(_SEL_W)
         self.quality_combo.setToolTip("Movie bitrate/quality (H264 only).")
         self.quality_combo.addItems(["Lossless", "High", "Medium", "Low", "Lowest"])
         self.quality_combo.setCurrentText("High")
@@ -1409,18 +1425,21 @@ class RenderPanel(QWidget):
         self.codec_combo = QComboBox()
         self.codec_combo.setToolTip("Video codec inside the container.")
         self.codec_combo.addItems(["Default", "H.264", "H.265"])
+        self.codec_combo.setMaximumWidth(_SEL_W)
         self.device_combo = QComboBox()
         self.device_combo.setToolTip("Render device: GPU is much faster when available.")
         self.device_combo.addItems(["Auto", "GPU", "CPU"])
-        # Device is Blender-only (Redshift is GPU); wrap it so it can be hidden.
+        self.device_combo.setMaximumWidth(_SEL_W)
+        # Device is Cycles-only; wrap it so it can be hidden without ballooning Codec.
         self.device_box = QWidget()
         dev_lay = QVBoxLayout(self.device_box)
         dev_lay.setContentsMargins(0, 0, 0, 0)
         dev_lay.addLayout(labeled("Device", self.device_combo))
         out_row = QHBoxLayout()
-        out_row.setSpacing(10)
-        out_row.addLayout(labeled("Codec", self.codec_combo), 1)
-        out_row.addWidget(self.device_box, 1)
+        out_row.setSpacing(12)
+        out_row.addLayout(labeled("Codec", self.codec_combo))
+        out_row.addWidget(self.device_box)
+        out_row.addStretch(1)
         adv.addLayout(out_row)
 
         # ── Lighting & GI (Redshift only) ────────────────────────────────
@@ -1434,7 +1453,9 @@ class RenderPanel(QWidget):
         self.rs_gi_cb.setToolTip("Turn off for flat/emissive content — a large speedup.")
         gi_lay.addWidget(self.rs_gi_cb)
         self.rs_gi_bounces_edit = QLineEdit("3")
+        self.rs_gi_bounces_edit.setMaximumWidth(_NUM_W)
         self.rs_ray_depth_edit = QLineEdit("6")
+        self.rs_ray_depth_edit.setMaximumWidth(_NUM_W)
         self.rs_ray_depth_edit.setToolTip("Max ray trace depth — fewer bounces render faster.")
         gi_lay.addLayout(two_col(
             labeled("GI Bounces", self.rs_gi_bounces_edit),
@@ -1454,8 +1475,10 @@ class RenderPanel(QWidget):
         self.view_transform_combo.setCurrentText("AgX")
         color_lay.addLayout(labeled("View Transform", self.view_transform_combo))
         self.exposure_edit = QLineEdit("0.0")
+        self.exposure_edit.setMaximumWidth(_NUM_W)
         self.exposure_edit.setToolTip("Colour exposure adjustment in stops (0 = unchanged).")
         self.gamma_edit = QLineEdit("1.0")
+        self.gamma_edit.setMaximumWidth(_NUM_W)
         self.gamma_edit.setToolTip("Display gamma adjustment (1.0 = unchanged).")
         color_lay.addLayout(two_col(
             labeled("Exposure", self.exposure_edit),
@@ -1473,8 +1496,10 @@ class RenderPanel(QWidget):
                               "occludes ambient light in creases. Off keeps the flat look.")
         ao_lay.addWidget(self.ao_cb)
         self.ao_distance_edit = QLineEdit("0.2")
+        self.ao_distance_edit.setMaximumWidth(_NUM_W)
         self.ao_distance_edit.setToolTip("How far occlusion reaches, in world units. Larger = broader, softer.")
         self.ao_factor_edit = QLineEdit("1.0")
+        self.ao_factor_edit.setMaximumWidth(_NUM_W)
         self.ao_factor_edit.setToolTip("Strength (EEVEE-Legacy / Cycles; EEVEE Next uses distance).")
         ao_lay.addLayout(two_col(
             labeled("AO Distance", self.ao_distance_edit),
