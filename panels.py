@@ -1520,7 +1520,7 @@ class RenderPanel(QWidget):
                   self.rs_gi_bounces_edit, self.rs_ray_depth_edit):
             w.textEdited.connect(self._rs_custom)
         self.rs_gi_cb.toggled.connect(lambda _v: self._rs_custom())
-        self.set_renderer(False)
+        self.set_renderer("CYCLES")
         self._update_engine_summary()
 
         root.addWidget(self.adv_box)
@@ -1607,22 +1607,32 @@ class RenderPanel(QWidget):
         for n, cb in self.extra_output_checks.items():
             cb.setChecked(n in wanted)
 
-    def set_renderer(self, is_c4d: bool, is_web: bool = False) -> None:
-        """Adapt the settings to the active renderer so every visible control is
-        real. Redshift relabels samples and shows its optimization controls; the
-        web/three.js backend hides the Blender-only Device + Color + alpha
-        controls (it ignores them) and offers only the outputs it can produce."""
-        self.samples_label.setText("Max Samples" if is_c4d else "Cycles Samples")
-        self.quality_header.setText(
-            "QUALITY · " + ("Redshift" if is_c4d else "three.js" if is_web else "Blender"))
+    def set_renderer(self, engine: str) -> None:
+        """Adapt every visible control to the chosen ENGINE so each renderer shows
+        only its own real settings. Cycles vs EEVEE differ too (the sample count
+        means different things, and Device is Cycles-only); Redshift relabels
+        samples and shows its optimization controls; the web/three.js backend
+        hides the path-tracer + Blender-only controls and offers only the outputs
+        it can produce."""
+        is_c4d = engine == "Redshift"
+        is_web = engine == "WEB_THREEJS"
+        is_eevee = engine == "BLENDER_EEVEE"
+        is_blender = not is_c4d and not is_web                    # Cycles or EEVEE
+        # 'Samples' means a different thing per engine — label it accordingly.
+        self.samples_label.setText(
+            "Max Samples" if is_c4d else "EEVEE Samples" if is_eevee else "Cycles Samples")
+        qname = ("Redshift" if is_c4d else "three.js" if is_web
+                 else "EEVEE" if is_eevee else "Cycles")
+        self.quality_header.setText(f"QUALITY · {qname}")
         # Redshift-only sampling/GI controls.
         for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row, self.gi_box):
             w.setVisible(is_c4d)
-        # Blender-only controls — also hidden for the web/three.js backend.
-        self.device_box.setVisible(not is_c4d and not is_web)   # Redshift/web are GPU-only
-        self.color_box.setVisible(not is_c4d and not is_web)    # Blender color management
-        self.ao_box.setVisible(not is_c4d and not is_web)       # Blender EEVEE/Cycles AO
-        # Samples + denoise are path-tracer concepts — not three.js (no path tracing).
+        # Device (Auto/GPU/CPU) is a CYCLES-only preference — EEVEE rasterises on
+        # the GPU, Redshift is GPU, three.js runs in the browser.
+        self.device_box.setVisible(is_blender and not is_eevee)
+        self.color_box.setVisible(is_blender)                    # Blender colour management (both)
+        self.ao_box.setVisible(is_blender)                       # Blender EEVEE/Cycles AO (both)
+        # Samples + denoise are path-tracer/raster concepts — not three.js.
         self.samples_label.setVisible(not is_web)
         self.samples_edit.setVisible(not is_web)
         self.denoise_cb.setVisible(not is_web)

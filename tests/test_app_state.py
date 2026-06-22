@@ -87,13 +87,18 @@ def test_renderer_drives_visible_settings(tmp_path, monkeypatch):
     window isn't shown (so isVisible() is always False)."""
     _app_qt, w = _window(tmp_path, monkeypatch)
     rp = w.render_panel
-    rp.set_renderer(is_c4d=False, is_web=True)        # three.js
+    rp.set_renderer("WEB_THREEJS")                    # three.js
     assert rp.samples_edit.isHidden() and rp.denoise_cb.isHidden()
     assert rp.device_box.isHidden() and not rp.web_light_box.isHidden()
     assert not rp.transparent_cb.isHidden()           # transparent now works in three.js
-    rp.set_renderer(is_c4d=False, is_web=False)       # Blender
+    rp.set_renderer("CYCLES")                         # Blender Cycles
     assert not rp.samples_edit.isHidden() and not rp.denoise_cb.isHidden()
     assert rp.web_light_box.isHidden()
+    assert not rp.device_box.isHidden()               # Cycles picks the device
+    assert rp.samples_label.text() == "Cycles Samples"
+    rp.set_renderer("BLENDER_EEVEE")                  # EEVEE adapts distinctly
+    assert rp.device_box.isHidden()                   # EEVEE is GPU-only — no device picker
+    assert rp.samples_label.text() == "EEVEE Samples"
 
 
 def test_profile_roundtrip(tmp_path, monkeypatch):

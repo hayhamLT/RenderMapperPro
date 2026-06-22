@@ -181,10 +181,16 @@ const api = {
   useCamera(name) {
     const cw = renderer ? renderer.domElement.width : 640;
     const ch = renderer ? renderer.domElement.height : 360;
+    const names = Object.keys(camerasByName);
     if (name && camerasByName[name]) {
-      camera = camerasByName[name];
+      camera = camerasByName[name];          // the requested real scene camera
+    } else if (names.length) {
+      // Unknown/blank name but the scene HAS cameras → use the first real one.
+      // Always render through a real camera; never invent an angle when the
+      // artist authored cameras (a blank selection = the scene's default camera).
+      camera = camerasByName[names[0]];
     } else {
-      // No camera named → frame the whole scene with a default one.
+      // Only when the scene ships NO cameras at all → frame the whole scene.
       const box = new THREE.Box3().setFromObject(scene);
       const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());

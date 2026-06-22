@@ -1847,7 +1847,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             target = items[0]
         # Adapt the settings to the TARGET engine, not the extension — so picking
         # Blender for a .glb swaps the three.js controls for Blender's.
-        self.render_panel.set_renderer(target == "Redshift", target == "WEB_THREEJS")
+        self.render_panel.set_renderer(target)
         if self.render_panel.engine_values() != items:
             combo.blockSignals(True)
             self.render_panel.populate_engines(items)
@@ -1863,7 +1863,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         dropdown — e.g. choosing Blender for a .glb swaps the three.js scene-
         lighting/outputs for Blender's device + colour-management controls."""
         eng = self.render_panel.engine_value()
-        self.render_panel.set_renderer(eng == "Redshift", eng == "WEB_THREEJS")
+        self.render_panel.set_renderer(eng)
 
     def _on_discovery(self, materials: list, cameras: list, settings: dict) -> None:
         self._material_aspects = dict(settings.get("material_aspects") or {})
