@@ -276,19 +276,14 @@ def stylesheet(p: Palette) -> str:
     }}
     QLineEdit::placeholder {{ color: {p.text_faint}; }}
 
-    /* ── Keyboard focus — a visible accent ring on every interactive widget.
+    /* ── Keyboard focus — a visible accent ring on the interactive controls.
        On a fully-styled dark Qt app the OS focus rect is suppressed, so without
        this, Tab-ing through the window shows nothing (keyboard users are blind).
-       A single 1px accent border — NOT border+outline, which paint two
-       concentric rings (the "double stroke"). Lists/tables/trees are excluded
-       here: they show focus on the focused ITEM (rule below), so a ring around
-       the whole widget too would double up. */
+       Lists/tables are deliberately NOT bordered: the selection background
+       already tracks the current row as you arrow through it, so an accent ring
+       on the item is redundant noise — no box around a selected video/material. */
     QPushButton:focus, QToolButton:focus, QCheckBox:focus,
     QRadioButton:focus, QTabBar::tab:focus {{
-        border: 1px solid {p.accent};
-    }}
-    QListWidget::item:focus, QListView::item:focus,
-    QTableView::item:focus, QTreeView::item:focus {{
         border: 1px solid {p.accent};
     }}
 
