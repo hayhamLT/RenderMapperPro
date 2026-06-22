@@ -48,9 +48,11 @@ def test_ao_box_blender_only():
     # isHidden() reflects the widget's own setVisible flag (set by set_renderer),
     # independent of the collapsed-by-default Advanced section.
     p = _panel()
-    p.set_renderer(False, False)   # Blender
+    p.set_renderer("CYCLES")       # Blender Cycles
     assert p.ao_box.isHidden() is False
-    p.set_renderer(True, False)    # C4D/Redshift
+    p.set_renderer("BLENDER_EEVEE")  # Blender EEVEE — AO still applies
+    assert p.ao_box.isHidden() is False
+    p.set_renderer("Redshift")     # C4D/Redshift
     assert p.ao_box.isHidden() is True
-    p.set_renderer(False, True)    # web/three.js
+    p.set_renderer("WEB_THREEJS")  # web/three.js
     assert p.ao_box.isHidden() is True

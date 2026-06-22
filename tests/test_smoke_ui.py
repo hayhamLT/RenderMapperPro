@@ -18,9 +18,9 @@ def test_window_builds_and_core_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(app_qt, "LOG_PATH", tmp_path / "l.txt")
 
     w = app_qt.BlenderVideoMapperQt()
-    # Renderer-aware settings swap both ways.
-    w.render_panel.set_renderer(True)
-    w.render_panel.set_renderer(False)
+    # Renderer-aware settings swap across every engine.
+    for _eng in ("Redshift", "WEB_THREEJS", "BLENDER_EEVEE", "CYCLES"):
+        w.render_panel.set_renderer(_eng)
     # Auto-map wiring (mapping a clip implicitly targets the material).
     w.scene_panel.set_materials(["Screen", "Wall"])
     w.scene_panel.set_videos(["/x/Screen_v1.mp4"])
