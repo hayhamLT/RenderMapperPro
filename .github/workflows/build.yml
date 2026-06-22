@@ -92,6 +92,26 @@ jobs:
       - name: Render one frame (offline, vendored three.js)
         run: pytest -q tests/test_web_render_smoke.py --timeout=180
 
+  # Dependency vulnerability scan (OSV / PyPI advisories) over the shipped +
+  # build pins. Advisory only: it does NOT gate the build/Release (continue-on-
+  # error), so a fresh upstream CVE can't block a release on its own — Dependabot
+  # opens the actual fix PRs. Findings show in this job's log/summary. Flip
+  # continue-on-error to false (and add to branch protection) to make it blocking.
+  audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: pip-audit (runtime + build deps)
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r requirements.txt -r requirements-build.txt --desc
+
   # Fast, reliable runners — these gate the Release.
   build:
     name: Build (${{ matrix.label }})
@@ -99,6 +119,10 @@ jobs:
     if: github.event_name != 'pull_request'   # PRs run gates only, not full builds
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45   # PyInstaller + Playwright bundling; fail before the 6h cap
+    permissions:
+      contents: read
+      id-token: write       # for signed build-provenance attestation
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +162,23 @@ jobs:
           $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
           Copy-Item "installer\Output\RenderMapperPro-Windows-x64-Setup.exe" .
+      # Signed SLSA build-provenance for each shipped artifact (verifiable with
+      # `gh attestation verify <file> --repo <owner>/<repo>`). Skipped on PRs
+      # (this whole job is push/tag-only).
+      - name: Attest build provenance (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            RenderMapperPro-${{ matrix.label }}.zip
+            RenderMapperPro-${{ matrix.label }}.dmg
+      - name: Attest build provenance (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            RenderMapperPro-${{ matrix.label }}.zip
+            RenderMapperPro-Windows-x64-Setup.exe
       - uses: actions/upload-artifact@v7
         with:
           name: RenderMapperPro-${{ matrix.label }}
@@ -160,6 +201,13 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
+      - name: Generate SHA-256 checksums
+        run: |
+          : > SHA256SUMS.txt
+          while IFS= read -r -d '' f; do
+            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> "$GITHUB_WORKSPACE/SHA256SUMS.txt"
+          done < <(find artifacts -type f \( -name '*.zip' -o -name '*.dmg' -o -name '*.exe' \) -print0)
+          cat SHA256SUMS.txt
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v3
         with:
@@ -167,6 +215,7 @@ jobs:
             artifacts/**/*.zip
             artifacts/**/*.dmg
             artifacts/**/*.exe
+            SHA256SUMS.txt
           generate_release_notes: true
           body: |
             Standalone builds of **Render Mapper Pro**.
@@ -178,3 +227,5 @@ jobs:
 
             **Windows:** run the **Setup.exe** (installs to Program Files + Start-Menu shortcut). SmartScreen may warn — **More info → Run anyway** (the build isn't code-signed).
             **macOS:** open the **.dmg** and drag the app to Applications. First launch: right-click → **Open** → **Open** (it isn't notarized). Apple-Silicon only.
+
+            **Verify your download:** `SHA256SUMS.txt` lists the checksum of every artifact (`shasum -a 256 -c SHA256SUMS.txt`). Each binary also carries signed build provenance — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.

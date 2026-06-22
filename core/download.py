@@ -20,6 +20,15 @@ class DownloadCancelled(Exception):
     """Raised by :func:`download_with_progress` when ``should_cancel()`` returns True."""
 
 
+def fetch_text(url: str, *, user_agent: str = "RenderMapperPro/1.0", timeout: int = 30) -> str:
+    """GET a small text resource over the verifying SSL context (e.g. a checksum
+    sidecar). Uses the same bundled-CA context as the big download."""
+    from core.utils import ssl_context
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
 def download_with_progress(url: str, dest: str | Path, on_log: LogCallback | None = None,
                            *, on_progress: ProgressCallback | None = None,
                            should_cancel: CancelCheck | None = None,

@@ -64,3 +64,18 @@ def verify_sha256(path: str | Path, expected: str) -> None:
     if actual.lower() != expected.lower():
         raise RuntimeError(
             f"Checksum mismatch for {Path(path).name}: expected {expected}, got {actual}")
+
+
+def expected_sha256_from_sidecar(text: str, filename: str) -> str | None:
+    """Pull the digest for ``filename`` out of a ``<hexdigest>  <filename>``
+    checksum listing (e.g. blender.org's ``.sha256`` sidecar). Matches by
+    basename; ignores blank/comment lines. Returns None if not listed."""
+    target = Path(filename).name
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and Path(parts[-1]).name == target:
+            return parts[0]
+    return None

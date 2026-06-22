@@ -29,6 +29,7 @@ from core.runtime import (
     BLENDER_RUNTIME_VERSION,
     RUNTIME_ROOT,
     _managed_blender_executable,
+    _runtime_checksum_url,
     _runtime_download_spec,
 )
 
@@ -53,6 +54,33 @@ class RuntimeInstallThread(QThread):
         download_with_progress(url, dest, self.log.emit,
                                on_progress=self.progress.emit,
                                should_cancel=lambda: self._cancelled)
+
+    def _verify_download(self, archive_path: Path, archive_name: str) -> None:
+        """Verify the archive against blender.org's published SHA-256 sidecar
+        before extracting (the same rigor the self-updater applies to installers).
+        Fails CLOSED on a digest mismatch — deletes the bad archive and raises —
+        but proceeds with a logged warning if the sidecar can't be fetched/parsed,
+        so a transient network blip doesn't brick an otherwise-good install."""
+        from core.archive import expected_sha256_from_sidecar, verify_sha256
+        from core.download import fetch_text
+        url = _runtime_checksum_url()
+        if not url:
+            return
+        try:
+            expected = expected_sha256_from_sidecar(fetch_text(url), archive_name)
+        except Exception as exc:
+            self.log.emit(f"[runtime] WARNING: couldn't fetch checksum sidecar ({exc}); skipping integrity check")
+            return
+        if not expected:
+            self.log.emit(f"[runtime] WARNING: {archive_name} not listed in checksum sidecar; skipping integrity check")
+            return
+        self.log.emit("[runtime] Verifying download integrity (SHA-256)…")
+        try:
+            verify_sha256(archive_path, expected)
+        except Exception:
+            archive_path.unlink(missing_ok=True)   # never extract or reuse a bad archive
+            raise
+        self.log.emit("[runtime] Integrity verified ✓")
 
     def _extract_archive(self, archive_path: Path, staging_dir: Path) -> None:
         from core.archive import safe_extract_tar, safe_extract_zip
@@ -135,6 +163,8 @@ class RuntimeInstallThread(QThread):
                 self.log.emit("[runtime] Using cached runtime archive")
             if self._cancelled:
                 raise DownloadCancelled()
+
+            self._verify_download(archive_path, archive_name)
 
             with tempfile.TemporaryDirectory(prefix="blender-runtime-") as td:
                 staging_dir = Path(td) / "staging"
