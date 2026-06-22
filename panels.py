@@ -329,6 +329,9 @@ class ScenePanel(QWidget):
         self.mat_search.setPlaceholderText("Filter materials")
         self.mat_search.textChanged.connect(self._refresh_lists)
         self.mat_list = MaterialListWidget()
+        self.mat_list.setAccessibleName("Materials")
+        self.mat_list.setAccessibleDescription(
+            "Scene materials. Mark a material as a render target and map a video clip to it.")
         # The left stripe is the render-target indicator: outline = targeted (no
         # clip yet), colourful = clip linked, ghost on hover = click to target.
         self.mat_list.setItemDelegate(TargetStripeDelegate(self._toggle_target, self, self.mat_list))
@@ -395,6 +398,9 @@ class ScenePanel(QWidget):
         self.vid_search.setPlaceholderText("Filter videos")
         self.vid_search.textChanged.connect(self._refresh_lists)
         self.vid_list = VideoListWidget()
+        self.vid_list.setAccessibleName("Videos")
+        self.vid_list.setAccessibleDescription(
+            "Source video clips. Map a clip to a material, or toggle its audio with the speaker badge.")
         self.vid_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.vid_list.viewport().setMouseTracking(True)
         self.vid_list.setItemDelegate(AudioBadgeDelegate(self.toggle_mute, self, self.vid_list))
@@ -1007,10 +1013,16 @@ class ScenePanel(QWidget):
             if m in mat_to_idx:
                 item.setData(ROLE_MAP_COLOR, LINK_COLORS[mat_to_idx[m] % len(LINK_COLORS)])
                 item.setToolTip(f"{m}\nRender target — clip linked")
+                a11y = f"{m}, render target, clip linked"
             elif targeted:
                 item.setToolTip(f"{m}\nRender target — waiting for a clip")
+                a11y = f"{m}, render target, no clip yet"
             else:
                 item.setToolTip(f"{m}\nClick the left edge (or right-click) to mark as a render target")
+                a11y = f"{m}, not a render target"
+            # The render-target stripe + map colour are painted by the delegate and
+            # invisible to screen readers; AccessibleTextRole announces that state.
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, a11y)
             if targeted:
                 item.setData(ROLE_TARGET, True)
             self.mat_list.addItem(item)
@@ -1038,8 +1050,11 @@ class ScenePanel(QWidget):
             if has_audio:
                 state = "muted — click the speaker to include" if muted else "audio on — click the speaker to mute"
                 item.setToolTip(f"{name}\n🔊 {state}")
+                item.setData(Qt.ItemDataRole.AccessibleTextRole,
+                             f"{name}, audio {'muted' if muted else 'on'}")
             else:
                 item.setToolTip(name)
+                item.setData(Qt.ItemDataRole.AccessibleTextRole, f"{name}, no audio")
             self.vid_list.addItem(item)
         if current_vid:
             for i in range(self.vid_list.count()):
@@ -2316,6 +2331,9 @@ class QueuePanel(QWidget):
             0, 7, "Queue is empty.\n\n1. Choose a scene and click Scan\n"
             "2. Add video clips\n3. Map a clip to a material\n\n"
             "A render job then appears here automatically.")
+        self.table.setAccessibleName("Render queue")
+        self.table.setAccessibleDescription(
+            "Render jobs. Each row's Job cell announces its renderer and status.")
         self.table.setHorizontalHeaderLabels(
             ["Run", "Job", "Preset", "Status", "ETA", "Progress", "Output"])
         run_header = self.table.horizontalHeaderItem(0)
@@ -2435,6 +2453,10 @@ class QueuePanel(QWidget):
             if _clip and _clip not in self._thumb_png:
                 self._thumb_loader.request(_clip)
             job_item.setToolTip(f"{_BACKEND_INFO[_bk][1]} · double-click to rename")
+            # The backend badge is an icon corner (invisible to AT); fold the
+            # renderer + status into the cell's accessible text.
+            job_item.setData(Qt.ItemDataRole.AccessibleTextRole,
+                             f"{job_item.text()}, {_BACKEND_INFO[_bk][1]}, {j.status}")
             self.table.setItem(r, 1, job_item)
             prof_item = QTableWidgetItem(j.output_profile or "H264 MP4")
             prof_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)

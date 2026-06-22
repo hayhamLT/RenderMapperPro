@@ -311,9 +311,15 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._runtime_prompted = False
         self._save_timer: QTimer | None = None
 
-        self._theme_mode = "dark"
+        # "system" follows the OS light/dark appearance; "light"/"dark" pin it.
+        # New installs follow the OS; a saved explicit choice is honoured on load.
+        self._theme_mode = "system"
         self._accent = T.ACCENT_ORANGE
-        self._palette: T.Palette = T.build_palette(self._theme_mode, self._accent)
+        self._palette: T.Palette = T.build_palette(self._effective_theme_mode(), self._accent)
+        # Re-theme live when the OS appearance flips, but only while following it.
+        _app = QApplication.instance()
+        if isinstance(_app, QApplication):
+            _app.styleHints().colorSchemeChanged.connect(self._on_os_color_scheme_changed)
 
         self._preview_enabled = True
         self._preview_path = ""
@@ -390,8 +396,40 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         QTimer.singleShot(0, self._init_window_geometry)
         QTimer.singleShot(250, self._init_blender)
 
+    def _effective_theme_mode(self) -> str:
+        """The concrete 'light'/'dark' to paint — resolving 'system' against the
+        OS appearance."""
+        if self._theme_mode == "system":
+            return T.resolve_system_mode()
+        return self._theme_mode
+
+    def _on_os_color_scheme_changed(self, _scheme: object = None) -> None:
+        """Re-theme when the OS flips light/dark — only while following system."""
+        if self._theme_mode == "system":
+            self._restyle_all()
+            self._sync_theme_menu()
+
+    def _sync_theme_menu(self) -> None:
+        """Reflect the current mode in the View-menu theme actions."""
+        pairs = (
+            (getattr(self, "system_theme_action", None), self._theme_mode == "system"),
+            (getattr(self, "theme_action", None), self._effective_theme_mode() == "light"),
+        )
+        for act, on in pairs:
+            if act is not None:
+                act.blockSignals(True)
+                act.setChecked(on)
+                act.blockSignals(False)
+
+    def _follow_system_theme(self, on: bool) -> None:
+        # Turning it off freezes the current appearance as an explicit choice.
+        self._theme_mode = "system" if on else self._effective_theme_mode()
+        self._restyle_all()
+        self._sync_theme_menu()
+        self._schedule_save()
+
     def _apply_theme(self) -> None:
-        self._palette = T.build_palette(self._theme_mode, self._accent)
+        self._palette = T.build_palette(self._effective_theme_mode(), self._accent)
         set_active_palette(self._palette)
         qss = T.stylesheet(self._palette)
         # Apply the theme app-wide, not just to the main window: a window-only
@@ -405,16 +443,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.setStyleSheet(qss)
 
     def _toggle_theme(self, light: bool) -> None:
+        # Picking an explicit light/dark leaves system-follow mode.
         mode = "light" if light else "dark"
         if mode == self._theme_mode:
             return
         self._theme_mode = mode
         self._restyle_all()
-        # Keep the menu checkmark in sync even when toggled programmatically.
-        if hasattr(self, "theme_action") and self.theme_action.isChecked() != light:
-            self.theme_action.blockSignals(True)
-            self.theme_action.setChecked(light)
-            self.theme_action.blockSignals(False)
+        self._sync_theme_menu()
         self._schedule_save()
 
     def _restyle_all(self) -> None:
@@ -524,8 +559,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         layout_menu.addAction(self.restore_layout_action)
 
         self.view_menu.addSeparator()
+        self.system_theme_action = QAction("Follow System Appearance", self, checkable=True)
+        self.system_theme_action.setChecked(self._theme_mode == "system")
+        self.system_theme_action.toggled.connect(self._follow_system_theme)
+        self.view_menu.addAction(self.system_theme_action)
         self.theme_action = QAction("Light Theme", self, checkable=True)
-        self.theme_action.setChecked(self._theme_mode == "light")
+        self.theme_action.setChecked(self._effective_theme_mode() == "light")
         self.theme_action.toggled.connect(self._toggle_theme)
         self.view_menu.addAction(self.theme_action)
         self.preview_action = QAction("Live Preview While Rendering", self, checkable=True)
@@ -3455,7 +3494,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             ("Render History…", self._show_history_dialog),
             ("Open HTML Render Report", self._open_html_report),
             ("Power & Cost Settings…", self._show_power_settings),
-            ("Toggle Light/Dark Theme", lambda: self._toggle_theme(self._theme_mode != "light")),
+            ("Toggle Light/Dark Theme", lambda: self._toggle_theme(self._effective_theme_mode() != "light")),
+            ("Follow System Appearance", lambda: self._follow_system_theme(True)),
             ("User Guide", self._show_user_guide),
             ("Quick Start", self._show_quick_start),
             ("Copy Diagnostics", self._copy_diagnostics),
@@ -3860,9 +3900,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
     def _apply_profile_data(self, d: dict) -> None:
         d = self._migrate_profile(d)
-        # Accent stays the brand orange; honor the saved light/dark choice.
+        # Accent stays the brand orange; honor the saved theme choice.
         tm = str(d.get("theme_mode", self._theme_mode))
-        if tm in ("dark", "light"):
+        if tm in ("dark", "light", "system"):
             self._theme_mode = tm
         try:
             self._power_watts = float(d.get("power_watts", self._power_watts))
@@ -4305,14 +4345,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             self._apply_profile_data(json.loads(PROFILE_PATH.read_text()))
         except Exception:
             _log.warning("failed to load saved profile; using defaults", exc_info=True)
-        # Widgets were built under the default dark theme; apply a saved light
-        # choice now and sync the menu checkbox without re-triggering a restyle.
-        if self._theme_mode != "dark":
-            self._restyle_all()
-        if hasattr(self, "theme_action"):
-            self.theme_action.blockSignals(True)
-            self.theme_action.setChecked(self._theme_mode == "light")
-            self.theme_action.blockSignals(False)
+        # Widgets were built under the construction-time theme; re-apply the saved
+        # choice (system/light/dark may differ from what was painted) and sync the
+        # View-menu actions.
+        self._restyle_all()
+        self._sync_theme_menu()
 
     def _maybe_first_run(self) -> None:
         """A one-time welcome on the very first launch: show what's detected and

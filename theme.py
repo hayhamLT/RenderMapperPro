@@ -209,6 +209,25 @@ def set_active_palette(pal: Palette) -> None:
     _ACTIVE_PALETTE = pal
 
 
+def resolve_system_mode(default: str = "dark") -> str:
+    """The OS appearance ('light' / 'dark') from Qt's reported colour scheme, or
+    ``default`` when it's unknown or no QApplication exists yet. Lets the app
+    follow the system light/dark setting (Qt 6.5+ QStyleHints.colorScheme)."""
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QGuiApplication
+        app = QGuiApplication.instance()
+        if isinstance(app, QGuiApplication):
+            scheme = app.styleHints().colorScheme()
+            if scheme == Qt.ColorScheme.Light:
+                return "light"
+            if scheme == Qt.ColorScheme.Dark:
+                return "dark"
+    except Exception:
+        pass
+    return default
+
+
 # ── Stylesheet builder ───────────────────────────────────────────────────────
 def stylesheet(p: Palette) -> str:
     """Build the full application QSS from a resolved palette.
