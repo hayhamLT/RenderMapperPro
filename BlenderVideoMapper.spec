@@ -39,10 +39,11 @@ def _ffmpeg_binaries():
 
 
 def _playwright_driver():
-    """Bundle Playwright's node driver so the frozen app can run the browser
-    installer + the runtime. ``node`` ships via binaries (preserves the +x bit;
-    datas strip it); the rest of driver/ as datas. Browsers are NOT bundled —
-    they're downloaded on demand into a per-user dir. Returns (binaries, datas)."""
+    """Bundle Playwright's driver — EXCEPT the ~114 MB ``node`` binary, which is
+    downloaded on demand on first web render (core.web_render.ensure_web_node,
+    wired up via PLAYWRIGHT_NODEJS_PATH). The small cli.js + the rest of driver/
+    stay bundled as datas. Browsers are likewise fetched on demand. Returns
+    (binaries, datas) — binaries is always empty now (node is the only binary)."""
     try:
         import playwright
     except Exception:
@@ -51,13 +52,15 @@ def _playwright_driver():
     pw_root = os.path.dirname(playwright.__file__)
     driver = os.path.join(pw_root, "driver")
     node_name = "node.exe" if os.name == "nt" else "node"
-    bins, datas = [], []
+    datas = []
     for root, _dirs, files in os.walk(driver):
         for f in files:
+            if f == node_name:
+                continue   # 114 MB node → downloaded on demand, not shipped
             src = os.path.join(root, f)
             dest = os.path.join("playwright", os.path.relpath(root, pw_root))
-            (bins if f == node_name else datas).append((src, dest))
-    return bins, datas
+            datas.append((src, dest))
+    return [], datas
 
 
 _pw_bins, _pw_datas = _playwright_driver()
@@ -100,10 +103,57 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['pw_runtime_hook.py'],
-    excludes=[],
+    # Drop Qt modules this Widgets-only app never imports. PyInstaller's PySide6
+    # hook otherwise bundles the whole QML/Quick stack (~22 MB), QtPdf (~14 MB)
+    # and the on-screen VirtualKeyboard — none of which we use (we import only
+    # QtCore/Gui/Widgets/Network/Svg/Multimedia[+Widgets]/DBus). Excluding the
+    # Python modules makes the per-module hooks skip their Qt libs/plugins too.
+    excludes=[
+        'PySide6.QtQml', 'PySide6.QtQmlModels', 'PySide6.QtQmlMeta',
+        'PySide6.QtQmlWorkerScript', 'PySide6.QtQuick', 'PySide6.QtQuickWidgets',
+        'PySide6.QtQuick3D', 'PySide6.QtPdf', 'PySide6.QtPdfWidgets',
+        'PySide6.QtVirtualKeyboard',
+    ],
     noarchive=False,
     optimize=0,
 )
+# `excludes` drops the Python bindings, but PySide6's PyInstaller hook still
+# collects every Qt *framework/dylib* (and the qml/ module tree). Filter the
+# unused ones out of the collected binaries+datas so they don't ship. Scoped to
+# the PySide6/Qt payload (so no app/third-party file is ever touched) and matches
+# both the macOS framework form (QtQml) and the Windows DLL form (Qt6Qml). None
+# of the kept modules (QtCore/Gui/Widgets/Network/Svg/Multimedia[+Widgets]/
+# Concurrent/OpenGL/DBus) contain these tokens, so there are no false drops.
+_QT_DROP_MODS = ("Qml", "Quick", "Pdf", "VirtualKeyboard")
+
+
+def _qt_unused(dest: str) -> bool:
+    d = dest.replace("\\", "/")
+    if "pyside6" not in d.lower():
+        return False                      # only ever touch the PySide6/Qt payload
+    if "/qml/" in d.lower():
+        return True                       # the QML module tree (no QtQml → dead weight)
+    return any(f"Qt{m}" in d or f"Qt6{m}" in d for m in _QT_DROP_MODS)
+
+
+def _pw_node(dest: str) -> bool:
+    # PyInstaller's playwright hook collects the whole package — including the
+    # 114 MB driver/node — regardless of _playwright_driver(). Drop it; it's
+    # downloaded on demand (core.web_render.ensure_web_node). cli.js stays.
+    d = dest.replace("\\", "/")
+    return "playwright/driver/" in d and d.rsplit("/", 1)[-1] in ("node", "node.exe")
+
+
+def _drop(dest: str) -> bool:
+    return _qt_unused(dest) or _pw_node(dest)
+
+
+_before = len(a.binaries) + len(a.datas)
+a.binaries = [e for e in a.binaries if not _drop(e[0])]
+a.datas = [e for e in a.datas if not _drop(e[0])]
+print(f"[spec] dropped {_before - len(a.binaries) - len(a.datas)} entries "
+      "(unused Qt modules + the on-demand Playwright node)")
+
 pyz = PYZ(a.pure)
 
 # Per-platform executable icon: Windows wants a .ico, macOS uses the .icns on
