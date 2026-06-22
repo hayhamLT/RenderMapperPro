@@ -100,10 +100,45 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=['pw_runtime_hook.py'],
-    excludes=[],
+    # Drop Qt modules this Widgets-only app never imports. PyInstaller's PySide6
+    # hook otherwise bundles the whole QML/Quick stack (~22 MB), QtPdf (~14 MB)
+    # and the on-screen VirtualKeyboard — none of which we use (we import only
+    # QtCore/Gui/Widgets/Network/Svg/Multimedia[+Widgets]/DBus). Excluding the
+    # Python modules makes the per-module hooks skip their Qt libs/plugins too.
+    excludes=[
+        'PySide6.QtQml', 'PySide6.QtQmlModels', 'PySide6.QtQmlMeta',
+        'PySide6.QtQmlWorkerScript', 'PySide6.QtQuick', 'PySide6.QtQuickWidgets',
+        'PySide6.QtQuick3D', 'PySide6.QtPdf', 'PySide6.QtPdfWidgets',
+        'PySide6.QtVirtualKeyboard',
+    ],
     noarchive=False,
     optimize=0,
 )
+# `excludes` drops the Python bindings, but PySide6's PyInstaller hook still
+# collects every Qt *framework/dylib* (and the qml/ module tree). Filter the
+# unused ones out of the collected binaries+datas so they don't ship. Scoped to
+# the PySide6/Qt payload (so no app/third-party file is ever touched) and matches
+# both the macOS framework form (QtQml) and the Windows DLL form (Qt6Qml). None
+# of the kept modules (QtCore/Gui/Widgets/Network/Svg/Multimedia[+Widgets]/
+# Concurrent/OpenGL/DBus) contain these tokens, so there are no false drops.
+_QT_DROP_MODS = ("Qml", "Quick", "Pdf", "VirtualKeyboard")
+
+
+def _qt_unused(dest: str) -> bool:
+    d = dest.replace("\\", "/")
+    if "pyside6" not in d.lower():
+        return False                      # only ever touch the PySide6/Qt payload
+    if "/qml/" in d.lower():
+        return True                       # the QML module tree (no QtQml → dead weight)
+    return any(f"Qt{m}" in d or f"Qt6{m}" in d for m in _QT_DROP_MODS)
+
+
+_before = len(a.binaries) + len(a.datas)
+a.binaries = [e for e in a.binaries if not _qt_unused(e[0])]
+a.datas = [e for e in a.datas if not _qt_unused(e[0])]
+print(f"[spec] dropped {_before - len(a.binaries) - len(a.datas)} unused Qt entries "
+      "(QtQml/QtQuick/QtPdf/QtVirtualKeyboard)")
+
 pyz = PYZ(a.pure)
 
 # Per-platform executable icon: Windows wants a .ico, macOS uses the .icns on
