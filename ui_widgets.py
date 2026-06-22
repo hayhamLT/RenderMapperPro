@@ -8,8 +8,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QLineEdit,
@@ -45,7 +45,13 @@ class MappingStripeDelegate(QStyledItemDelegate):
     in accent when ``panel`` reports it as cross-highlighted (the partner of the
     hovered/selected row in the other list)."""
 
-    _STRIPE_W = 3
+    # The left-edge indicator language (shared by both lists):
+    #   • FILLED solid colour  → a clip is linked (the colour identifies the pair)
+    #   • STROKED outline      → reserved / pending (a render target with no clip,
+    #                            or a hover affordance) — same shape, hollow.
+    # Fill = done, stroke = waiting; so the two never read as the same thing, and
+    # 'pending' no longer borrows the vivid mapping colours or the focus accent.
+    _STRIPE_W = 4
 
     def __init__(self, panel, kind: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -66,18 +72,32 @@ class MappingStripeDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, c)
             painter.restore()
 
-    def _paint_stripe(self, painter, option, index) -> None:
-        color = index.data(ROLE_MAP_COLOR)
-        if not color:
-            return
+    def _bar_rect(self, option) -> QRect:
         r = option.rect
-        bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
+        return QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
+
+    def _draw_bar(self, painter, bar: QRect, color, *, filled: bool, alpha: int = 255) -> None:
+        c = QColor(color)
+        c.setAlpha(alpha)
+        rad = self._STRIPE_W / 2
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(color))
-        painter.drawRoundedRect(bar, 1.5, 1.5)
+        if filled:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(c)
+            painter.drawRoundedRect(bar, rad, rad)
+        else:                                   # stroked outline → reserved / pending
+            pen = QPen(c)
+            pen.setWidthF(1.3)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(QRectF(bar).adjusted(0.65, 0.65, -0.65, -0.65), rad, rad)
         painter.restore()
+
+    def _paint_stripe(self, painter, option, index) -> None:
+        color = index.data(ROLE_MAP_COLOR)
+        if color:                               # a clip is linked → filled colour
+            self._draw_bar(painter, self._bar_rect(option), color, filled=True)
 
     def paint(self, painter, option, index) -> None:  # type: ignore[override]
         self._paint_cross_highlight(painter, option, index)
@@ -104,24 +124,14 @@ class TargetStripeDelegate(MappingStripeDelegate):
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         if not (color or targeted or hovered):
             return
-        r = option.rect
-        bar = QRect(r.left() + 2, r.top() + 4, self._STRIPE_W, max(0, r.height() - 8))
+        bar = self._bar_rect(option)
         pal = active_palette()
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        if color:                                   # clip linked → solid colour
-            painter.setBrush(QColor(color))
-        elif targeted:                              # target, no clip yet → dim accent
-            c = QColor(pal.accent)
-            c.setAlpha(120)
-            painter.setBrush(c)
-        else:                                       # hover affordance → faint ghost
-            c = QColor(pal.text_faint)
-            c.setAlpha(80)
-            painter.setBrush(c)
-        painter.drawRoundedRect(bar, 1.5, 1.5)
-        painter.restore()
+        if color:                                   # clip linked → FILLED mapping colour
+            self._draw_bar(painter, bar, color, filled=True)
+        elif targeted:                              # render target, no clip yet → accent OUTLINE
+            self._draw_bar(painter, bar, pal.accent, filled=False)
+        else:                                       # hover: could become a target → faint ghost OUTLINE
+            self._draw_bar(painter, bar, pal.text_faint, filled=False, alpha=150)
 
     def editorEvent(self, event, model, option, index) -> bool:  # type: ignore[override]
         if (event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton
