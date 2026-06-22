@@ -198,6 +198,50 @@ def load_scene(scene_path: str) -> None:
         raise RuntimeError(f"Unsupported scene extension: {ext}")
 
 
+def ensure_lighting(config: dict) -> None:
+    """Imported scenes (glTF/FBX/OBJ/USD…) usually ship NO lights and no lit world,
+    so Cycles/EEVEE render them pure black — only emissive materials (a mapped
+    video screen) show. When the imported scene has no light objects, add a neutral
+    studio world + a key sun so it renders LIT, matching the three.js backend which
+    adds its own lighting rig. The file's own lights are kept when present
+    (respect_scene_lights); preset 'none' leaves it unlit on purpose."""
+    scene = bpy.context.scene
+    render = config.get("render", {})
+    respect = bool(render.get("web_respect_scene_lights", True))
+    intensity = float(render.get("web_lighting_intensity", 1.0) or 1.0)
+    preset = str(render.get("web_lighting_preset", "auto") or "auto").lower()
+
+    if any(o.type == "LIGHT" for o in scene.objects) and respect:
+        log("Scene ships its own lights — keeping them")
+        return
+    if preset == "none":
+        log("Lighting preset 'none' — leaving the scene unlit (emissive only)")
+        return
+
+    log(f"Imported scene has no lights — adding a neutral studio rig "
+        f"(preset={preset}, intensity={intensity:.2f}) so it isn't black")
+    # Neutral world ambient so surfaces aren't pure black.
+    world = scene.world
+    if world is None:
+        world = bpy.data.worlds.new("RMP_World")
+        scene.world = world
+    world.use_nodes = True
+    bg = world.node_tree.nodes.get("Background")
+    if bg is None:
+        bg = world.node_tree.nodes.new("ShaderNodeBackground")
+    amb = 0.55 if preset == "flat" else 0.20      # flat = brighter even ambient
+    bg.inputs[0].default_value = (amb, amb, amb, 1.0)
+    bg.inputs[1].default_value = max(0.0, intensity)
+    if preset == "flat":
+        return                                     # flat = ambient only, no directional key
+    # A key sun for dimensional shading (rotation ≈ 50°/11°/40°).
+    key = bpy.data.lights.new("RMP_Key", type="SUN")
+    key.energy = 4.0 * intensity
+    obj = bpy.data.objects.new("RMP_Key", key)
+    obj.rotation_euler = (0.87, 0.20, 0.70)
+    scene.collection.objects.link(obj)
+
+
 def _material_output_node(nodes: bpy.types.Nodes) -> bpy.types.Node:
     for node in nodes:
         if node.type == "OUTPUT_MATERIAL" and getattr(node, "is_active_output", False):
@@ -783,6 +827,10 @@ def main() -> None:
                 raise RuntimeError(f"Safe mode check failed: unsupported media extension: {video_path}")
 
     load_scene(config["scene_path"])
+    # A .blend is the artist's full scene (its own lighting); only auto-light
+    # IMPORTED scenes (glTF/FBX/…), which usually ship none → black in Blender.
+    if Path(str(config["scene_path"])).suffix.lower() != ".blend":
+        ensure_lighting(config)
     target_cam = str(config.get("target_camera", "")).strip()
     set_camera(target_cam)   # always ensure an active camera (falls back if needed)
     for assignment in assignments:
