@@ -36,6 +36,24 @@ from workers import FuncThread
 GITHUB_REPO = "hayhamLT/RenderMapperPro"   # for the auto-updater
 
 
+def _clean_release_notes(body: str) -> str:
+    """Pull just the human changelog out of a GitHub release body for the in-app
+    updater. Our release template leads with a generic install-instructions table
+    (platform / installer / portable + verify notes) that's meaningless inside
+    the app itself — strip it, keeping GitHub's auto-generated 'What's Changed'.
+    Returns '' when there's nothing worth showing, so the dialog hides the box."""
+    if not body:
+        return ""
+    low = body.lower()
+    for marker in ("## what's changed", "## what’s changed", "## what's new", "## changelog"):
+        i = low.find(marker)
+        if i != -1:
+            notes = body[i:].strip()
+            fc = notes.lower().rfind("\n**full changelog**")   # drop the compare-link footer
+            return notes[:fc].strip() if fc != -1 else notes
+    return ""
+
+
 def _update_token() -> str:
     """Optional GitHub token for the auto-updater. The repo is public, so updates
     work with NO token (anonymous API); a token only raises the rate limit. Read
@@ -147,43 +165,46 @@ class UpdateMixin(_WindowMembers):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Software Update")
-        dlg.setMinimumWidth(460)
+        dlg.setMinimumWidth(420)
         outer = QVBoxLayout(dlg)
-        outer.setContentsMargins(24, 22, 24, 18)
+        outer.setContentsMargins(26, 24, 26, 18)
         outer.setSpacing(0)
 
-        # ── Header: app icon + version transition ───────────────────────
+        # ── Header: app icon + a cute version transition ────────────────
         head = QHBoxLayout()
-        head.setSpacing(14)
+        head.setSpacing(15)
         icon_lbl = QLabel()
-        pm = self.windowIcon().pixmap(52, 52)
+        pm = self.windowIcon().pixmap(54, 54)
         if not pm.isNull():
             icon_lbl.setPixmap(pm)
-        icon_lbl.setFixedSize(52, 52)
-        head.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+        icon_lbl.setFixedSize(54, 54)
+        head.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         head_text = QVBoxLayout()
-        head_text.setSpacing(2)
-        title = QLabel(f"{APP_NAME} {tag} is available")
-        title.setStyleSheet(f"color:{pal.text}; font-size:16px; font-weight:600;")
+        head_text.setSpacing(3)
+        title = QLabel("A new version is ready")
+        title.setStyleSheet(f"color:{pal.text}; font-size:17px; font-weight:600;")
         title.setWordWrap(True)
-        sub = QLabel(f"You're on v{APP_VERSION}. A newer version is ready to install.")
-        sub.setStyleSheet(f"color:{pal.text_muted}; font-size:12px;")
-        sub.setWordWrap(True)
+        # v1.8.20 → v1.8.21, the new one in the brand accent.
+        vt = QLabel(f"v{APP_VERSION}&nbsp;&nbsp;&#8594;&nbsp;&nbsp;"
+                    f"<span style='color:{pal.accent}; font-weight:600;'>{tag}</span>")
+        vt.setTextFormat(Qt.TextFormat.RichText)
+        vt.setStyleSheet(f"color:{pal.text_muted}; font-size:13px;")
         head_text.addWidget(title)
-        head_text.addWidget(sub)
+        head_text.addWidget(vt)
         head.addLayout(head_text, 1)
         outer.addLayout(head)
-        outer.addSpacing(14)
+        outer.addSpacing(16)
 
-        # ── Release notes (rendered markdown, scrollable) ───────────────
-        notes = str(info.get("body") or "").strip()
+        # ── What's new — the real changelog only (install boilerplate
+        #    stripped); the whole box is hidden when there's nothing human. ──
+        notes = _clean_release_notes(str(info.get("body") or ""))
         if notes:
             label = QLabel("What's new")
-            label.setStyleSheet(f"color:{pal.text_faint}; font-size:11px; "
-                                f"font-weight:600; letter-spacing:1px;")
+            label.setStyleSheet(f"color:{pal.text_faint}; font-size:10px; "
+                                f"font-weight:600; letter-spacing:1.5px;")
             outer.addWidget(label)
-            outer.addSpacing(4)
+            outer.addSpacing(5)
             view = QTextBrowser()
             view.setOpenExternalLinks(True)
             try:
@@ -191,12 +212,12 @@ class UpdateMixin(_WindowMembers):
             except Exception:
                 view.setPlainText(notes)
             view.setStyleSheet(
-                f"QTextBrowser{{background:{pal.surface}; border:1px solid {pal.border}; "
-                f"border-radius:8px; padding:8px; color:{pal.text}; font-size:12px;}}")
-            view.setMinimumHeight(150)
-            view.setMaximumHeight(220)
+                f"QTextBrowser{{background:{pal.surface}; border:none; "
+                f"border-radius:10px; padding:10px 12px; color:{pal.text}; font-size:12px;}}")
+            view.setMinimumHeight(96)
+            view.setMaximumHeight(168)
             outer.addWidget(view)
-            outer.addSpacing(12)
+            outer.addSpacing(14)
 
         # ── Platform-specific install note ──────────────────────────────
         if is_mac:
