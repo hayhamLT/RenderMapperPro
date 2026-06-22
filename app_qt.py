@@ -741,9 +741,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
               <b>Output path</b> accepts tokens: <code>{scene}</code>
               <code>{camera}</code> <code>{date}</code>.</td></tr>
         </table>
-        <h3>Advanced quality</h3>
-        <p class="muted">The collapsible <b>Advanced</b> panel adapts to the active
-        renderer so every control is real:</p>
+        <h3>Quality &amp; output</h3>
+        <p class="muted">The quality &amp; output settings sit inline and adapt to the
+        active renderer, so every control you see is real for that engine:</p>
         <table class="feat" width="100%">
           <tr><td class="fname">Blender</td><td>Samples, denoise, device (CPU/GPU),
               colour transform / exposure / gamma, transparent film.</td></tr>

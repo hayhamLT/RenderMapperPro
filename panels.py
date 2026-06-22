@@ -1216,29 +1216,40 @@ class RenderPanel(QWidget):
         self.engine_combo.setToolTip("Render engine. Cycles = highest quality (slow); EEVEE = fast preview-grade. C4D scenes use Redshift.")
         self.populate_engines(["CYCLES", "BLENDER_EEVEE"])
         renderer_col.addWidget(self.engine_combo)
+        # A Premiere/AME-style summary under the picker: a backend-coloured badge
+        # plus a one-line description of what the selected engine actually is.
+        self.engine_summary = QLabel()
+        self.engine_summary.setObjectName("FieldLabel")
+        self.engine_summary.setTextFormat(Qt.TextFormat.RichText)
+        self.engine_summary.setWordWrap(True)
+        renderer_col.addWidget(self.engine_summary)
+        self.engine_combo.currentIndexChanged.connect(lambda _i: self._update_engine_summary())
 
         format_col = QVBoxLayout()
         format_col.setSpacing(2)
-        format_col.addWidget(section("OUTPUT FORMAT"))
+        format_col.addWidget(section("MASTER OUTPUT"))
         self.profile_combo = QComboBox()
-        self.profile_combo.setToolTip("Output container: H264 MP4 for review, ProRes MOV for editorial, PNG/EXR sequences for comp.")
+        self.profile_combo.setToolTip("The master deliverable's container: H264 MP4 for review, ProRes MOV for editorial, PNG/EXR sequences for comp.")
         self.profile_combo.addItems(list(OUTPUT_PROFILES.keys()))
         format_col.addWidget(self.profile_combo)
 
         # Extra deliverables produced from the SAME render (e.g. a ProRes master
-        # plus an H.264 review proxy) — transcoded from the primary output, so one
-        # render emits multiple formats without re-rendering the 3D scene.
+        # plus an H.264 review proxy) — transcoded from the master output, so one
+        # render emits multiple formats without re-rendering the 3D scene. The
+        # master's own format is never offered here (no 'double MP4'), and formats
+        # the active renderer can't produce are hidden — see _sync_deliverables.
         self.extra_output_checks: dict[str, QCheckBox] = {}
         _movie_profiles = [n for n, (fmt, _c) in OUTPUT_PROFILES.items() if fmt in ("MPEG4", "QUICKTIME")]
-        if _movie_profiles:
-            also = QLabel("Also export:")
-            also.setObjectName("FieldLabel")
-            format_col.addWidget(also)
-            for name in _movie_profiles:
-                cb = QCheckBox(name)
-                cb.setToolTip(f"Also produce a {name}, transcoded from the primary render")
-                self.extra_output_checks[name] = cb
-                format_col.addWidget(cb)
+        self.also_label = QLabel("Also deliver (same render):")
+        self.also_label.setObjectName("FieldLabel")
+        self.also_label.setToolTip("Extra files transcoded from the master render — no re-render.")
+        format_col.addWidget(self.also_label)
+        for name in _movie_profiles:
+            cb = QCheckBox(name)
+            cb.setToolTip(f"Also produce a {name}, transcoded from the master render")
+            self.extra_output_checks[name] = cb
+            format_col.addWidget(cb)
+        self.profile_combo.currentTextChanged.connect(lambda _v: self._sync_deliverables())
 
         ro_row.addLayout(renderer_col, 1)
         ro_row.addLayout(format_col, 1)
@@ -1273,15 +1284,9 @@ class RenderPanel(QWidget):
         root.addLayout(path_row)
 
 
-        # ── Advanced / Quality (collapsed by default) ──────────────────
-        self.adv_toggle = QPushButton("  Advanced quality settings")
-        self.adv_toggle.setCheckable(True)
-        self.adv_toggle.setChecked(False)
-        self.adv_toggle.setObjectName("SmallButton")
-        self.adv_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.adv_toggle.toggled.connect(self._on_adv_toggled)
-        root.addWidget(self.adv_toggle)
-
+        # ── Quality & output — inline, tailored to the renderer ─────────
+        # No more "Advanced" drawer: these settings are always visible, and each
+        # section auto-shows only for the renderer(s) it applies to (set_renderer).
         self.adv_box = QWidget()
         adv = QVBoxLayout(self.adv_box)
         adv.setContentsMargins(0, 6, 0, 0)
@@ -1310,7 +1315,8 @@ class RenderPanel(QWidget):
             return row
 
         # ── Sampling & quality (same slot for both renderers) ────────────
-        adv.addWidget(section("SAMPLING & QUALITY"))
+        self.quality_header = section("QUALITY")
+        adv.addWidget(self.quality_header)
         # Speed preset (Redshift only) — sits at the top of sampling.
         self.rs_preset_combo = QComboBox()
         self.rs_preset_combo.addItems(["Custom", "Draft (fastest)", "Balanced", "High", "Final (best)"])
@@ -1501,17 +1507,12 @@ class RenderPanel(QWidget):
             w.textEdited.connect(self._rs_custom)
         self.rs_gi_cb.toggled.connect(lambda _v: self._rs_custom())
         self.set_renderer(False)
+        self._update_engine_summary()
 
-        self.adv_box.setVisible(False)
         root.addWidget(self.adv_box)
 
         root.addStretch()
         self.restyle(active_palette())
-
-    def _on_adv_toggled(self, checked: bool) -> None:
-        self.adv_box.setVisible(checked)
-        arrow = "▾" if checked else "▸"
-        self.adv_toggle.setText(f"{arrow}  Advanced quality settings")
 
     # Redshift speed/quality presets — each fills the optimization fields.
     _RS_PRESETS: ClassVar = {
@@ -1548,6 +1549,23 @@ class RenderPanel(QWidget):
     # carried as itemData so configs/profiles keep the real identifier.
     ENGINE_LABELS: ClassVar = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
                                "WEB_THREEJS": "three.js (WebGL)"}
+    # Backend key (→ _BACKEND_INFO colour/badge) + a one-line "what this is" blurb,
+    # shown under the picker like an Adobe Media Encoder format summary.
+    ENGINE_DESC: ClassVar = {
+        "CYCLES": ("blender", "Photoreal · path-traced (slowest, best quality)"),
+        "BLENDER_EEVEE": ("blender", "Fast preview · real-time raster (seconds)"),
+        "Redshift": ("c4d", "GPU production renderer · Cinema 4D scenes"),
+        "WEB_THREEJS": ("web", "Real-time WebGL · instant, no 3D app needed"),
+    }
+
+    def _update_engine_summary(self) -> None:
+        """Refresh the badge + blurb under the renderer picker for the current pick."""
+        val = self.engine_value()
+        key, desc = self.ENGINE_DESC.get(val, ("blender", ""))
+        color, name = _BACKEND_INFO.get(key, ("#888888", ""))
+        self.engine_summary.setText(
+            f'<span style="color:{color};">&#9679;</span>&nbsp;'
+            f'<b style="color:{color};">{name}</b>&nbsp;&nbsp;{desc}')
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()
@@ -1582,6 +1600,8 @@ class RenderPanel(QWidget):
         web/three.js backend hides the Blender-only Device + Color + alpha
         controls (it ignores them) and offers only the outputs it can produce."""
         self.samples_label.setText("Max Samples" if is_c4d else "Cycles Samples")
+        self.quality_header.setText(
+            "QUALITY · " + ("Redshift" if is_c4d else "three.js" if is_web else "Blender"))
         # Redshift-only sampling/GI controls.
         for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row, self.gi_box):
             w.setVisible(is_c4d)
@@ -1612,13 +1632,28 @@ class RenderPanel(QWidget):
             idx = self.profile_combo.findText(cur)
             self.profile_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.profile_combo.blockSignals(False)
+        self._sync_deliverables()
+
+    def _sync_deliverables(self) -> None:
+        """Show an 'also deliver' checkbox only for movie formats that are (a) valid
+        for the current renderer and (b) not already the master — so the master's
+        own format never appears twice ('double MP4'). Hidden boxes are unchecked,
+        and the heading hides when no extra deliverable is possible."""
+        primary = self.profile_combo.currentText()
+        available = {self.profile_combo.itemText(i) for i in range(self.profile_combo.count())}
+        any_visible = False
+        for name, cb in self.extra_output_checks.items():
+            show = name in available and name != primary
+            cb.setVisible(show)
+            if not show and cb.isChecked():
+                cb.setChecked(False)
+            any_visible = any_visible or show
+        self.also_label.setVisible(any_visible)
 
     def restyle(self, pal: T.Palette) -> None:
         self.browse_out_btn.setIcon(icons.icon("folder", pal.text))
         self.open_out_btn.setIcon(icons.icon("open", pal.text))
         self.tokens_btn.setIcon(icons.icon("chevron_down", pal.text))
-        if not self.adv_toggle.isChecked():
-            self.adv_toggle.setText("▸  Advanced quality settings")
 
     def _browse_output(self) -> None:
         from core.utils import ext_for_format
