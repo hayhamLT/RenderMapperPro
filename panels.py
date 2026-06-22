@@ -323,8 +323,8 @@ class ScenePanel(QWidget):
         left_top.addStretch()
         left_top_w = QWidget()
         left_top_w.setLayout(left_top)
-        left_top_w.setFixedHeight(24)
-        left.addWidget(left_top_w)
+        left_top_w.setFixedHeight(30)   # match the Videos header (+ button) so the
+        left.addWidget(left_top_w)       # two filter fields line up vertically
         self.mat_search = QLineEdit()
         self.mat_search.setPlaceholderText("Filter materials")
         self.mat_search.textChanged.connect(self._refresh_lists)
@@ -2130,9 +2130,26 @@ _THUMB_DIR = Path(tempfile.gettempdir()) / "rmp_thumbs"
 _THUMB_W, _THUMB_H = 58, 34
 
 
-def _extract_first_frame(clip: str) -> str:
-    """First-frame PNG for a clip, cached on disk by path+mtime ('' if none). Runs
-    ffmpeg, so call it OFF the UI thread."""
+def _clip_duration_seconds(clip: str) -> float:
+    """Clip duration via ffprobe (0.0 if unknown). Off-thread only."""
+    ffprobe = find_ffmpeg_tool("ffprobe")
+    if not ffprobe:
+        return 0.0
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", clip],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess_creation_flags()).stdout.strip()
+        return float(out) if out else 0.0
+    except Exception:
+        return 0.0
+
+
+def _extract_thumb_frame(clip: str) -> str:
+    """A representative-frame PNG for a clip — the MIDPOINT, not frame 0 (first
+    frames are often black / a fade-in / a slate). Cached on disk by path+mtime
+    ('' if none). Runs ffmpeg/ffprobe, so call it OFF the UI thread."""
     try:
         p = Path(clip)
         if not p.exists():
@@ -2143,11 +2160,16 @@ def _extract_first_frame(clip: str) -> str:
         if not ff:
             return ""
         _THUMB_DIR.mkdir(parents=True, exist_ok=True)
-        key = hashlib.md5(f"{p.resolve()}:{p.stat().st_mtime_ns}".encode()).hexdigest()[:16]
+        # ':mid' invalidates the old first-frame caches from before this change.
+        key = hashlib.md5(f"{p.resolve()}:{p.stat().st_mtime_ns}:mid".encode()).hexdigest()[:16]
         out = _THUMB_DIR / f"{key}.png"
         if out.exists() and out.stat().st_size > 0:
             return str(out)
-        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", "0", "-i", clip,
+        # Seek to ~50% of the clip for a representative frame; fall back to the 1s
+        # mark when the duration can't be probed (still avoids a black frame 0).
+        dur = _clip_duration_seconds(clip)
+        seek = dur * 0.5 if dur > 0 else 1.0
+        subprocess.run([ff, "-y", "-loglevel", "error", "-ss", f"{seek:.3f}", "-i", clip,
                         "-frames:v", "1", "-vf", "scale=120:-1", str(out)],
                        capture_output=True, timeout=20, creationflags=subprocess_creation_flags())
         return str(out) if out.exists() and out.stat().st_size > 0 else ""
@@ -2171,7 +2193,7 @@ class _ThumbnailLoader(QObject):
         self._inflight.add(clip)
 
         def work() -> None:
-            png = _extract_first_frame(clip)
+            png = _extract_thumb_frame(clip)
             self._inflight.discard(clip)
             if png:
                 self.ready.emit(clip, png)   # queued back to the UI thread
