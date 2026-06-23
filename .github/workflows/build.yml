@@ -14,6 +14,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish a GitHub Release for the current app_version.py (creates the v<version> tag)"
+        type: boolean
+        default: false
 
 jobs:
   lint-test:
@@ -189,15 +194,32 @@ jobs:
           if-no-files-found: ignore
 
   # Publish the Release as soon as the macOS-arm64 + Windows builds are ready.
+  # Triggered by a v* tag push, OR manually via "Run workflow" with
+  # publish_release=true (which cuts the release for the current app_version.py
+  # and creates the v<version> tag itself — used when a tag push isn't available).
   release:
     name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+      - name: Determine release tag
+        id: tag
+        shell: bash
+        # On a tag push the tag IS the ref; on a manual dispatch derive v<version>
+        # from app_version.py (the single source of truth) so the two can't drift.
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ver=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' app_version.py)
+            [ -n "$ver" ] || { echo "could not read __version__ from app_version.py"; exit 1; }
+            echo "name=v${ver}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -211,6 +233,7 @@ jobs:
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.tag.outputs.name }}
           files: |
             artifacts/**/*.zip
             artifacts/**/*.dmg
