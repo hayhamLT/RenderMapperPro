@@ -319,10 +319,36 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     ag_enable_cb.setChecked(_ag.enabled)
     lay.addWidget(ag_enable_cb)
 
-    lay.addWidget(QLabel("Filename pattern (regex, named groups):"))
+    lay.addWidget(QLabel("Filename pattern:"))
     ag_pat_edit = QLineEdit(_ag.pattern)
-    ag_pat_edit.setPlaceholderText("groups: prj, day, setup, asset, screen, type, version")
+    ag_pat_edit.setPlaceholderText("{Project}_D{Day#}_S{Setup#}_A{Asset#}_{Screen}_{Type}_V{Version#}")
     lay.addWidget(ag_pat_edit)
+    lay.addWidget(hint("Write it like a filename: {Field} = text, {Field#} = number, "
+                       "{Field#?} = optional. Recognised fields: Project, Day, Setup, Asset, "
+                       "Screen, Type, Version. (A raw regex with those named groups also still works.)"))
+
+    # Live preview: type a sample filename and see exactly what each field captures —
+    # or where the pattern stops matching — so it's tunable without knowing regex.
+    ag_sample_edit = QLineEdit()
+    ag_sample_edit.setPlaceholderText("Try a sample filename, e.g. PRJ001_D01_S01_A017_CENTER_ANIM_V003")
+    lay.addWidget(ag_sample_edit)
+    ag_preview_lbl = QLabel()
+    ag_preview_lbl.setWordWrap(True)
+    lay.addWidget(ag_preview_lbl)
+
+    def _update_pattern_preview(*_a) -> None:
+        from core.naming import preview as _preview_pattern
+        res = _preview_pattern(ag_pat_edit.text().strip(), ag_sample_edit.text().strip())
+        if res.ok:
+            shown = "    ".join(f"{k} = {v}" for k, v in res.fields.items())
+            ag_preview_lbl.setText("✓  " + shown)
+            ag_preview_lbl.setStyleSheet(f"color:{win._palette.success}; font-size:11px;")
+        else:
+            ag_preview_lbl.setText("•  " + res.error)
+            ag_preview_lbl.setStyleSheet(f"color:{win._palette.warning}; font-size:11px;")
+    ag_pat_edit.textChanged.connect(_update_pattern_preview)
+    ag_sample_edit.textChanged.connect(_update_pattern_preview)
+    _update_pattern_preview()
 
     ag_row = QHBoxLayout()
     ag_type_edit = QLineEdit(_ag.content_type)
