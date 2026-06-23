@@ -387,6 +387,7 @@ def _render_tonemapped(doc, rd, xr: int, yr: int, frame_path: str, mode: str,
         return res
     lut, scale = _build_tonemap_lut(mode, exposure)
     nmax = len(lut) - 1
+    cap = nmax / scale                         # = hdr_max; values at/above it saturate to white
     inc = 12                                   # 3 float channels * 4 bytes
     fbuf = bytearray(xr * inc)
     rows = []
@@ -395,13 +396,21 @@ def _render_tonemapped(doc, rd, xr: int, yr: int, frame_path: str, mode: str,
         fa = array.array("f")
         fa.frombytes(bytes(fbuf))
         # fa is R,G,B,R,G,B… linear HDR — map each channel through the LUT in one pass.
-        rows.append(bytes(lut[min(nmax, int(v * scale))] if v > 0.0 else lut[0] for v in fa))
-    proc = subprocess.run(
-        [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pixel_format", "rgb24",
-         "-video_size", f"{xr}x{yr}", "-i", "-", frame_path],
-        input=b"".join(rows), capture_output=True)
-    if proc.returncode != 0:
-        log(f"  tone-map encode failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
+        # `v >= cap` (so +inf too — Redshift fireflies happen on the unclamped buffer)
+        # saturates to white; <=0 / NaN fall to black; both avoid int(inf) OverflowError.
+        rows.append(bytes(
+            lut[nmax if v >= cap else (int(v * scale) if v > 0.0 else 0)] for v in fa))
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pixel_format", "rgb24",
+             "-video_size", f"{xr}x{yr}", "-i", "-", frame_path],
+            input=b"".join(rows), capture_output=True, timeout=300, creationflags=_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        log("  tone-map encode timed out")
+        proc = None
+    if proc is None or proc.returncode != 0:
+        if proc is not None:
+            log(f"  tone-map encode failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
         try:
             os.unlink(frame_path)              # ensure a half-written file fails the frame
         except OSError:
