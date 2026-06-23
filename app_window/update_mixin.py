@@ -333,8 +333,8 @@ class UpdateMixin(_WindowMembers):
             quit_after = sys.platform in ("win32", "darwin")
             if sys.platform == "win32":
                 os.startfile(str(dest))                  # runs Setup.exe (wizard)
-                note = (f"{APP_NAME} will now quit so the installer can replace it; "
-                        f"it relaunches automatically when the install finishes.")
+                note = (f"{APP_NAME} will now quit so the installer can replace it, "
+                        f"then relaunches when you click Finish in the installer.")
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(dest)])    # mounts the .dmg
                 note = (f"{APP_NAME} will now quit so you can drag the new version into "

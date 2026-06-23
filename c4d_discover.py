@@ -10,11 +10,9 @@ import json
 import sys
 
 import c4d
-import maxon
 from c4d import documents
 
 PREFIX = "DISCOVERY_JSON:"
-RS_SPACE = "com.redshift3d.redshift4c4d.class.nodespace"   # only RS node materials take a clip
 
 
 def log(message: str) -> None:
@@ -79,17 +77,9 @@ def _settings(doc) -> dict:
             vp = vp.GetNext()
     except Exception as exc:  # never let settings probing break discovery
         log(f"settings probe warning: {exc}")
-    # Which materials are Redshift node materials — only these can carry a video
-    # clip, so the app can warn before a render that a mapped material won't show.
-    try:
-        rs_mats = []
-        for m in doc.GetMaterials():
-            nm = m.GetNodeMaterialReference()
-            if nm is not None and nm.HasSpace(maxon.Id(RS_SPACE)):
-                rs_mats.append(m.GetName())
-        s["redshift_materials"] = rs_mats
-    except Exception as exc:
-        log(f"redshift-material probe warning: {exc}")
+    # (Material-type is no longer probed: standard C4D materials are auto-converted
+    # to a full-bright Redshift emission at render time, so any mapped material shows
+    # the clip — there's nothing to warn about up front.)
     return s
 
 
