@@ -1298,6 +1298,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.scene_panel.camera_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
 
         self.queue_panel.queue_requested.connect(self._queue_current_jobs)
+        self.queue_panel.queue_clear_videos_requested.connect(self._queue_current_jobs_clear_videos)
+        self.queue_panel.new_blank_requested.connect(self._new_blank_job)
         self.queue_panel.start_selected_requested.connect(lambda: self._start_render(render_all=False))
         self.queue_panel.start_all_requested.connect(lambda: self._start_render(render_all=True))
         self.queue_panel.cancel_requested.connect(self._cancel_render)
@@ -4305,6 +4307,33 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._schedule_save()
         if announce:
             self._show_toast("New session", "info")
+
+    def _new_blank_job(self) -> None:
+        """Ctrl/⌘+Shift+New: start a brand-new empty job — clear the scene (3D
+        object), clips, mappings and targets so the workspace is blank. Unlike
+        New session this keeps the existing queue; the next mapping drafts a fresh
+        job alongside the ones already queued."""
+        if self._is_rendering:
+            QMessageBox.information(self, "Render In Progress",
+                                    "Stop rendering before starting a new job.")
+            return
+        sp = self.scene_panel
+        self._loading_job_into_ui = True
+        try:
+            sp.set_assignments([])
+            sp.set_targets([])
+            sp.set_muted_videos([])
+            sp.set_videos([])
+            sp.scene_edit.setText("")
+        finally:
+            self._loading_job_into_ui = False
+        # Detach from any active job so the blank workspace doesn't overwrite it;
+        # the queue itself is left intact.
+        self._active_job_id = None
+        self._refresh_job_outputs()
+        self._refresh_queue_view()
+        self._schedule_save()
+        self._show_toast("New blank job", "info")
 
     def _reopen_last_session(self) -> None:
         """Bring back the session that was open before a clean launch or New."""
