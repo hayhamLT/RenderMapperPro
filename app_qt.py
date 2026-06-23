@@ -39,6 +39,7 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QDesktopServices,
+    QGuiApplication,
     QIcon,
     QKeySequence,
     QPixmap,
@@ -4340,10 +4341,23 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._restyle_all()
         self._sync_theme_menu()
 
+    @staticmethod
+    def _is_headless() -> bool:
+        """True under the offscreen Qt platform (CI smoke tests). A blocking modal
+        there has no one to dismiss it and stalls the event loop until the CI step
+        times out — so startup prompts must skip it. This is the fix for the
+        UI-smoke job intermittently hanging ~10 min on the first-run welcome."""
+        app = QApplication.instance()
+        # isinstance narrows the QCoreApplication|None return to a GUI app, which is
+        # where platformName() lives.
+        return isinstance(app, QGuiApplication) and app.platformName() == "offscreen"
+
     def _maybe_first_run(self) -> None:
         """A one-time welcome on the very first launch: show what's detected and
         point new users at setup + Quick Start."""
         if not getattr(self, "_is_first_run", False):
+            return
+        if self._is_headless():            # never block a headless smoke test on .exec()
             return
         blender = _find_blender(self._blender_path)
         ffmpeg = find_ffmpeg_tool("ffmpeg")
