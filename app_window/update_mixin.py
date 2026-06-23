@@ -327,18 +327,29 @@ class UpdateMixin(_WindowMembers):
             if not expected:
                 self._append_log(f"[update] No published checksum for {want} — integrity not verified.")
             os.replace(tmp, dest)
-            # Hand off to the platform installer — it replaces the running app
-            # itself (no extract-over-a-locked-exe problem).
+            # Hand off to the platform installer, then QUIT — the running app must
+            # not be open while it's replaced (macOS can't drag over a running app;
+            # Windows can't overwrite a running .exe).
+            quit_after = sys.platform in ("win32", "darwin")
             if sys.platform == "win32":
                 os.startfile(str(dest))                  # runs Setup.exe (wizard)
+                note = (f"{APP_NAME} will now quit so the installer can replace it; "
+                        f"it relaunches automatically when the install finishes.")
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(dest)])    # mounts the .dmg
+                note = (f"{APP_NAME} will now quit so you can drag the new version into "
+                        f"Applications (you can't replace a running app), then reopen it.")
             else:
                 reveal_in_file_manager(dest)
+                note = "Run the downloaded installer to finish updating."
             QMessageBox.information(self, "Update Ready",
-                f"{APP_NAME} {tag} downloaded and verified to:\n\n{dest}\n\n"
-                f"The installer is opening — follow its prompts. You may be asked to "
-                f"quit {APP_NAME} first so it can be replaced.")
+                f"{APP_NAME} {tag} downloaded and verified.\n\nThe installer is opening. {note}")
+            if quit_after:
+                self._append_log(f"[update] Quitting so the {tag} installer can replace the app.")
+                self._shutting_down = True
+                # Close cleanly (saves the profile, stops worker threads) — with
+                # quitOnLastWindowClosed (default) this also exits the app.
+                self.close()
         except Exception as exc:
             try:
                 tmp.unlink(missing_ok=True)

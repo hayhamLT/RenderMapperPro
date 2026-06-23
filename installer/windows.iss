@@ -33,6 +33,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Allow a per-user install if not elevated (so it never hard-fails on a locked machine).
 PrivilegesRequiredOverridesAllowed=dialog
+; The in-app updater quits the running app before launching this, but be safe:
+; auto-close any lingering instance so its .exe can be replaced (no "file in use").
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
