@@ -1273,6 +1273,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.render_panel.rs_gi_bounces_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_ray_depth_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.rs_gi_cb.toggled.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_tonemap_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
+        self.render_panel.rs_exposure_edit.textChanged.connect(lambda _v: self._on_settings_changed())
         # three.js scene-lighting + burn-in change the rendered look → refresh preview.
         self.render_panel.web_light_preset_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
         self.render_panel.web_light_intensity_slider.valueChanged.connect(lambda _v: self._on_settings_changed())

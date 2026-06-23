@@ -88,6 +88,11 @@ class RenderOptions:
     rs_gi_enabled: bool = True           # global illumination on/off (off is much faster)
     rs_gi_bounces: int = 3               # GI bounce count — fewer = faster
     rs_ray_depth: int = 6                # combined max trace depth — fewer = faster
+    # Redshift tone-mapping (C4D path). Redshift's own post-effects/colour-management
+    # don't apply in the headless render, so the worker renders HDR and applies these
+    # itself — taming GI blow-out. linear = raw clamp (old behaviour).
+    rs_tonemap: str = "filmic"           # linear | filmic | reinhard
+    rs_exposure: float = 0.0             # stops applied before the tone-map (0 = unchanged)
     # Web / three.js scene lighting (honoured only on the .glb/.gltf web path)
     web_lighting_preset: str = "auto"        # auto | studio | outdoor | flat | none
     web_lighting_intensity: float = 1.0      # 0.0–2.0 dimmer on env + light rig

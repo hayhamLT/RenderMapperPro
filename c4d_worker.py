@@ -338,6 +338,77 @@ def _burnin_filters(cfg, render, yr: int, frame_text: str) -> str:
             f"drawtext={common}:text='{frame_text} Camera {cam}':x=10:y=h-th-10")
 
 
+def _linear_to_srgb(x: float) -> float:
+    if x <= 0.0:
+        return 0.0
+    if x <= 0.0031308:
+        return 12.92 * x
+    return 1.055 * (x ** (1.0 / 2.4)) - 0.055
+
+
+def _tonemap_value(x: float, mode: str) -> float:
+    """Compress one linear HDR channel to [0,1]. Per-channel so it goes in a LUT."""
+    if x < 0.0:
+        x = 0.0
+    if mode == "reinhard":
+        return x / (1.0 + x)
+    if mode == "filmic":                       # ACES (Narkowicz) fit — matches the C4D viewport
+        x = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)
+        return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
+    return 1.0 if x > 1.0 else x               # linear: just clip
+
+
+def _build_tonemap_lut(mode: str, exposure: float, n: int = 4096, hdr_max: float = 64.0):
+    """A 0..n byte LUT mapping a quantised linear render value in [0, hdr_max] to an
+    8-bit sRGB byte, with exposure (stops) + the tone-map baked in. Returns (lut,
+    scale) where scale maps a raw float to a LUT index. Built once per frame."""
+    gain = 2.0 ** exposure
+    lut = bytearray(n + 1)
+    for i in range(n + 1):
+        lin = (i / n) * hdr_max
+        v = _tonemap_value(lin * gain, mode)
+        b = round(_linear_to_srgb(v) * 255.0)
+        lut[i] = 0 if b < 0 else (255 if b > 255 else b)
+    return lut, n / hdr_max
+
+
+def _render_tonemapped(doc, rd, xr: int, yr: int, frame_path: str, mode: str,
+                       exposure: float, ffmpeg: str):
+    """Render to an HDR float bitmap, then exposure+tone-map it to an 8-bit sRGB PNG.
+    This is the ONLY way the C4D path gets tone-mapping: Redshift's own post-effects /
+    colour management do not apply to the headless render, but the float buffer still
+    carries the un-clipped highlights, so GI no longer blows out to white. The
+    tone-mapped RGB is encoded to PNG by the bundled ffmpeg (the C4D bitmap-write API
+    is avoided — it aborts the interpreter). Returns the RenderDocument result code."""
+    import array
+    mp = c4d.bitmaps.MultipassBitmap(xr, yr, c4d.COLORMODE_RGBf)
+    res = documents.RenderDocument(doc, rd.GetDataInstance(), mp, c4d.RENDERFLAGS_EXTERNAL)
+    if res != c4d.RENDERRESULT_OK:
+        return res
+    lut, scale = _build_tonemap_lut(mode, exposure)
+    nmax = len(lut) - 1
+    inc = 12                                   # 3 float channels * 4 bytes
+    fbuf = bytearray(xr * inc)
+    rows = []
+    for y in range(yr):
+        mp.GetPixelCnt(0, y, xr, fbuf, inc, c4d.COLORMODE_RGBf, c4d.PIXELCNT_0)
+        fa = array.array("f")
+        fa.frombytes(bytes(fbuf))
+        # fa is R,G,B,R,G,B… linear HDR — map each channel through the LUT in one pass.
+        rows.append(bytes(lut[min(nmax, int(v * scale))] if v > 0.0 else lut[0] for v in fa))
+    proc = subprocess.run(
+        [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pixel_format", "rgb24",
+         "-video_size", f"{xr}x{yr}", "-i", "-", frame_path],
+        input=b"".join(rows), capture_output=True)
+    if proc.returncode != 0:
+        log(f"  tone-map encode failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
+        try:
+            os.unlink(frame_path)              # ensure a half-written file fails the frame
+        except OSError:
+            pass
+    return res
+
+
 def _stamp_png(ffmpeg: str, png: str, cfg, render, yr: int, frame: int) -> None:
     """Burn the overlay into one rendered PNG (sequence outputs)."""
     filters = _burnin_filters(cfg, render, yr, f"Frame {frame}")
@@ -508,8 +579,14 @@ def main() -> None:
         frame_dir = out_path
         os.makedirs(frame_dir, exist_ok=True)
 
+    # Tone-mapping: linear + 0 EV is the old raw 8-bit path (fast, unchanged); any
+    # other choice renders HDR and tone-maps it (so GI doesn't blow out to white).
+    tm_mode = str(render.get("rs_tonemap", "filmic")).strip().lower()
+    tm_exposure = float(render.get("rs_exposure", 0.0) or 0.0)
+    tonemap_on = tm_mode in ("filmic", "reinhard") or abs(tm_exposure) > 1e-6
     log(f"Rendering {len(frames)} frame(s) at {xr}x{yr} with Redshift"
-        + (f" -> {out_fmt} movie" if is_movie else " (image sequence)"))
+        + (f" -> {out_fmt} movie" if is_movie else " (image sequence)")
+        + (f"; tone-map={tm_mode}, exposure={tm_exposure:g} EV" if tonemap_on else "; tone-map=off"))
     failed_frames = []
     for idx, f in enumerate(frames, start=1):
         # Swap in this frame's still for every mapped material.
@@ -519,11 +596,15 @@ def main() -> None:
                 set_image(still)
         doc.SetTime(c4d.BaseTime(f, fps))
         doc.ExecutePasses(None, True, True, True, c4d.BUILDFLAGS_NONE)
-        bmp = c4d.bitmaps.BaseBitmap()
-        bmp.Init(xr, yr, 24)
-        res = documents.RenderDocument(doc, rd.GetDataInstance(), bmp, c4d.RENDERFLAGS_EXTERNAL)
         frame_path = os.path.join(frame_dir, f"{idx:06d}.png" if is_movie else f"{f:04d}.png")
-        saved = bmp.Save(frame_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
+        if tonemap_on:
+            res = _render_tonemapped(doc, rd, xr, yr, frame_path, tm_mode, tm_exposure, ffmpeg)
+            saved = os.path.exists(frame_path)
+        else:
+            bmp = c4d.bitmaps.BaseBitmap()
+            bmp.Init(xr, yr, 24)
+            res = documents.RenderDocument(doc, rd.GetDataInstance(), bmp, c4d.RENDERFLAGS_EXTERNAL)
+            saved = bmp.Save(frame_path, c4d.FILTER_PNG, c4d.BaseContainer(), c4d.SAVEBIT_0)
         # Don't trust a green job blindly: the render must have returned OK AND a
         # non-empty file must exist. A failed/garbage frame now fails the job.
         ok = (res == c4d.RENDERRESULT_OK
