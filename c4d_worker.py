@@ -101,6 +101,49 @@ def _set_still(graph, path_port, image_path) -> None:
         transaction.Commit()
 
 
+def _inject_video(mat):
+    """Return a ``set_image(png_path)`` callable that makes ``mat`` show the clip
+    full-bright, or None if it can't. A Redshift node material gets a texture wired
+    to emission; a STANDARD C4D material (most exported scenes) instead drives its
+    Luminance channel — Redshift converts a standard material's Luminance to
+    emission, so the clip lands on the screen either way (this is the fix for
+    '… is not a Redshift node material — skipped', which left the screen black)."""
+    nm = mat.GetNodeMaterialReference()
+    if nm is not None and nm.HasSpace(maxon.Id(RS_SPACE)):
+        graph, port = _inject_emission_texture(mat)
+        if graph is None or port is None:
+            return None
+
+        def set_rs(path, _g=graph, _p=port):
+            _set_still(_g, _p, path)
+        return set_rs
+
+    # Standard C4D material → Luminance, full-bright (kill diffuse/reflection so
+    # ONLY the clip shows, matching the Redshift emission path).
+    log(f"  '{mat.GetName()}' is a standard C4D material — driving its Luminance "
+        f"with the clip (Redshift converts it to emission)")
+    try:
+        sh = c4d.BaseShader(c4d.Xbitmap)
+        if sh is None:
+            return None
+        mat.InsertShader(sh)
+        mat[c4d.MATERIAL_USE_LUMINANCE] = True
+        mat[c4d.MATERIAL_LUMINANCE_SHADER] = sh
+        mat[c4d.MATERIAL_LUMINANCE_BRIGHTNESS] = 1.0
+        mat[c4d.MATERIAL_LUMINANCE_COLOR] = c4d.Vector(1.0, 1.0, 1.0)
+        mat[c4d.MATERIAL_USE_COLOR] = False
+        mat[c4d.MATERIAL_USE_REFLECTION] = False
+        mat.Update(True, True)
+
+        def set_lum(path, _m=mat, _s=sh):
+            _s[c4d.BITMAPSHADER_FILENAME] = path
+            _m.Update(True, True)
+        return set_lum
+    except Exception as exc:
+        log(f"  luminance mapping error on '{mat.GetName()}': {exc}")
+        return None
+
+
 def _inject_emission_sequence(mat, first_frame_path, fstart, fend, fps) -> bool:
     """Bake the clip into the material as a Redshift image-sequence emission so
     the scene renders the right frame *natively* — letting the licensed Cinema 4D
@@ -414,14 +457,14 @@ def main() -> None:
     # ── Map videos onto materials (texture wired to emission; stills swapped
     #    per frame because Redshift can't read .mp4 directly) ───────────────
     mats = {m.GetName(): m for m in doc.GetMaterials()}
-    mapped = []  # (graph, path_port, video_path, tag)
+    mapped = []  # (set_image, video_path, tag)
     for i, a in enumerate(cfg.get("material_assignments", [])):
         name, vid = a.get("material_name"), a.get("video_path")
         if name in mats and vid:
             log(f"Mapping '{name}' <- {os.path.basename(vid)}")
-            graph, port = _inject_emission_texture(mats[name])
-            if graph is not None and port is not None:
-                mapped.append((graph, port, vid, i))
+            setter = _inject_video(mats[name])
+            if setter is not None:
+                mapped.append((setter, vid, i))
 
     # ── Camera ───────────────────────────────────────────────────────────
     cam_name = str(cfg.get("target_camera", "")).strip()
@@ -476,10 +519,10 @@ def main() -> None:
     failed_frames = []
     for idx, f in enumerate(frames, start=1):
         # Swap in this frame's still for every mapped material.
-        for (graph, port, vid, tag) in mapped:
+        for (set_image, vid, tag) in mapped:
             still = os.path.join(tmp_dir, f"clip{tag}_{f:04d}.png")
             if _extract_frame(ffmpeg, vid, f, fps, still):
-                _set_still(graph, port, still)
+                set_image(still)
         doc.SetTime(c4d.BaseTime(f, fps))
         doc.ExecutePasses(None, True, True, True, c4d.BUILDFLAGS_NONE)
         bmp = c4d.bitmaps.BaseBitmap()
