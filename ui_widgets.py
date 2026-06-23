@@ -585,6 +585,8 @@ class FilenamePatternBuilder(QWidget):
         from core.naming import Token
         while self._row.count():
             item = self._row.takeAt(0)
+            if item is None:
+                break
             w = item.widget()
             if w is not None:
                 w.deleteLater()
