@@ -2508,26 +2508,16 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
     def _render_quality_warnings(self, pending: list[RenderJob]) -> list[str]:
         """Non-blocking heads-up that a render will likely look wrong, from the last
-        scan: a Blender scene with no lighting renders non-emissive geometry black,
-        and a C4D clip only shows on a Redshift node material. Only the currently-
-        scanned scene is checked — that's the one we have discovery info for."""
+        scan: a Blender scene with no lighting renders non-emissive geometry black.
+        (A C4D clip used to need a Redshift node material, but standard materials are
+        now auto-converted to a full-bright Redshift emission, so the clip always
+        shows.) Only the currently-scanned scene is checked — the one we probed."""
         warns: list[str] = []
         scanned = (self._scanned_scene or "").strip()
         using = [j for j in pending if scanned and (j.scene_path or "").strip() == scanned]
         if not using:
             return warns
-        if is_c4d_scene(scanned):
-            if self._redshift_materials is not None:
-                for j in using:
-                    bad = sorted({a.material_name for a in j.material_assignments
-                                  if a.material_name and a.video_path
-                                  and a.material_name not in self._redshift_materials})
-                    if bad:
-                        warns.append(
-                            f"“{j.label or f'Job {j.id}'}”: {', '.join(bad)} isn't a Redshift "
-                            "material — its clip won't appear. Convert it to a Redshift node "
-                            "material in Cinema 4D.")
-        elif self._scene_has_lighting is False and any(
+        if not is_c4d_scene(scanned) and self._scene_has_lighting is False and any(
                 not uses_web_backend(scanned, j.render_options.engine if j.render_options else "")
                 for j in using):
             warns.append(

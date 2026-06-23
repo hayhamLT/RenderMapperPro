@@ -101,57 +101,51 @@ def _set_still(graph, path_port, image_path) -> None:
         transaction.Commit()
 
 
+def _ensure_rs_node_material(mat) -> bool:
+    """Make ``mat`` a Redshift node material. Standard C4D materials (most exported
+    scenes) aren't — Redshift only auto-converts them at render time, and that
+    conversion does NOT give a clean full-bright emission. Converting up front
+    (CreateDefaultGraph) lets us wire a TRUE emission, so the screen is fully
+    emissive (unlit) like Blender/three.js. Returns True if it's now RS-node."""
+    nm = mat.GetNodeMaterialReference()
+    if nm is None:
+        return False
+    if nm.HasSpace(maxon.Id(RS_SPACE)):
+        return True
+    try:
+        nm.CreateDefaultGraph(maxon.Id(RS_SPACE))
+        log(f"  converted standard material '{mat.GetName()}' to Redshift (for full-bright emission)")
+        return nm.HasSpace(maxon.Id(RS_SPACE))
+    except Exception as exc:
+        log(f"  could not convert '{mat.GetName()}' to a Redshift material: {exc}")
+        return False
+
+
 def _inject_video(mat):
     """Return a ``set_image(png_path)`` callable that makes ``mat`` show the clip
-    full-bright, or None if it can't. A Redshift node material gets a texture wired
-    to emission; a STANDARD C4D material (most exported scenes) instead drives its
-    Luminance channel — Redshift converts a standard material's Luminance to
-    emission, so the clip lands on the screen either way (this is the fix for
-    '… is not a Redshift node material — skipped', which left the screen black)."""
-    nm = mat.GetNodeMaterialReference()
-    if nm is not None and nm.HasSpace(maxon.Id(RS_SPACE)):
-        graph, port = _inject_emission_texture(mat)
-        if graph is None or port is None:
-            return None
-
-        def set_rs(path, _g=graph, _p=port):
-            _set_still(_g, _p, path)
-        return set_rs
-
-    # Standard C4D material → Luminance, full-bright (kill diffuse/reflection so
-    # ONLY the clip shows, matching the Redshift emission path).
-    log(f"  '{mat.GetName()}' is a standard C4D material — driving its Luminance "
-        f"with the clip (Redshift converts it to emission)")
-    try:
-        sh = c4d.BaseShader(c4d.Xbitmap)
-        if sh is None:
-            return None
-        mat.InsertShader(sh)
-        mat[c4d.MATERIAL_USE_LUMINANCE] = True
-        mat[c4d.MATERIAL_LUMINANCE_SHADER] = sh
-        mat[c4d.MATERIAL_LUMINANCE_BRIGHTNESS] = 1.0
-        mat[c4d.MATERIAL_LUMINANCE_COLOR] = c4d.Vector(1.0, 1.0, 1.0)
-        mat[c4d.MATERIAL_USE_COLOR] = False
-        mat[c4d.MATERIAL_USE_REFLECTION] = False
-        mat.Update(True, True)
-
-        def set_lum(path, _m=mat, _s=sh):
-            _s[c4d.BITMAPSHADER_FILENAME] = path
-            _m.Update(True, True)
-        return set_lum
-    except Exception as exc:
-        log(f"  luminance mapping error on '{mat.GetName()}': {exc}")
+    as a TRUE full-bright Redshift emission (unaffected by lighting), or None if it
+    can't. Standard C4D materials are first converted to Redshift node materials so
+    the same pure-emission wiring applies — fixing both the black screen and the
+    'not fully emissive' look from the old Luminance fallback."""
+    if not _ensure_rs_node_material(mat):
         return None
+    graph, port = _inject_emission_texture(mat)
+    if graph is None or port is None:
+        return None
+
+    def set_rs(path, _g=graph, _p=port):
+        _set_still(_g, _p, path)
+    return set_rs
 
 
 def _inject_emission_sequence(mat, first_frame_path, fstart, fend, fps) -> bool:
     """Bake the clip into the material as a Redshift image-sequence emission so
     the scene renders the right frame *natively* — letting the licensed Cinema 4D
     Commandline renderer drive it on the farm with no Python/c4dpy per node."""
-    nm = mat.GetNodeMaterialReference()
-    if nm is None or not nm.HasSpace(maxon.Id(RS_SPACE)):
-        log(f"  '{mat.GetName()}' is not a Redshift node material — skipped")
+    if not _ensure_rs_node_material(mat):
+        log(f"  '{mat.GetName()}' could not be made a Redshift material — skipped")
         return False
+    nm = mat.GetNodeMaterialReference()
     graph = nm.GetGraph(maxon.Id(RS_SPACE))
     tr = graph.BeginTransaction()
     try:
