@@ -117,3 +117,36 @@ def test_config_roundtrip():
 def test_case_insensitive_fixed_letters():
     c = parse_clip("/x/prj001_d01_s01_a017_center_anim_v003.mp4")
     assert c is not None and c.asset == 17 and c.screen == "center"
+
+
+def test_default_pattern_is_now_the_friendly_token_form():
+    # The default is the readable token pattern, not a raw regex.
+    from core.asset_grouping import DEFAULT_PATTERN
+    assert "{" in DEFAULT_PATTERN and "regex" not in DEFAULT_PATTERN.lower()
+    assert "{Project}" in DEFAULT_PATTERN and "{Version#}" in DEFAULT_PATTERN
+
+
+def test_custom_friendly_pattern_with_human_field_names():
+    # A per-show pattern written in the friendly syntax; Proj/Ver alias to prj/version.
+    cfg = GroupingConfig(pattern="{Proj}-{Screen}-S{Setup#}-A{Asset#}-D{Day#}-V{Ver#}")
+    c = parse_clip("/x/ACME-LEFT-S2-A7-D3-V5.mov", cfg.pattern)
+    assert c is not None
+    assert (c.prj, c.screen, c.setup, c.asset, c.day, c.version) == ("ACME", "LEFT", 2, 7, 3, 5)
+
+
+def test_legacy_regex_pattern_still_supported_for_saved_configs():
+    # Anyone who saved the old raw regex keeps working untouched.
+    legacy = (
+        r"^(?P<prj>[A-Za-z][A-Za-z0-9]*?)_[Dd](?P<day>\d+)_[Ss](?P<setup>\d+)"
+        r"_[Aa](?P<asset>\d+)_(?P<screen>[A-Za-z0-9]+)_(?P<type>[A-Za-z0-9]+)_[Vv](?P<version>\d+)$"
+    )
+    c = parse_clip("/x/PRJ001_D01_S01_A017_CENTER_ANIM_V003.mp4", legacy)
+    assert c is not None and c.asset == 17 and c.version == 3
+    # And it groups identically to the friendly default.
+    paths = ["/x/PRJ001_D01_S01_A017_LEFT_ANIM_V001.mp4",
+             "/x/PRJ001_D01_S01_A017_RIGHT_ANIM_V001.mp4"]
+    assert len(group_clips(paths, GroupingConfig(pattern=legacy))) == 1
+
+
+def test_invalid_friendly_pattern_skips_clip_gracefully():
+    assert parse_clip("/x/whatever.mp4", "{Day#}_{Day#}") is None   # duplicate field
