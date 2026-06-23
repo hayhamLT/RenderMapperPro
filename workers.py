@@ -42,6 +42,84 @@ def extract_frame_number(line: str) -> int | None:
     return None
 
 
+# Blender (Cycles + EEVEE) reports within-frame progress as "Rendering X / Y
+# samples"; parsed to advance the bar *during* a long frame instead of only when
+# the frame changes (a heavy first frame otherwise sits at 0% for its whole run).
+SAMPLE_RE = re.compile(r"(\d+)\s*/\s*(\d+)\s+samples", re.I)
+
+
+def extract_sample_fraction(line: str) -> float | None:
+    """Within-frame completion (0..1) from a renderer's 'X / Y samples' line, or
+    None if the line carries no sample count."""
+    m = SAMPLE_RE.search(line)
+    if not m:
+        return None
+    done, total = int(m.group(1)), int(m.group(2))
+    if total <= 0:
+        return None
+    return max(0.0, min(1.0, done / total))
+
+
+# Renderers carriage-return-update their per-sample/per-sync progress on a single
+# "Fra:123 …" line; universal-newline reading splits each refresh into its own
+# line, flooding the live log. These are throttled in the log (still parsed for
+# progress). Matches Blender ("Fra:1 …") and the web backend ("[web] Fra:1 …").
+_TRANSIENT_PROGRESS_RE = re.compile(r"\bFra:\d+")
+
+
+def is_transient_progress_line(line: str) -> bool:
+    return bool(_TRANSIENT_PROGRESS_RE.search(line))
+
+
+class RenderProgress:
+    """Turns a renderer's stdout into (a) a monotonic 0–100 percent that advances
+    *within* a frame via sample counts and reaches ~100% on the last frame, and
+    (b) a live-log flood gate that throttles the carriage-return progress spam.
+    Pure except for an injected clock, so it's unit-testable."""
+
+    def __init__(self, frame_start: int, frame_end: int, *,
+                 min_log_interval: float = 1.0) -> None:
+        self.fs = frame_start
+        self.span = max(1, frame_end - frame_start + 1)
+        self.min_log_interval = min_log_interval
+        self._frame: int | None = None
+        self._frac = 0.0
+        self._emitted_pct = -1.0
+        self._last_log_t = float("-inf")
+
+    def update(self, line: str, now: float) -> tuple[float | None, bool, int | None]:
+        """Feed one stdout line seen at monotonic time ``now``. Returns
+        ``(pct, show_in_log, new_frame)``: ``pct`` is the percent to emit (None
+        when it hasn't visibly changed), ``show_in_log`` is False for throttled
+        progress spam, ``new_frame`` is the frame number when a new frame just
+        started (for per-frame timing) else None."""
+        frame = extract_frame_number(line)
+        pct: float | None = None
+        new_frame: int | None = None
+        if frame is not None:
+            if frame != self._frame:
+                self._frame = frame
+                self._frac = 0.0
+                new_frame = frame
+            frac = extract_sample_fraction(line)
+            if frac is not None:
+                self._frac = max(self._frac, frac)
+            done = (frame - self.fs) + self._frac
+            p = max(0.0, min(100.0, done / self.span * 100.0))
+            # Emit on any visible (0.1%) change so the bar moves smoothly without
+            # flooding the UI with identical updates.
+            if round(p, 1) != round(self._emitted_pct, 1):
+                self._emitted_pct = p
+                pct = p
+        show = True
+        if is_transient_progress_line(line):
+            if now - self._last_log_t >= self.min_log_interval:
+                self._last_log_t = now
+            else:
+                show = False
+        return pct, show, new_frame
+
+
 class CancellableWorker(QThread):
     """QThread with a uniform cooperative-cancel flag. Subclasses pass
     ``self.cancelled`` as ``should_cancel`` to the subprocess runner."""
@@ -184,23 +262,24 @@ class RenderThread(CancellableWorker):
             self.log.emit(f"[app] Job {jid}: {entry.get('label', '')}")
 
             fs, fe = cfg.render.frame_start, cfg.render.frame_end
-            span = max(1, fe - fs + 1)
             last_error: list[str] = []
             timer = FrameTimer()
+            prog = RenderProgress(fs, fe)
 
-            def on_log(line: str, _j: int = jid, _fs: int = fs, _span: int = span,
-                       _err: list = last_error, _timer: FrameTimer = timer) -> None:
-                self.log.emit(line)
+            def on_log(line: str, _j: int = jid, _err: list = last_error,
+                       _timer: FrameTimer = timer, _prog: RenderProgress = prog) -> None:
                 low = line.lower()
                 if "error" in low or "traceback" in low or "not found" in low:
                     _err.append(line.strip())
-                frame = extract_frame_number(line)
-                if frame is not None:
-                    pct = max(0.0, min(100.0, ((frame - _fs) / _span) * 100.0))
+                now = time.monotonic()
+                pct, show, new_frame = _prog.update(line, now)
+                if show:
+                    self.log.emit(line)
+                if pct is not None:
                     self.job_update.emit(_j, "running", pct)
-                    if _timer.record(frame, time.monotonic()) is not None:
-                        s = summarize(_timer.samples)
-                        self.frame_metrics.emit(_j, int(s["count"]), s["avg"], s["p95"])
+                if new_frame is not None and _timer.record(new_frame, now) is not None:
+                    s = summarize(_timer.samples)
+                    self.frame_metrics.emit(_j, int(s["count"]), s["avg"], s["p95"])
 
             try:
                 if getattr(cfg, "use_deadline", False):
