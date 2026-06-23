@@ -8,6 +8,24 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture(autouse=True)
+def _never_block_on_first_run_modal(monkeypatch):
+    """Stop the first-run welcome modal from deadlocking the headless run.
+
+    app_qt schedules ``_maybe_first_run`` ~300ms after the window is built
+    (QTimer.singleShot), and on a first launch it pops a ``QMessageBox`` via
+    ``exec()`` — a *nested* modal event loop. Offscreen there's no user to
+    dismiss it, so the moment any test pumps the event loop past that 300ms the
+    exec() traps the loop until the CI step's 10-min cap. pytest-timeout's
+    default ``signal`` method can't break Qt's C++ loop, so ``--timeout`` won't
+    save us. Neutralise ``exec()`` for every test in this file (the project's
+    standard way to make modals non-blocking — see test_app_state.py) so the
+    smoke test can never hang on the welcome dialog, however slow construction
+    is on the runner."""
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+
+
 def test_window_builds_and_core_wiring(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
@@ -18,6 +36,13 @@ def test_window_builds_and_core_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(app_qt, "LOG_PATH", tmp_path / "l.txt")
 
     w = app_qt.BlenderVideoMapperQt()
+    # First run is active (the temp profile doesn't exist yet), so the welcome
+    # modal path is live. Drive it explicitly — deterministically, instead of
+    # racing the 300ms QTimer — to prove it returns rather than trapping the
+    # event loop, and that it writes a profile so it won't offer to reshow.
+    assert w._is_first_run is True
+    w._maybe_first_run()
+    assert (tmp_path / "p.json").exists()
     # Renderer-aware settings swap across every engine.
     for _eng in ("Redshift", "WEB_THREEJS", "BLENDER_EEVEE", "CYCLES"):
         w.render_panel.set_renderer(_eng)

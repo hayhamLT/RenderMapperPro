@@ -43,8 +43,10 @@ jobs:
         # in the same pytest process as the other UI tests deadlocks Qt's global
         # state (each passes in isolation).
         # --timeout turns a hung test into a fast failure (a stack dump) rather
-        # than a stalled runner.
-        run: pytest -q --ignore=tests/test_smoke_ui.py --timeout=180
+        # than a stalled runner. --timeout-method=thread because the default
+        # (signal) can't interrupt Qt's C++ event loop — a nested modal exec()
+        # would otherwise stall until the job's wall-clock cap.
+        run: pytest -q --ignore=tests/test_smoke_ui.py --timeout=180 --timeout-method=thread
 
   # Construct the whole Qt window headlessly and exercise key wiring, so UI
   # regressions are caught even though app_qt.py isn't fully unit-tested.
@@ -67,9 +69,12 @@ jobs:
       - name: Headless UI smoke test
         env:
           QT_QPA_PLATFORM: offscreen
-        # --timeout dumps a stack and fails if the construct/first-run wiring ever
-        # deadlocks, so the runner never hangs indefinitely on it.
-        run: pytest -q tests/test_smoke_ui.py --timeout=120
+        # The smoke test neutralises the first-run welcome modal so it can't
+        # deadlock the offscreen event loop. --timeout is the backstop for any
+        # future timer-driven modal: --timeout-method=thread because the default
+        # (signal) can't break Qt's C++ loop, so it would hang to the 10-min cap
+        # instead of dumping a stack and failing fast.
+        run: pytest -q tests/test_smoke_ui.py --timeout=120 --timeout-method=thread
 
   # Render one real frame through the headless three.js backend, end to end. The
   # three.js graph is vendored (no CDN), so this runs fully offline — it guards
