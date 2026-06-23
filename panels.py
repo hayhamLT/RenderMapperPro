@@ -1203,18 +1203,12 @@ class RenderPanel(QWidget):
             row.addStretch(1)
             return row
 
-        # ── Renderer — the engine + a one-line "what this is" summary ───
+        # ── Renderer ──────────────────────────────────────────────────
         root.addWidget(section("RENDERER"))
         self.engine_combo = QComboBox()
         self.engine_combo.setToolTip("Render engine. Cycles = highest quality (slow); EEVEE = fast preview-grade. C4D scenes use Redshift.")
         self.populate_engines(["CYCLES", "BLENDER_EEVEE"])
         root.addWidget(self.engine_combo)
-        self.engine_summary = QLabel()
-        self.engine_summary.setObjectName("FieldLabel")
-        self.engine_summary.setTextFormat(Qt.TextFormat.RichText)
-        self.engine_summary.setWordWrap(True)
-        root.addWidget(self.engine_summary)
-        self.engine_combo.currentIndexChanged.connect(lambda _i: self._update_engine_summary())
 
         # ── Format — ONE dropdown with every format the renderer can write.
         #    Movie containers (MP4/MOV) expose Codec + Quality right beneath it
@@ -1520,7 +1514,6 @@ class RenderPanel(QWidget):
             w.textEdited.connect(self._rs_custom)
         self.rs_gi_cb.toggled.connect(lambda _v: self._rs_custom())
         self.set_renderer("CYCLES")
-        self._update_engine_summary()
 
         root.addWidget(self.adv_box)
 
@@ -1562,22 +1555,6 @@ class RenderPanel(QWidget):
     # carried as itemData so configs/profiles keep the real identifier.
     ENGINE_LABELS: ClassVar = {"CYCLES": "Cycles", "BLENDER_EEVEE": "EEVEE", "Redshift": "Redshift",
                                "WEB_THREEJS": "three.js (WebGL)"}
-    # Backend key (→ _BACKEND_INFO colour) + a terse blurb, shown under the picker
-    # like an Adobe Media Encoder format summary. The coloured dot signals backend.
-    ENGINE_DESC: ClassVar = {
-        "CYCLES": ("blender", "Path-traced · best quality"),
-        "BLENDER_EEVEE": ("blender", "Real-time · fast preview"),
-        "Redshift": ("c4d", "GPU · Cinema 4D"),
-        "WEB_THREEJS": ("web", "Real-time · WebGL"),
-    }
-
-    def _update_engine_summary(self) -> None:
-        """Refresh the blurb under the renderer picker for the current pick."""
-        val = self.engine_value()
-        key, desc = self.ENGINE_DESC.get(val, ("blender", ""))
-        color = _BACKEND_INFO.get(key, ("#888888", ""))[0]
-        self.engine_summary.setText(
-            f'<span style="color:{color};">&#9679;</span>&nbsp;{desc}')
 
     def populate_engines(self, values: list[str]) -> None:
         self.engine_combo.clear()
