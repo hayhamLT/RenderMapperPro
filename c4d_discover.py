@@ -73,6 +73,22 @@ def _settings(doc) -> dict:
                 s["rs_gi_enabled"] = bool(vp[c4d.REDSHIFT_RENDERER_GI_ENABLED])
                 s["rs_gi_bounces"] = int(vp[c4d.REDSHIFT_RENDERER_NUM_GI_BOUNCES])
                 s["rs_ray_depth"] = int(vp[c4d.REDSHIFT_RENDERER_MAX_TRACE_DEPTH_COMBINED])
+                # Tone-map: the app applies its own (RS post-effects don't survive a
+                # headless render), so map the scene's colour-management view to the
+                # closest operator — an ACES/Filmic/AgX view → filmic, anything else
+                # (Raw/Linear/plain sRGB) → linear.
+                try:
+                    view = str(vp[c4d.REDSHIFT_RENDERER_COLOR_MANAGEMENT_OCIO_VIEW] or "")
+                    up = view.upper()
+                    s["rs_tonemap"] = "filmic" if any(k in up for k in ("ACES", "FILMIC", "AGX")) else "linear"
+                except Exception:
+                    pass
+                # Carry an explicit exposure only if the Colour Control post-effect set one.
+                try:
+                    if bool(vp[c4d.REDSHIFT_POSTEFFECTS_COLORCONTROL_ENABLED]):
+                        s["rs_exposure"] = float(vp[c4d.REDSHIFT_POSTEFFECTS_COLORCONTROL_EXPOSURE])
+                except Exception:
+                    pass
                 break
             vp = vp.GetNext()
     except Exception as exc:  # never let settings probing break discovery

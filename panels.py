@@ -1414,6 +1414,32 @@ class RenderPanel(QWidget):
         ))
         adv.addWidget(self.gi_box)
 
+        # ── Tone mapping (Redshift only) ─────────────────────────────────
+        # Redshift's own tone-map/colour-management can't run in the headless
+        # render, so the app applies these to the HDR render itself — this is
+        # what keeps GI from blowing the image out to white.
+        self.rs_color_box = QWidget()
+        rsc_lay = QVBoxLayout(self.rs_color_box)
+        rsc_lay.setContentsMargins(0, 0, 0, 0)
+        rsc_lay.setSpacing(6)
+        rsc_lay.addWidget(section("TONE MAPPING"))
+        self.rs_tonemap_combo = QComboBox()
+        self.rs_tonemap_combo.addItems(["Filmic (ACES)", "Reinhard", "Linear (raw)"])
+        self.rs_tonemap_combo.setToolTip(
+            "How HDR highlights are compressed to the final image.\n"
+            "Filmic (ACES) = cinematic roll-off (matches the C4D viewport);\n"
+            "Reinhard = strongest highlight compression (best against GI blow-out);\n"
+            "Linear (raw) = no tone-map (highlights clip to white).")
+        self.rs_exposure_edit = QLineEdit("0.0")
+        self.rs_exposure_edit.setMaximumWidth(_NUM_W)
+        self.rs_exposure_edit.setToolTip("Exposure in stops applied before the tone-map "
+                                         "(negative darkens — use it to pull back a bright GI render).")
+        rsc_lay.addLayout(two_col(
+            labeled("Tone Map", self.rs_tonemap_combo),
+            labeled("Exposure", self.rs_exposure_edit),
+        ))
+        adv.addWidget(self.rs_color_box)
+
         # ── Color management (Blender only) ──────────────────────────────
         self.color_box = QWidget()
         color_lay = QVBoxLayout(self.color_box)
@@ -1600,8 +1626,9 @@ class RenderPanel(QWidget):
         qname = ("Redshift" if is_c4d else "three.js" if is_web
                  else "EEVEE" if is_eevee else "Cycles")
         self.quality_header.setText(f"QUALITY · {qname}")
-        # Redshift-only sampling/GI controls.
-        for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row, self.gi_box):
+        # Redshift-only sampling/GI/tone-map controls.
+        for w in (self.rs_preset_row, self.rs_min_box, self.rs_threshold_row,
+                  self.gi_box, self.rs_color_box):
             w.setVisible(is_c4d)
         # Device (Auto/GPU/CPU) is a CYCLES-only preference — EEVEE rasterises on
         # the GPU, Redshift is GPU, three.js runs in the browser.
@@ -1727,6 +1754,14 @@ class RenderPanel(QWidget):
             self.rs_ray_depth_edit.setText(str(int(s["rs_ray_depth"])))
         if "rs_gi_enabled" in s:
             self.rs_gi_cb.setChecked(bool(s["rs_gi_enabled"]))
+        # Redshift tone-map / exposure read from the scene's colour management.
+        if "rs_tonemap" in s:
+            label = {"filmic": "Filmic (ACES)", "reinhard": "Reinhard",
+                     "linear": "Linear (raw)"}.get(str(s["rs_tonemap"]).lower())
+            if label and self.rs_tonemap_combo.findText(label) >= 0:
+                self.rs_tonemap_combo.setCurrentText(label)
+        if "rs_exposure" in s and s["rs_exposure"] is not None:
+            self.rs_exposure_edit.setText(f"{float(s['rs_exposure']):g}")
         # Engine: map any EEVEE variant (EEVEE / EEVEE_NEXT) to the combo entry.
         eng = str(s.get("engine", "")).upper()
         if eng:
@@ -1789,6 +1824,9 @@ class RenderPanel(QWidget):
             rs_gi_enabled=self.rs_gi_cb.isChecked(),
             rs_gi_bounces=to_int(self.rs_gi_bounces_edit.text(), 3),
             rs_ray_depth=to_int(self.rs_ray_depth_edit.text(), 6),
+            rs_tonemap={"Filmic (ACES)": "filmic", "Reinhard": "reinhard",
+                        "Linear (raw)": "linear"}.get(self.rs_tonemap_combo.currentText(), "filmic"),
+            rs_exposure=to_float(self.rs_exposure_edit.text(), 0.0),
             web_lighting_preset={"Auto": "auto", "Studio": "studio", "Outdoor": "outdoor",
                                  "Flat": "flat", "None": "none"}.get(
                 self.web_light_preset_combo.currentText(), "auto"),
@@ -1858,6 +1896,12 @@ class RenderPanel(QWidget):
         setnum(self.rs_ray_depth_edit, "rs_ray_depth")
         if "rs_gi_enabled" in d:
             self.rs_gi_cb.setChecked(bool(d["rs_gi_enabled"]))
+        if "rs_tonemap" in d:
+            label = {"filmic": "Filmic (ACES)", "reinhard": "Reinhard",
+                     "linear": "Linear (raw)"}.get(str(d["rs_tonemap"]).lower())
+            if label and self.rs_tonemap_combo.findText(label) >= 0:
+                self.rs_tonemap_combo.setCurrentText(label)
+        setnum(self.rs_exposure_edit, "rs_exposure")
         if "web_lighting_preset" in d:
             self.web_light_preset_combo.setCurrentText(
                 {"auto": "Auto", "studio": "Studio", "outdoor": "Outdoor",
