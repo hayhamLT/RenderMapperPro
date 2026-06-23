@@ -322,10 +322,13 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     lay.addWidget(QLabel("Filename pattern:"))
     ag_pat_edit = QLineEdit(_ag.pattern)
     ag_pat_edit.setPlaceholderText("{Project}_D{Day#}_S{Setup#}_A{Asset#}_{Screen}_{Type}_V{Version#}")
-    lay.addWidget(ag_pat_edit)
-    lay.addWidget(hint("Write it like a filename: {Field} = text, {Field#} = number, "
-                       "{Field#?} = optional. Recognised fields: Project, Day, Setup, Asset, "
-                       "Screen, Type, Version. (A raw regex with those named groups also still works.)"))
+    from ui_widgets import FilenamePatternBuilder
+    lay.addWidget(FilenamePatternBuilder(ag_pat_edit))   # visual chip editor (writes the field below)
+    lay.addWidget(ag_pat_edit)                           # canonical text form — editable directly
+    lay.addWidget(hint("Build it with the chips above (click a chip to rename, set Text or Number, "
+                       "mark optional, reorder or delete), or just type it: {Field} = text, "
+                       "{Field#} = number, {Field#?} = optional. Recognised fields: Project, Day, "
+                       "Setup, Asset, Screen, Type, Version. (A raw regex still works too.)"))
 
     # Live preview: type a sample filename and see exactly what each field captures —
     # or where the pattern stops matching — so it's tunable without knowing regex.

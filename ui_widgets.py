@@ -12,12 +12,20 @@ from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
     QLineEdit,
     QListWidget,
+    QMenu,
+    QPushButton,
+    QScrollArea,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTableWidget,
+    QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -533,3 +541,146 @@ class HintTableWidget(QTableWidget):
             painter.drawText(self.viewport().rect().adjusted(16, 0, -16, 0),
                              Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self._hint)
             painter.end()
+
+
+class FilenamePatternBuilder(QWidget):
+    """Visual editor for a ``core.naming`` filename pattern: a row of field
+    "chips" with editable literal separators between them, plus a "+ Field"
+    button. It is a *view* over a ``QLineEdit`` that holds the canonical pattern
+    text — chip edits rewrite the line edit, and any change to the line edit
+    re-renders the chips. Single source of truth (the text), so the two never
+    drift and there's no two-way-sync loop (re-render only reads the text)."""
+
+    def __init__(self, line_edit: QLineEdit, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._edit = line_edit
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedHeight(48)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._host = QWidget()
+        self._row = QHBoxLayout(self._host)
+        self._row.setContentsMargins(2, 2, 2, 2)
+        self._row.setSpacing(3)
+        self._row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        scroll.setWidget(self._host)
+        outer.addWidget(scroll)
+        self._edit.textChanged.connect(self._rebuild)
+        self._rebuild()
+
+    # ── model helpers (the line edit is the model) ───────────────────────────
+    def _parts(self) -> list:
+        from core.naming import lex_pattern
+        return lex_pattern(self._edit.text())
+
+    def _apply(self, parts: list) -> None:
+        from core.naming import build_pattern
+        self._edit.setText(build_pattern(parts))   # -> textChanged -> _rebuild
+
+    # ── rendering ────────────────────────────────────────────────────────────
+    def _rebuild(self, *_a) -> None:
+        from core.naming import Token
+        while self._row.count():
+            item = self._row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for i, part in enumerate(self._parts()):
+            self._row.addWidget(self._chip(i, part) if isinstance(part, Token) else self._sep(i, part))
+        add = QPushButton("+ Field")
+        add.setToolTip("Append a new {field} to the pattern")
+        add.clicked.connect(self._add_field)
+        self._row.addWidget(add)
+        self._row.addStretch(1)
+
+    def _chip(self, idx: int, tok) -> QToolButton:
+        pal = active_palette()
+        btn = QToolButton()
+        suffix = ("  #" if tok.is_number else "") + ("  ?" if tok.optional else "")
+        btn.setText(tok.name + suffix)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        btn.setToolTip("Click to rename, set Text/Number, mark optional, reorder or delete")
+        btn.setStyleSheet(
+            f"QToolButton {{ background:{pal.accent}; color:{pal.accent_text};"
+            f" border:none; border-radius:9px; padding:4px 10px; font-weight:600; }}"
+            "QToolButton::menu-indicator { image:none; width:0; }")
+        menu = QMenu(btn)
+        menu.addAction("Rename…", lambda *_a, i=idx: self._rename(i))
+        a_num = menu.addAction("Number (digits only)", lambda *_a, i=idx: self._toggle(i, "is_number"))
+        a_num.setCheckable(True)
+        a_num.setChecked(tok.is_number)
+        a_opt = menu.addAction("Optional", lambda *_a, i=idx: self._toggle(i, "optional"))
+        a_opt.setCheckable(True)
+        a_opt.setChecked(tok.optional)
+        menu.addSeparator()
+        menu.addAction("Move left", lambda *_a, i=idx: self._move(i, -1))
+        menu.addAction("Move right", lambda *_a, i=idx: self._move(i, +1))
+        menu.addSeparator()
+        menu.addAction("Delete", lambda *_a, i=idx: self._delete(i))
+        btn.setMenu(menu)
+        return btn
+
+    def _sep(self, idx: int, lit) -> QLineEdit:
+        pal = active_palette()
+        e = QLineEdit(lit.text)
+        e.setToolTip("Literal text between fields (e.g. '_', 'D', 'S')")
+        e.setFixedWidth(max(28, 10 + 8 * len(lit.text)))
+        e.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        e.setStyleSheet(
+            f"QLineEdit {{ background:transparent; color:{pal.text_muted};"
+            f" border:1px dashed {pal.border}; border-radius:6px; padding:3px; }}")
+        e.editingFinished.connect(lambda i=idx, w=e: self._set_sep(i, w.text()))
+        return e
+
+    # ── edit operations (all go through the canonical text) ──────────────────
+    def _rename(self, idx: int) -> None:
+        parts = self._parts()
+        if idx >= len(parts):
+            return
+        name, ok = QInputDialog.getText(self, "Rename field", "Field name:", text=parts[idx].name)
+        name = name.strip()
+        if ok and name:
+            parts[idx].name = name
+            self._apply(parts)
+
+    def _toggle(self, idx: int, attr: str) -> None:
+        parts = self._parts()
+        if idx < len(parts):
+            setattr(parts[idx], attr, not getattr(parts[idx], attr))
+            self._apply(parts)
+
+    def _move(self, idx: int, delta: int) -> None:
+        parts = self._parts()
+        j = idx + delta
+        if 0 <= idx < len(parts) and 0 <= j < len(parts):
+            parts[idx], parts[j] = parts[j], parts[idx]
+            self._apply(parts)
+
+    def _delete(self, idx: int) -> None:
+        parts = self._parts()
+        if idx < len(parts):
+            del parts[idx]
+            self._apply(parts)
+
+    def _set_sep(self, idx: int, text: str) -> None:
+        from core.naming import Literal
+        parts = self._parts()
+        if idx < len(parts):
+            parts[idx] = Literal(text)
+            self._apply(parts)
+
+    def _add_field(self) -> None:
+        from core.naming import Literal, Token
+        name, ok = QInputDialog.getText(self, "Add field", "Field name:")
+        name = name.strip()
+        if not (ok and name):
+            return
+        parts = self._parts()
+        if parts and isinstance(parts[-1], Token):
+            parts.append(Literal("_"))      # keep adjacent fields separable
+        parts.append(Token(name))
+        self._apply(parts)
