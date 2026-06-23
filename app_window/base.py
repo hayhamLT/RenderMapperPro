@@ -76,6 +76,7 @@ class _WindowMembers(_Base):
 
         # ── Methods provided by the window / other mixins ──────────────────
         def _append_log(self, line: str) -> None: ...
+        def _is_headless(self) -> bool: ...                          # window
         def _on_queue_job_selected(self, job_id: int) -> None: ...   # QueueMixin
         def _refresh_job_outputs(self) -> None: ...                  # QueueMixin
         def _refresh_queue_view(self) -> None: ...                   # QueueMixin

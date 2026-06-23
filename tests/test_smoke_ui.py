@@ -96,3 +96,25 @@ def test_batch_output_dedup_and_autorender_defer(tmp_path, monkeypatch):
     w._on_target_set_ready([MaterialVideoAssignment("Screen", "/v/Screen_v1.mp4", "EMISSION_FULL_BRIGHT")])
     assert started == [], "auto-render should not start while busy"
     assert len(w._pending_autorender_ids) == 1, "auto-render job must be deferred, not dropped"
+
+
+def test_first_run_welcome_suppressed_when_headless(tmp_path, monkeypatch):
+    """Regression: the first-run welcome modal must NOT block under the offscreen
+    platform. A blocking .exec() there has no one to dismiss it and hung the
+    headless CI smoke job for ~10 min (then failed) on most releases."""
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication.instance() or QApplication([])
+    assert app.platformName() == "offscreen"
+    import app_qt
+    monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
+    monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")
+    monkeypatch.setattr(app_qt, "LOG_PATH", tmp_path / "l.txt")
+    w = app_qt.BlenderVideoMapperQt()
+    assert w._is_headless() is True
+    # Force the first-run condition, then prove the welcome box is skipped: if it
+    # weren't gated, _maybe_first_run would call QMessageBox.exec() (and block).
+    w._is_first_run = True
+    opened = {"exec": False}
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: opened.__setitem__("exec", True) or 0)
+    w._maybe_first_run()
+    assert opened["exec"] is False, "first-run welcome modal not suppressed under offscreen"

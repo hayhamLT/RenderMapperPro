@@ -277,6 +277,8 @@ class RuntimeMixin(_WindowMembers):
     def _prompt_install_runtime(self) -> None:
         if self._runtime_prompted:
             return
+        if self._is_headless():            # don't block a headless smoke test on .question()
+            return
         self._runtime_prompted = True
         ans = QMessageBox.question(
             self,
