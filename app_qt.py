@@ -346,8 +346,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._aspect_warned: set = set()    # (material, clip) pairs already warned about
         # Render-preflight inputs from the last scan (None = unknown).
         self._scene_has_lighting: bool | None = None       # Blender: any lamp/world light?
-        self._redshift_materials: set | None = None        # C4D: materials that take a clip
-        self._scanned_scene: str = ""                      # the scene those two describe
+        self._scanned_scene: str = ""                      # the scene that describes
         self._autorender_start = False        # auto-start vs queue-only
         self._last_report_path = ""
         self._last_html_report_path = ""
@@ -1869,8 +1868,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._material_aspects = dict(settings.get("material_aspects") or {})
         # Render-preflight inputs (None = unknown / not reported for this backend).
         self._scene_has_lighting = settings.get("has_lighting")
-        rs = settings.get("redshift_materials")
-        self._redshift_materials = set(rs) if rs is not None else None
         self._scanned_scene = self.scene_panel.scene_edit.text().strip()
         self._aspect_warned.clear()
         clean_materials = [str(m).strip() for m in materials if str(m).strip()]
