@@ -210,3 +210,47 @@ def preview(pattern: str, sample: str) -> PreviewResult:
 
 # Shipped as the suggested starting point in the UI.
 DEFAULT_PATTERN = "{Project}_D{Day#}_S{Setup#}_A{Asset#}_{Screen}_{Type}_V{Version#}"
+
+
+# ── editable parts (for the visual chip builder) ─────────────────────────────
+# The chip builder is a *view* over the pattern string: it decomposes the string
+# into ordered parts, lets the user edit them, and rebuilds the string. lex_pattern
+# never raises (so a half-typed pattern still renders) and build_pattern is its
+# inverse, so the round-trip is stable.
+
+@dataclass
+class Literal:
+    """Fixed text between tokens (separators like '_' or prefix letters 'D')."""
+    text: str
+
+
+@dataclass
+class Token:
+    """An editable {field} chip."""
+    name: str
+    is_number: bool = False
+    optional: bool = False
+
+    def render(self) -> str:
+        return "{" + self.name + ("#" if self.is_number else "") + ("?" if self.optional else "") + "}"
+
+
+def lex_pattern(pattern: str) -> list[Literal | Token]:
+    """Decompose a pattern into ordered Literal / Token parts WITHOUT validating
+    (powers the chip builder, which must render even a partial pattern)."""
+    parts: list[Literal | Token] = []
+    pos = 0
+    for m in _TOKEN_RE.finditer(pattern):
+        if m.start() > pos:
+            parts.append(Literal(pattern[pos:m.start()]))
+        name = re.sub(r"\s+", " ", m.group(1)).strip()
+        parts.append(Token(name, m.group(2) == "#", m.group(3) == "?"))
+        pos = m.end()
+    if pos < len(pattern):
+        parts.append(Literal(pattern[pos:]))
+    return parts
+
+
+def build_pattern(parts: list[Literal | Token]) -> str:
+    """Reassemble parts (from lex_pattern, after edits) into a pattern string."""
+    return "".join(p.text if isinstance(p, Literal) else p.render() for p in parts)

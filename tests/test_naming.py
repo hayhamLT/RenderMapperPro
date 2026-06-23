@@ -11,8 +11,12 @@ import pytest
 
 from core.naming import (
     DEFAULT_PATTERN,
+    Literal,
     PatternError,
+    Token,
+    build_pattern,
     compile_pattern,
+    lex_pattern,
     preview,
 )
 
@@ -124,3 +128,42 @@ def test_preview_reports_compile_error_not_crash():
 def test_preview_prompts_for_sample_when_blank():
     r = preview(DEFAULT_PATTERN, "")
     assert not r.ok and "sample" in r.error.lower()
+
+
+# ── chip-builder parts (lex / build round-trip) ──────────────────────────────
+
+def test_lex_pattern_decomposes_into_parts():
+    parts = lex_pattern("{Project}_D{Day#}")
+    assert parts == [
+        Token("Project", False, False),
+        Literal("_D"),
+        Token("Day", True, False),
+    ]
+
+
+def test_lex_build_roundtrip_is_stable():
+    for pat in (DEFAULT_PATTERN, "{A}_{B#}", "x{Name?}y", "{Only#}", "lit{T}lit"):
+        assert build_pattern(lex_pattern(pat)) == pat
+
+
+def test_lex_does_not_raise_on_partial_pattern():
+    # A half-typed pattern (unbalanced brace) still lexes to literal text.
+    parts = lex_pattern("{Project}_D{Day")
+    assert build_pattern(parts) == "{Project}_D{Day"
+
+
+def test_token_render_flags():
+    assert Token("Day", True, False).render() == "{Day#}"
+    assert Token("Ver", True, True).render() == "{Ver#?}"
+    assert Token("Screen", False, False).render() == "{Screen}"
+
+
+def test_build_pattern_after_edit_is_parseable():
+    # Simulate a chip edit: flip Day to optional, then the result still compiles.
+    parts = lex_pattern("{Project}_D{Day#}")
+    for p in parts:
+        if isinstance(p, Token) and p.name == "Day":
+            p.optional = True
+    pattern = build_pattern(parts)
+    assert pattern == "{Project}_D{Day#?}"
+    assert compile_pattern(pattern).parse("Foo_D") == {"Project": "Foo"}
