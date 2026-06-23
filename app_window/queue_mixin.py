@@ -170,6 +170,30 @@ class QueueMixin(_WindowMembers):
         self.queue_panel.select_job(self._active_job_id)
         self._schedule_save()
 
+    def _queue_current_jobs_clear_videos(self) -> None:
+        """Shift+New: queue the current setup, then empty the Videos section so the
+        next job can start from the same scene with fresh clips. The just-queued
+        job keeps its own snapshot; the workspace detaches into a blank draft —
+        the 3D scene stays loaded, only the videos/mappings are cleared."""
+        before = len(self._jobs)
+        self._queue_current_jobs()
+        if len(self._jobs) == before:
+            return  # nothing was queued (empty setup) — leave the workspace alone
+        sp = self.scene_panel
+        self._loading_job_into_ui = True
+        try:
+            sp.set_assignments([])
+            sp.set_muted_videos([])
+            sp.set_videos([])
+        finally:
+            self._loading_job_into_ui = False
+        # Detach: the new job is committed; the workspace is now a fresh draft, so
+        # editing it (or mapping a new clip) won't reach back into the queued job.
+        self._active_job_id = None
+        self._refresh_job_outputs()
+        self._refresh_queue_view()
+        self._schedule_save()
+
     def _refresh_queue_view(self) -> None:
         self.queue_panel.set_jobs(self._jobs, self._job_etas())
         if self._active_job_id is not None:

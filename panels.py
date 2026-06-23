@@ -42,6 +42,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -2290,6 +2291,8 @@ def _compose_job_icon(png_path: str, kind: str) -> QIcon:
 
 class QueuePanel(QWidget):
     queue_requested = Signal()
+    queue_clear_videos_requested = Signal()   # Shift+New: queue, then empty Videos
+    new_blank_requested = Signal()            # Ctrl/Cmd+Shift+New: brand-new empty
     start_selected_requested = Signal()
     start_all_requested = Signal()
     cancel_requested = Signal()
@@ -2317,9 +2320,13 @@ class QueuePanel(QWidget):
         btns.setSpacing(6)
         self.queue_btn = QPushButton("")
         self.queue_btn.setObjectName("IconButton")
-        self.queue_btn.setToolTip("New job — add a copy of the current setup to the queue (⌘D duplicates a selected job)")
+        self.queue_btn.setToolTip(
+            "New job — add a copy of the current setup to the queue.\n"
+            "Shift+click: also empty the Videos section (keep the scene).\n"
+            "Ctrl/⌘+Shift+click: start a brand-new empty job (no scene, no videos).\n"
+            "(⌘D duplicates a selected job)")
         self.queue_btn.setFixedSize(36, 30)
-        self.queue_btn.clicked.connect(self.queue_requested.emit)
+        self.queue_btn.clicked.connect(self._on_queue_btn_clicked)
         self.render_selected_btn = QPushButton("")
         self.render_selected_btn.setObjectName("PrimaryButton")
         self.render_selected_btn.setToolTip("Start rendering queued jobs")
@@ -2427,6 +2434,22 @@ class QueuePanel(QWidget):
         self.queue_btn.setIcon(icons.icon("plus", pal.text))
         self.render_selected_btn.setIcon(icons.icon("play", pal.accent_text, 15))
         self.cancel_btn.setIcon(icons.icon("stop", pal.danger, 14))
+
+    def _on_queue_btn_clicked(self) -> None:
+        """Route the New-job (+) button by held modifier:
+          • plain            → queue the current setup
+          • Shift            → queue, then empty the Videos section (keep the scene)
+          • Ctrl/Cmd + Shift → start a brand-new empty job (no scene, no videos)
+        Qt maps ⌘ to ControlModifier on macOS, so this mirrors the ⌘D shortcut."""
+        mods = QApplication.keyboardModifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and shift:
+            self.new_blank_requested.emit()
+        elif shift:
+            self.queue_clear_videos_requested.emit()
+        else:
+            self.queue_requested.emit()
 
     def set_progress(self, value: float, caption: str) -> None:
         self.progress_bar.setValue(int(max(0, min(100, value))))
