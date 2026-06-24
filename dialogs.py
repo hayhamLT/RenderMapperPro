@@ -19,12 +19,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -51,6 +53,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     dlg.setWindowTitle("Properties & Settings")
     dlg.setMinimumWidth(720)
     dlg.setMinimumHeight(460)
+    # Open tall enough that the common tabs fit without scrolling; tabs that
+    # overflow (Watch & Auto-render) now scroll rather than squeeze.
+    dlg.resize(820, 760)
     root = QVBoxLayout(dlg)
     tabs = QTabWidget()
     root.addWidget(tabs)
@@ -61,10 +66,20 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         return lbl
 
     def _tab(title: str) -> QVBoxLayout:
-        page = QWidget()
-        v = QVBoxLayout(page)
+        # Each tab scrolls instead of squeezing. Without this, a short window
+        # compresses the page and word-wrapped hints get clipped/overlapped
+        # (the tall Watch & Auto-render tab was unreadable). The page keeps its
+        # natural height and a scrollbar appears only when it doesn't fit.
+        content = QWidget()
+        v = QVBoxLayout(content)
+        v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(10)
-        tabs.addTab(page, title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        tabs.addTab(scroll, title)
         return v
 
     def _open_path(target) -> None:
