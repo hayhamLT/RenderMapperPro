@@ -172,14 +172,14 @@ jobs:
       # (this whole job is push/tag-only).
       - name: Attest build provenance (macOS)
         if: runner.os == 'macOS'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             RenderMapperPro-${{ matrix.label }}.zip
             RenderMapperPro-${{ matrix.label }}.dmg
       - name: Attest build provenance (Windows)
         if: runner.os == 'Windows'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             RenderMapperPro-${{ matrix.label }}.zip
