@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QTabWidget,
@@ -36,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from core.utils import find_deadlinecommand, subprocess_creation_flags
 from media import _find_ffprobe, find_ffmpeg_tool
+from ui_dialogs import error, inform, warn
 from workers import DeadlineQueryThread
 
 
@@ -177,7 +177,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             if resolved:
                 blender_edit.setText(resolved)
             else:
-                QMessageBox.warning(
+                warn(
                     dlg, "Not a Blender App",
                     "That location doesn't contain Blender. Pick the Blender app itself "
                     "(e.g. /Applications/Blender.app) or its executable.")
@@ -707,12 +707,12 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             if ok:
                 status_lbl.setText("Connection status: Connected")
                 status_lbl.setStyleSheet(f"color: {win._palette.success}; font-size: 11px; font-weight: bold;")
-                QMessageBox.information(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
+                inform(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
             else:
                 status_lbl.setText("Connection status: Connection failed")
                 status_lbl.setStyleSheet(f"color: {win._palette.danger}; font-size: 11px; font-weight: bold;")
-                QMessageBox.warning(dlg, "Deadline Warning",
-                                    res.get("error", "") or "deadlinecommand failed.")
+                warn(dlg, "Deadline Warning",
+                     res.get("error", "") or "deadlinecommand failed.")
         except RuntimeError:
             pass   # dialog already closed
 
@@ -723,7 +723,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         if not Path(cmd).exists() and not shutil.which(cmd):
             status_lbl.setText("Connection status: deadlinecommand not found")
             status_lbl.setStyleSheet(f"color: {win._palette.danger}; font-size: 11px; font-weight: bold;")
-            QMessageBox.critical(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
+            error(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
             return
         if win._props_deadline_thread is not None and win._props_deadline_thread.isRunning():
             return

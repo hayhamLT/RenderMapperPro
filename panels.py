@@ -53,7 +53,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidgetItem,
     QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -104,6 +103,7 @@ from media import (
     video_has_audio,
 )
 from theme import LINK_COLORS, active_palette
+from ui_dialogs import confirm
 from ui_widgets import (
     ROLE_HAS_AUDIO,
     ROLE_MAP_COLOR,
@@ -571,11 +571,12 @@ class ScenePanel(QWidget):
             return
         n = len(paths)
         mapped = sum(1 for a in self._assignments if a.video_path in paths)
-        msg = f"Remove {n} clip{'s' if n != 1 else ''}?"
+        title = f"Remove {n} clip{'s' if n != 1 else ''}?"
+        parts = []
         if mapped:
-            msg += f"\n\n{mapped} material mapping{'s' if mapped != 1 else ''} will be removed too."
-        msg += "\n\nThis can be undone with Ctrl+Z."
-        if QMessageBox.question(self, "Remove Clips", msg) != QMessageBox.StandardButton.Yes:
+            parts.append(f"{mapped} material mapping{'s' if mapped != 1 else ''} will be removed too.")
+        parts.append("This can be undone with Ctrl+Z.")
+        if not confirm(self, title, "\n\n".join(parts), ok="Remove", cancel="Cancel", danger=True):
             return
         # Snapshot for undo: removing clips silently cascades to their mappings
         # and mute state, so it must be reversible like the other destructive actions.
@@ -641,10 +642,10 @@ class ScenePanel(QWidget):
         if not self._assignments:
             return
         n = len(self._assignments)
-        if QMessageBox.question(
+        if not confirm(
             self, "Clear Mappings",
             f"Remove all {n} mapping{'s' if n != 1 else ''}?\n\nThis can be undone with Ctrl+Z.",
-        ) != QMessageBox.StandardButton.Yes:
+            ok="Clear", cancel="Cancel", danger=True):
             return
         self.assignments_cleared.emit(
             [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in self._assignments])

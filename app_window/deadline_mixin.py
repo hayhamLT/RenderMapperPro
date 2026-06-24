@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
@@ -26,6 +25,7 @@ from app_window.base import _WindowMembers
 from core.logging_setup import get_logger
 from core.models import JobConfig, MaterialVideoAssignment, RenderJob
 from core.utils import OUTPUT_PROFILES, find_deadlinecommand
+from ui_dialogs import error, inform, warn
 from workers import DeadlineQueryThread
 
 _log = get_logger(__name__)
@@ -147,7 +147,7 @@ class DeadlineMixin(_WindowMembers):
         if not Path(deadline_cmd).exists() and not shutil.which(deadline_cmd):
             self._set_deadline_status("✗ deadlinecommand not found", self._palette.danger)
             if interactive:
-                QMessageBox.critical(
+                error(
                     self, "Deadline Not Found",
                     "The Deadline client isn't installed on this machine (deadlinecommand "
                     "was not found).\n\nInstall the Thinkbox Deadline Client, or set its "
@@ -167,15 +167,11 @@ class DeadlineMixin(_WindowMembers):
             self._set_deadline_status("✗ Couldn't reach the repository", self._palette.danger)
             self._append_log(f"[deadline] Connection failed: {res.get('error', '')}")
             if interactive:
-                box = QMessageBox(self)
-                box.setIcon(QMessageBox.Icon.Warning)
-                box.setWindowTitle("Deadline Unreachable")
-                box.setText("Couldn't reach the Deadline repository.")
-                box.setInformativeText(
+                warn(
+                    self, "Deadline Unreachable",
+                    "Couldn't reach the Deadline repository.\n\n"
                     "Check the Repository Path in Properties → Deadline, and that this "
                     "machine is on the studio network (or VPN). Details are in Live Logs.")
-                box.setDetailedText(res.get("error", ""))
-                box.exec()
             else:
                 self._append_log("[app] Deadline not ready — opening Deadline settings.")
                 self._show_properties_dialog(initial_tab="Deadline")
@@ -219,14 +215,14 @@ class DeadlineMixin(_WindowMembers):
                          f"{len(machines)} machines.")
         self._show_toast("Deadline connected", "success")
         if interactive:
-            QMessageBox.information(
+            inform(
                 self, "Deadline Connected",
                 f"Connected to the repository.\nPools, groups and the machine list were "
                 f"updated ({len(machines)} machines).")
 
     def _export_deadline_files(self) -> None:
         if not self._jobs:
-            QMessageBox.warning(self, "No Jobs", "There are no jobs in the queue to export.")
+            warn(self, "No Jobs", "There are no jobs in the queue to export.")
             return
 
         job = None
@@ -297,11 +293,11 @@ class DeadlineMixin(_WindowMembers):
                 f.write(f"Executable={blender_path}\n")
                 f.write(f'Arguments=-b "{scene_arg}" --python "{worker_arg}" -- "<CONFIG_PATH_OVERRIDE>"\n')
 
-            QMessageBox.information(
+            inform(
                 self, "Export Successful",
                 f"Successfully exported Deadline job files to:\n- {job_info_path.name}\n- {plugin_info_path.name}\n\nIn the directory: {dest_dir}"
             )
             self._append_log(f"[deadline] Exported job files to {dest_dir}")
         except Exception as exc:
-            QMessageBox.critical(self, "Export Error", f"Failed to export files:\n{exc}")
+            error(self, "Export Error", f"Failed to export files:\n{exc}")
             self._append_log(f"[deadline] ERROR exporting files: {exc}")

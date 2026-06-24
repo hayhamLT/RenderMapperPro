@@ -139,6 +139,7 @@ from panels import (
     WatchPanel,
 )
 from theme import set_active_palette
+from ui_dialogs import ask, confirm, error, inform, warn
 from ui_widgets import (
     _ImageView,
 )
@@ -1662,7 +1663,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             self._c4dpy_path = found
             return found
         if interactive:
-            QMessageBox.warning(
+            warn(
                 self, "Cinema 4D Not Found",
                 "Couldn't find Cinema 4D's headless Python (c4dpy).\n\n"
                 "Install Cinema 4D (2023+) to render .c4d scenes, or use a "
@@ -1676,18 +1677,22 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             return b
         if not interactive:
             return None
-        ans = QMessageBox.question(
+        ans = ask(
             self,
             "Blender Not Found",
             "Blender is missing. Install managed Blender runtime now?\n\n"
             "Choose No to locate Blender manually.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Yes,
+            buttons=[
+                ("Yes", "yes", "primary"),
+                ("No", "no", "neutral"),
+                ("Cancel", "cancel", "neutral"),
+            ],
+            default="yes",
         )
-        if ans == QMessageBox.StandardButton.Yes:
+        if ans == "yes":
             self._install_managed_runtime()
             return None
-        if ans == QMessageBox.StandardButton.No:
+        if ans == "no":
             self._show_properties_dialog()
         return _find_blender(self._blender_path)
 
@@ -2253,7 +2258,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         cfg = cfg or self._asset_grouping
         folder, _en = self.scene_panel.get_watch_folder()
         if not folder or not os.path.isdir(folder):
-            QMessageBox.information(self, "Preview Assembly",
+            inform(self, "Preview Assembly",
                 "Choose a watch folder first (the watch button in the Scene panel).")
             return
         exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
@@ -2659,18 +2664,19 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         names = "\n".join(f"•  {p.name}" for _, p in existing[:8])
         more = "" if len(existing) <= 8 else f"\n…and {len(existing) - 8} more"
-        box = QMessageBox(self)
-        box.setWindowTitle("Outputs Already Exist")
-        box.setText(f"{len(existing)} output(s) already exist:\n{names}{more}")
-        box.setInformativeText("Overwrite them, auto-rename to keep both, or cancel?")
-        ow = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
-        rn = box.addButton("Auto-rename", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is ow:
+        ans = ask(
+            self, "Outputs Already Exist",
+            f"{len(existing)} output(s) already exist:\n{names}{more}\n\n"
+            "Overwrite them, auto-rename to keep both, or cancel?",
+            buttons=[
+                ("Cancel", "cancel", "neutral"),
+                ("Auto-rename", "rename", "primary"),
+                ("Overwrite", "overwrite", "danger"),
+            ],
+        )
+        if ans == "overwrite":
             return True
-        if clicked is rn:
+        if ans == "rename":
             for j, pth in existing:
                 j.output_path = self._unique_path(pth)
             self._refresh_queue_view()
@@ -2683,7 +2689,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         # Friendly guard: nothing is connected to render yet.
         if not self._jobs or not any(self._job_has_mapping(j) for j in self._jobs):
-            QMessageBox.warning(
+            warn(
                 self, "Nothing to Render",
                 "No video is connected to a material yet.\n\n"
                 "Add a video, select it together with a material, then click the "
@@ -2703,7 +2709,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             selected_ids = set(self.queue_panel.selected_job_ids()) if not render_all else set(j.id for j in self._jobs)
         pending = [j for j in self._jobs if j.id in selected_ids and j.status != "success"]
         if not pending:
-            QMessageBox.information(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
+            inform(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
             return
 
         # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) in a headless
@@ -2730,7 +2736,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         errs = self._preflight()
         if errs:
-            QMessageBox.critical(self, "Preflight Failed", "\n".join(errs))
+            error(self, "Preflight Failed", "\n".join(errs))
             return
 
         # Claim the rendering state NOW — the modal dialogs below spin the Qt event
@@ -2744,15 +2750,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                     + self._disk_space_warnings(pending)
                     + self._deadline_warnings(pending)
                     + self._render_quality_warnings(pending))
-        if warnings:
-            ans = QMessageBox.warning(
-                self, "Frame Range Warning",
-                "\n\n".join(warnings) + "\n\nProceed anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes,
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                self._is_rendering = False
-                return
+        if warnings and not confirm(
+            self, "Frame Range Warning",
+            "\n\n".join(warnings) + "\n\nProceed anyway?",
+        ):
+            self._is_rendering = False
+            return
 
         # Overwrite protection.
         if not self._resolve_output_conflicts(pending):
@@ -2763,7 +2766,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             worker = _resolve_runtime_script("blender_worker.py")
             c4d_worker = _resolve_runtime_script("c4d_worker.py") if _is_c4d else ""
         except Exception as exc:
-            QMessageBox.critical(
+            error(
                 self, "App Component Missing",
                 "The app's render component couldn't be found — the installation may be "
                 f"damaged. Reinstall Render Mapper Pro.\n\nDetails: {exc}")
@@ -2889,13 +2892,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         .blend that any render farm (Deadline, BlendFarm, cloud, plain Blender)
         can render — no Deadline required."""
         if self._is_rendering:
-            QMessageBox.information(self, "Busy", "Finish the current render first.")
+            inform(self, "Busy", "Finish the current render first.")
             return
         scene = self.scene_panel.scene_edit.text().strip()
         assignments = self.scene_panel.get_assignments()
         if not scene or not file_exists(scene) or not assignments:
-            QMessageBox.information(self, "Export Prepared .blend",
-                                    "Load a scene and map at least one video first.")
+            inform(self, "Export Prepared .blend",
+                   "Load a scene and map at least one video first.")
             return
         blender = self._ensure_blender(interactive=True)
         if not blender:
@@ -2903,7 +2906,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         try:
             worker = _resolve_runtime_script("blender_worker.py")
         except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
+            warn(self, "Export Failed", str(exc))
             return
         default_name = f"{Path(scene).stem}_prepared.blend"
         out, _ = QFileDialog.getSaveFileName(
@@ -2914,12 +2917,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             out += ".blend"
         # Offer to pack the videos in so the .blend is fully portable (no shared
         # storage needed) — at the cost of a larger file.
-        pack = QMessageBox.question(
+        pack = confirm(
             self, "Pack video files?",
             "Pack the video file(s) into the .blend so it renders on any machine "
             "without shared storage?\n\nYes = one self-contained (larger) file.\n"
-            "No  = smaller file; workers must be able to reach the source videos.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
+            "No  = smaller file; workers must be able to reach the source videos.")
 
         asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
         opts = self.render_panel.render_options()
@@ -2939,7 +2941,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
     def _on_export_blend_done(self, ok: bool, info: str) -> None:
         if not ok:
             self._append_log(f"[error] Prepared .blend export failed: {info}")
-            QMessageBox.warning(self, "Export Failed", info)
+            warn(self, "Export Failed", info)
             return
         self._append_log(f"[app] Prepared .blend ready: {info}")
         try:
@@ -3818,14 +3820,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         if not p.exists():
             self._refresh_preset_browser()
             return
-        ans = QMessageBox.question(self, "Delete Preset", f"Delete preset '{p.stem}'?")
-        if ans != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete Preset", f"Delete preset '{p.stem}'?",
+                       ok="Delete", cancel="Cancel", danger=True):
             return
         try:
             p.unlink()
             self._refresh_preset_browser()
         except Exception as exc:
-            QMessageBox.warning(self, "Delete Failed", str(exc))
+            warn(self, "Delete Failed", str(exc))
 
 
     def _open_presets_folder(self) -> None:
@@ -4320,19 +4322,20 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         """Start a fresh, empty workspace — clear the scene, clips, mappings,
         targets and the queue (like File → New). Guarded when there's work."""
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress",
-                                    "Stop rendering before starting a new session.")
+            inform(self, "Render In Progress",
+                   "Stop rendering before starting a new session.")
             return
         has_work = bool(self.scene_panel.scene_edit.text().strip()
                         or self.scene_panel.get_videos() or self._jobs)
         if confirm and has_work:
-            resp = QMessageBox.question(
+            resp = ask(
                 self, "New",
                 "Start a new session? The current scene, clips and queue will be "
                 "cleared (your saved projects and recents are kept).",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if resp != QMessageBox.StandardButton.Yes:
+                kind="danger",
+                buttons=[("No", "no", "neutral"), ("Yes", "yes", "danger")],
+                default="no")
+            if resp != "yes":
                 return
         if confirm and has_work:
             self._last_session = self._capture_workspace()   # let Reopen undo an explicit New
@@ -4361,8 +4364,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         New session this keeps the existing queue; the next mapping drafts a fresh
         job alongside the ones already queued."""
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress",
-                                    "Stop rendering before starting a new job.")
+            inform(self, "Render In Progress",
+                   "Stop rendering before starting a new job.")
             return
         sp = self.scene_panel
         self._loading_job_into_ui = True
@@ -4451,29 +4454,29 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 if blender else
                 "\n\nNo Blender yet? Click “Download Blender” and the app fetches a "
                 "managed copy — nothing else to install.")
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle(f"Welcome to {APP_NAME}")
-        box.setText(f"Welcome to {APP_NAME}!")
-        box.setInformativeText(
+        buttons = [("Open Quick Start", "quickstart", "neutral")]
+        # When Blender is missing, lead with the one-click auto-download.
+        has_dl = not blender and can_fetch
+        has_loc = not blender
+        if has_dl:
+            buttons.append(("Download Blender", "download", "neutral"))
+        if has_loc:
+            buttons.append(("Locate Blender…", "locate", "neutral"))
+        buttons.append(("Get Started", "go", "primary"))
+        clicked = ask(
+            self, f"Welcome to {APP_NAME}",
+            f"Welcome to {APP_NAME}!\n\n"
             "Map your videos onto a 3D scene's materials and render them — on your "
             "machine or a farm.\n\nWhat's ready on this computer:\n\n"
-            + "\n".join(lines) + tail)
-        qs = box.addButton("Open Quick Start", QMessageBox.ButtonRole.ActionRole)
-        # When Blender is missing, lead with the one-click auto-download.
-        dl = box.addButton("Download Blender", QMessageBox.ButtonRole.ActionRole) \
-            if (not blender and can_fetch) else None
-        loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) \
-            if not blender else None
-        go = box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(dl or go)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is qs:
+            + "\n".join(lines) + tail,
+            kind="info",
+            buttons=buttons,
+            default="download" if has_dl else "go")
+        if clicked == "quickstart":
             self._show_quick_start()
-        elif dl is not None and clicked is dl:
+        elif has_dl and clicked == "download":
             self._install_managed_runtime()
-        elif loc is not None and clicked is loc:
+        elif has_loc and clicked == "locate":
             self._show_properties_dialog()
         self._save_profile()   # ensure a profile exists so this won't show again
 

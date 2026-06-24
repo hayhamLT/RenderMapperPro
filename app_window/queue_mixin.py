@@ -9,12 +9,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtWidgets import QInputDialog
 
 from app_window.base import _WindowMembers
 from core.models import MaterialVideoAssignment, RenderJob
 from core.utils import OUTPUT_PROFILES, resolve_output_path
 from media import reveal_in_file_manager
+from ui_dialogs import confirm, inform, warn
 
 
 class QueueMixin(_WindowMembers):
@@ -156,7 +157,7 @@ class QueueMixin(_WindowMembers):
                 to_add.append(job)
 
         if not to_add:
-            QMessageBox.information(self, "Queue", "Nothing to queue. Add videos or assignments first.")
+            inform(self, "Queue", "Nothing to queue. Add videos or assignments first.")
             return
 
         # New jobs go to the top of the queue.
@@ -310,7 +311,7 @@ class QueueMixin(_WindowMembers):
 
     def _remove_queue_jobs(self, job_ids: list[int]) -> None:
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress", "Stop rendering before removing queue items.")
+            inform(self, "Render In Progress", "Stop rendering before removing queue items.")
             return
         ids = {jid for jid in job_ids if isinstance(jid, int)}
         if not ids:
@@ -341,16 +342,15 @@ class QueueMixin(_WindowMembers):
 
     def _clear_queue(self) -> None:
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress", "Stop rendering before clearing the queue.")
+            inform(self, "Render In Progress", "Stop rendering before clearing the queue.")
             return
         if not self._jobs:
             return
-        resp = QMessageBox.question(
+        if not confirm(
             self, "Clear Queue",
             f"Remove all {len(self._jobs)} job(s) from the queue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
+            ok="Clear", cancel="Cancel", danger=True,
+        ):
             return
         import copy
         snap_jobs, snap_active = copy.deepcopy(self._jobs), self._active_job_id
@@ -379,17 +379,13 @@ class QueueMixin(_WindowMembers):
         job = next((j for j in self._jobs if j.id == job_id), None)
         if job is None:
             return
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Why This Job Failed")
-        box.setText(f"{job.label or f'Job {job.id}'} failed.")
         info = "The last error from the renderer is below. The full output is in Live Logs."
         hint = self._friendly_error_hint(job.error or "")
         if hint:
             info = f"What to try:  {hint}\n\n{info}"
-        box.setInformativeText(info)
-        box.setDetailedText(job.error or "No error text was captured — check Live Logs.")
-        box.exec()
+        detail = job.error or "No error text was captured — check Live Logs."
+        message = f"{job.label or f'Job {job.id}'} failed.\n\n{info}\n\n{detail}"
+        warn(self, "Why This Job Failed", message)
 
     def _reveal_job_output(self, job_id: int) -> None:
         p = self._job_output_target(job_id)

@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QTextBrowser,
     QVBoxLayout,
@@ -31,6 +30,7 @@ from core.utils import ssl_context as _ssl_context
 from core.utils import update_platform_key as _update_platform_key
 from core.utils import version_tuple as _version_tuple
 from media import reveal_in_file_manager
+from ui_dialogs import error, inform, warn
 from workers import FuncThread
 
 GITHUB_REPO = "hayhamLT/RenderMapperPro"   # for the auto-updater
@@ -137,7 +137,7 @@ class UpdateMixin(_WindowMembers):
                 self._append_log(f"[update] Check failed — {error}")
             if manual:
                 detail = f"\n\n{error}" if error else ""
-                QMessageBox.warning(self, "Updates",
+                warn(self, "Updates",
                     "Couldn't reach GitHub to check for updates." + detail
                     + "\n\nYou can always download the latest version from the "
                     "Releases page on GitHub.")
@@ -146,7 +146,7 @@ class UpdateMixin(_WindowMembers):
         if not tag or _version_tuple(tag) <= _version_tuple(APP_VERSION):
             self._sb_update.setText("")
             if manual:
-                QMessageBox.information(self, "Updates", f"You're up to date (v{APP_VERSION}).")
+                inform(self, "Updates", f"You're up to date (v{APP_VERSION}).")
             return
         self._sb_update.setText(f"● Update {tag} available")
         # A version the user chose to skip stays quiet on the automatic launch
@@ -281,7 +281,7 @@ class UpdateMixin(_WindowMembers):
         want = self._ASSET_FOR_PLATFORM.get(_update_platform_key()) or ""
         asset = next((a for a in info.get("assets", []) if a.get("name") == want), None)
         if not asset:
-            QMessageBox.warning(self, "Update",
+            warn(self, "Update",
                 f"This release has no installer for your platform ({_update_platform_key()}).")
             return
         token = _update_token()
@@ -319,7 +319,7 @@ class UpdateMixin(_WindowMembers):
                 tmp.unlink(missing_ok=True)
                 self._append_log(f"[update] Integrity check FAILED for {want}: "
                                  f"expected {expected}, got {got}")
-                QMessageBox.critical(self, "Update Blocked",
+                error(self, "Update Blocked",
                     "The downloaded installer failed its integrity check and was discarded — "
                     "it does not match the checksum published with the release.\n\n"
                     "Please download the update manually from the GitHub Releases page.")
@@ -342,7 +342,7 @@ class UpdateMixin(_WindowMembers):
             else:
                 reveal_in_file_manager(dest)
                 note = "Run the downloaded installer to finish updating."
-            QMessageBox.information(self, "Update Ready",
+            inform(self, "Update Ready",
                 f"{APP_NAME} {tag} downloaded and verified.\n\nThe installer is opening. {note}")
             if quit_after:
                 self._append_log(f"[update] Quitting so the {tag} installer can replace the app.")
@@ -355,4 +355,4 @@ class UpdateMixin(_WindowMembers):
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
-            QMessageBox.warning(self, "Update Failed", str(exc))
+            warn(self, "Update Failed", str(exc))

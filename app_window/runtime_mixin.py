@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -32,6 +31,7 @@ from core.runtime import (
     _runtime_checksum_url,
     _runtime_download_spec,
 )
+from ui_dialogs import confirm, warn
 
 
 class RuntimeInstallThread(QThread):
@@ -280,15 +280,12 @@ class RuntimeMixin(_WindowMembers):
         if self._is_headless():            # don't block a headless smoke test on .question()
             return
         self._runtime_prompted = True
-        ans = QMessageBox.question(
+        if confirm(
             self,
             "Install Blender Runtime",
             "No Blender installation was found.\n"
             "Would you like to download and install a managed Blender runtime now?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ans == QMessageBox.StandardButton.Yes:
+        ):
             self._install_managed_runtime()
 
     def _install_managed_runtime(self) -> None:
@@ -299,7 +296,7 @@ class RuntimeMixin(_WindowMembers):
                 dlg.raise_()
             return
         if _runtime_download_spec() is None:
-            QMessageBox.warning(
+            warn(
                 self, "Automatic Setup Unavailable",
                 "Automatic Blender download isn't supported on this OS. Please install "
                 "Blender and point the app at it in Properties → Render Engines.")
@@ -327,7 +324,7 @@ class RuntimeMixin(_WindowMembers):
             return
         if error:
             self._append_log(f"[runtime] Install failed: {error}")
-            QMessageBox.warning(
+            warn(
                 self, "Blender Setup Failed",
                 f"{error}\n\nYou can retry, or install Blender yourself and point the "
                 f"app at it in Properties → Render Engines.")
