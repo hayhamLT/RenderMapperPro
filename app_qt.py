@@ -139,6 +139,7 @@ from panels import (
     WatchPanel,
 )
 from theme import set_active_palette
+from ui_dialogs import ask, confirm, error, inform, warn
 from ui_widgets import (
     _ImageView,
 )
@@ -342,6 +343,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._deliver_dir = ""           # blank = no post-render delivery copy
         self._asset_grouping = AssetGroupingConfig()   # filename-convention previz assembly
         self._asset_group_jobs: dict = {}   # (setup, asset) → job id, for grouped-watch dedup
+        self._watch_first_run_seen = False   # one-time intro banner in the Watch panel
         self._restore_session_on_launch = False   # False = open clean; True = reopen last scene+queue
         self._last_session: dict = {}      # snapshot of the previous session, for Reopen Last Session
         self._material_aspects: dict = {}   # material → screen aspect (from discovery)
@@ -1225,7 +1227,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # workflow. Kept out of the layout presets, parked on the right and
         # hidden until the user toggles it on from the View menu.
         self.watch_panel = WatchPanel()
-        self.watch_dock = self._mk_dock("Watch / Ingest", "WatchDock", self.watch_panel)
+        self.watch_dock = self._mk_dock("Watch & Auto-render", "WatchDock", self.watch_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.watch_dock)
         self.watch_dock.hide()
 
@@ -1250,8 +1252,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         self.watch_panel.choose_folder_requested.connect(self._pick_watch_folder)
         self.watch_panel.watch_toggled.connect(self._toggle_watch_from_panel)
-        self.watch_panel.configure_requested.connect(lambda: self._show_properties_dialog("Watch"))
-        self._refresh_watch_panel()
+        self.watch_panel.config_changed.connect(self._apply_watch_panel)
+        self.watch_panel.pick_output_dir_requested.connect(self._pick_watch_output_dir)
+        self.watch_panel.pick_deliver_dir_requested.connect(self._pick_watch_deliver_dir)
+        self.watch_panel.preview_requested.connect(self._preview_watch_assembly)
+        self.watch_panel.first_run_dismissed.connect(self._on_watch_first_run_dismissed)
+        self._load_watch_panel()
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
@@ -1662,7 +1668,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             self._c4dpy_path = found
             return found
         if interactive:
-            QMessageBox.warning(
+            warn(
                 self, "Cinema 4D Not Found",
                 "Couldn't find Cinema 4D's headless Python (c4dpy).\n\n"
                 "Install Cinema 4D (2023+) to render .c4d scenes, or use a "
@@ -1676,18 +1682,22 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             return b
         if not interactive:
             return None
-        ans = QMessageBox.question(
+        ans = ask(
             self,
             "Blender Not Found",
             "Blender is missing. Install managed Blender runtime now?\n\n"
             "Choose No to locate Blender manually.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Yes,
+            buttons=[
+                ("Yes", "yes", "primary"),
+                ("No", "no", "neutral"),
+                ("Cancel", "cancel", "neutral"),
+            ],
+            default="yes",
         )
-        if ans == QMessageBox.StandardButton.Yes:
+        if ans == "yes":
             self._install_managed_runtime()
             return None
-        if ans == QMessageBox.StandardButton.No:
+        if ans == "no":
             self._show_properties_dialog()
         return _find_blender(self._blender_path)
 
@@ -2153,6 +2163,86 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.watch_panel.set_folder_state(folder, enabled)
         self.watch_panel.set_mode(self._asset_grouping.enabled)
 
+    def _load_watch_panel(self) -> None:
+        """Populate the Watch panel from the current config (folder + grouping +
+        auto-render + file-stability). The panel suppresses signals while loading."""
+        if not hasattr(self, "watch_panel"):
+            return
+        ag = self._asset_grouping
+        folder, enabled = self.scene_panel.get_watch_folder()
+        interval_ms, settle = self.scene_panel.get_watch_options()
+        self.watch_panel.set_folder_state(folder, enabled)
+        self.watch_panel.load_config(
+            grouping_enabled=ag.enabled,
+            pattern=ag.pattern,
+            content_type=ag.content_type,
+            output_template=ag.output_template,
+            autorender_pattern=self._autorender_pattern,
+            screen_to_material=dict(ag.screen_to_material),
+            setup_to_scene=dict(ag.setup_to_scene),
+            settle_s=settle,
+            poll_interval_s=interval_ms / 1000.0,
+            autorender_start=self._autorender_start,
+            output_dir=self._autorender_output,
+            deliver_dir=self._deliver_dir,
+        )
+        # First-run banner: only until acknowledged, and only before any folder is set.
+        seen = getattr(self, "_watch_first_run_seen", False)
+        self.watch_panel.show_first_run(not seen and not folder)
+
+    def _apply_watch_panel(self) -> None:
+        """Write the Watch panel's settings back onto the live config + engine and
+        persist. Connected to the panel's ``config_changed`` (fires on any edit)."""
+        if not hasattr(self, "watch_panel"):
+            return
+        c = self.watch_panel.get_config()
+        ag = self._asset_grouping
+        ag.enabled = bool(c["grouping_enabled"])
+        ag.pattern = c["pattern"] or ag.pattern
+        ag.content_type = c["content_type"]
+        ag.output_template = c["output_template"] or ag.output_template
+        ag.screen_to_material = dict(c["screen_to_material"])
+        ag.setup_to_scene = dict(c["setup_to_scene"])
+        self._autorender_pattern = c["autorender_pattern"] or self._autorender_pattern
+        self._autorender_output = c["output_dir"]
+        self._autorender_start = bool(c["autorender_start"])
+        self._deliver_dir = c["deliver_dir"]
+        # In auto-map mode the checkbox also gates whether dropped clips render at
+        # all; in previz mode jobs are always built, so it only gates auto-start.
+        if not ag.enabled:
+            self._autorender_enabled = bool(c["autorender_start"])
+        self.scene_panel.set_watch_options(int(max(1.0, float(c["poll_interval_s"])) * 1000),
+                                           float(c["settle_s"]))
+        self.scene_panel.set_grouping_mode(ag.enabled)
+        self._save_profile()
+
+    def _pick_watch_output_dir(self) -> None:
+        cur = self._autorender_output or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Choose render output folder", cur)
+        if d:
+            self.watch_panel.out_dir_edit.setText(d)   # triggers config_changed → apply
+
+    def _pick_watch_deliver_dir(self) -> None:
+        cur = self._deliver_dir or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Choose delivery folder", cur)
+        if d:
+            self.watch_panel.deliver_edit.setText(d)   # triggers config_changed → apply
+
+    def _preview_watch_assembly(self) -> None:
+        """Dry-run the previz grouping from the panel's current config."""
+        self._apply_watch_panel()        # make sure _asset_grouping reflects the panel
+        self._preview_assembly(self._asset_grouping)
+
+    def _open_watch_render_panel(self) -> None:
+        """Reveal + focus the Watch & Auto-render dock (the editable home)."""
+        self.watch_dock.show()
+        self.watch_dock.raise_()
+        self.watch_panel.setFocus()
+
+    def _on_watch_first_run_dismissed(self) -> None:
+        self._watch_first_run_seen = True
+        self._save_profile()
+
     def _pick_watch_folder(self) -> None:
         folder, _en = self.scene_panel.get_watch_folder()
         d = QFileDialog.getExistingDirectory(self, "Choose watch folder", folder or str(Path.home()))
@@ -2253,7 +2343,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         cfg = cfg or self._asset_grouping
         folder, _en = self.scene_panel.get_watch_folder()
         if not folder or not os.path.isdir(folder):
-            QMessageBox.information(self, "Preview Assembly",
+            inform(self, "Preview Assembly",
                 "Choose a watch folder first (the watch button in the Scene panel).")
             return
         exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
@@ -2659,18 +2749,19 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         names = "\n".join(f"•  {p.name}" for _, p in existing[:8])
         more = "" if len(existing) <= 8 else f"\n…and {len(existing) - 8} more"
-        box = QMessageBox(self)
-        box.setWindowTitle("Outputs Already Exist")
-        box.setText(f"{len(existing)} output(s) already exist:\n{names}{more}")
-        box.setInformativeText("Overwrite them, auto-rename to keep both, or cancel?")
-        ow = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
-        rn = box.addButton("Auto-rename", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is ow:
+        ans = ask(
+            self, "Outputs Already Exist",
+            f"{len(existing)} output(s) already exist:\n{names}{more}\n\n"
+            "Overwrite them, auto-rename to keep both, or cancel?",
+            buttons=[
+                ("Cancel", "cancel", "neutral"),
+                ("Auto-rename", "rename", "primary"),
+                ("Overwrite", "overwrite", "danger"),
+            ],
+        )
+        if ans == "overwrite":
             return True
-        if clicked is rn:
+        if ans == "rename":
             for j, pth in existing:
                 j.output_path = self._unique_path(pth)
             self._refresh_queue_view()
@@ -2683,7 +2774,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         # Friendly guard: nothing is connected to render yet.
         if not self._jobs or not any(self._job_has_mapping(j) for j in self._jobs):
-            QMessageBox.warning(
+            warn(
                 self, "Nothing to Render",
                 "No video is connected to a material yet.\n\n"
                 "Add a video, select it together with a material, then click the "
@@ -2703,7 +2794,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             selected_ids = set(self.queue_panel.selected_job_ids()) if not render_all else set(j.id for j in self._jobs)
         pending = [j for j in self._jobs if j.id in selected_ids and j.status != "success"]
         if not pending:
-            QMessageBox.information(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
+            inform(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
             return
 
         # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) in a headless
@@ -2730,7 +2821,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         errs = self._preflight()
         if errs:
-            QMessageBox.critical(self, "Preflight Failed", "\n".join(errs))
+            error(self, "Preflight Failed", "\n".join(errs))
             return
 
         # Claim the rendering state NOW — the modal dialogs below spin the Qt event
@@ -2744,15 +2835,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                     + self._disk_space_warnings(pending)
                     + self._deadline_warnings(pending)
                     + self._render_quality_warnings(pending))
-        if warnings:
-            ans = QMessageBox.warning(
-                self, "Frame Range Warning",
-                "\n\n".join(warnings) + "\n\nProceed anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes,
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                self._is_rendering = False
-                return
+        if warnings and not confirm(
+            self, "Frame Range Warning",
+            "\n\n".join(warnings) + "\n\nProceed anyway?",
+        ):
+            self._is_rendering = False
+            return
 
         # Overwrite protection.
         if not self._resolve_output_conflicts(pending):
@@ -2763,7 +2851,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             worker = _resolve_runtime_script("blender_worker.py")
             c4d_worker = _resolve_runtime_script("c4d_worker.py") if _is_c4d else ""
         except Exception as exc:
-            QMessageBox.critical(
+            error(
                 self, "App Component Missing",
                 "The app's render component couldn't be found — the installation may be "
                 f"damaged. Reinstall Render Mapper Pro.\n\nDetails: {exc}")
@@ -2889,13 +2977,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         .blend that any render farm (Deadline, BlendFarm, cloud, plain Blender)
         can render — no Deadline required."""
         if self._is_rendering:
-            QMessageBox.information(self, "Busy", "Finish the current render first.")
+            inform(self, "Busy", "Finish the current render first.")
             return
         scene = self.scene_panel.scene_edit.text().strip()
         assignments = self.scene_panel.get_assignments()
         if not scene or not file_exists(scene) or not assignments:
-            QMessageBox.information(self, "Export Prepared .blend",
-                                    "Load a scene and map at least one video first.")
+            inform(self, "Export Prepared .blend",
+                   "Load a scene and map at least one video first.")
             return
         blender = self._ensure_blender(interactive=True)
         if not blender:
@@ -2903,7 +2991,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         try:
             worker = _resolve_runtime_script("blender_worker.py")
         except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
+            warn(self, "Export Failed", str(exc))
             return
         default_name = f"{Path(scene).stem}_prepared.blend"
         out, _ = QFileDialog.getSaveFileName(
@@ -2914,12 +3002,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             out += ".blend"
         # Offer to pack the videos in so the .blend is fully portable (no shared
         # storage needed) — at the cost of a larger file.
-        pack = QMessageBox.question(
+        pack = confirm(
             self, "Pack video files?",
             "Pack the video file(s) into the .blend so it renders on any machine "
             "without shared storage?\n\nYes = one self-contained (larger) file.\n"
-            "No  = smaller file; workers must be able to reach the source videos.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
+            "No  = smaller file; workers must be able to reach the source videos.")
 
         asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
         opts = self.render_panel.render_options()
@@ -2939,7 +3026,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
     def _on_export_blend_done(self, ok: bool, info: str) -> None:
         if not ok:
             self._append_log(f"[error] Prepared .blend export failed: {info}")
-            QMessageBox.warning(self, "Export Failed", info)
+            warn(self, "Export Failed", info)
             return
         self._append_log(f"[app] Prepared .blend ready: {info}")
         try:
@@ -3818,14 +3905,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         if not p.exists():
             self._refresh_preset_browser()
             return
-        ans = QMessageBox.question(self, "Delete Preset", f"Delete preset '{p.stem}'?")
-        if ans != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete Preset", f"Delete preset '{p.stem}'?",
+                       ok="Delete", cancel="Cancel", danger=True):
             return
         try:
             p.unlink()
             self._refresh_preset_browser()
         except Exception as exc:
-            QMessageBox.warning(self, "Delete Failed", str(exc))
+            warn(self, "Delete Failed", str(exc))
 
 
     def _open_presets_folder(self) -> None:
@@ -3873,6 +3960,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             "autorender_pattern": self._autorender_pattern,
             "deliver_dir": self._deliver_dir,
             "asset_grouping": self._asset_grouping.to_dict(),
+            "watch_first_run_seen": self._watch_first_run_seen,
             "restore_session_on_launch": self._restore_session_on_launch,
             "render_targets": self.scene_panel.get_targets(),
             "custom_layout": self._custom_layout_state,
@@ -4148,6 +4236,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
         self._deliver_dir = str(d.get("deliver_dir", "") or "")
         self._asset_grouping = AssetGroupingConfig.from_dict(d.get("asset_grouping"))
+        self._watch_first_run_seen = bool(d.get("watch_first_run_seen", False))
         self._sync_grouping_mode()
         tg = d.get("render_targets", [])
         if isinstance(tg, list):
@@ -4155,6 +4244,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
+        self._load_watch_panel()   # reflect the loaded watch/auto-render config
 
         cam = d.get("camera", "")
         if cam:
@@ -4320,19 +4410,20 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         """Start a fresh, empty workspace — clear the scene, clips, mappings,
         targets and the queue (like File → New). Guarded when there's work."""
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress",
-                                    "Stop rendering before starting a new session.")
+            inform(self, "Render In Progress",
+                   "Stop rendering before starting a new session.")
             return
         has_work = bool(self.scene_panel.scene_edit.text().strip()
                         or self.scene_panel.get_videos() or self._jobs)
         if confirm and has_work:
-            resp = QMessageBox.question(
+            resp = ask(
                 self, "New",
                 "Start a new session? The current scene, clips and queue will be "
                 "cleared (your saved projects and recents are kept).",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if resp != QMessageBox.StandardButton.Yes:
+                kind="danger",
+                buttons=[("No", "no", "neutral"), ("Yes", "yes", "danger")],
+                default="no")
+            if resp != "yes":
                 return
         if confirm and has_work:
             self._last_session = self._capture_workspace()   # let Reopen undo an explicit New
@@ -4361,8 +4452,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         New session this keeps the existing queue; the next mapping drafts a fresh
         job alongside the ones already queued."""
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress",
-                                    "Stop rendering before starting a new job.")
+            inform(self, "Render In Progress",
+                   "Stop rendering before starting a new job.")
             return
         sp = self.scene_panel
         self._loading_job_into_ui = True
@@ -4451,29 +4542,29 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 if blender else
                 "\n\nNo Blender yet? Click “Download Blender” and the app fetches a "
                 "managed copy — nothing else to install.")
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle(f"Welcome to {APP_NAME}")
-        box.setText(f"Welcome to {APP_NAME}!")
-        box.setInformativeText(
+        buttons = [("Open Quick Start", "quickstart", "neutral")]
+        # When Blender is missing, lead with the one-click auto-download.
+        has_dl = not blender and can_fetch
+        has_loc = not blender
+        if has_dl:
+            buttons.append(("Download Blender", "download", "neutral"))
+        if has_loc:
+            buttons.append(("Locate Blender…", "locate", "neutral"))
+        buttons.append(("Get Started", "go", "primary"))
+        clicked = ask(
+            self, f"Welcome to {APP_NAME}",
+            f"Welcome to {APP_NAME}!\n\n"
             "Map your videos onto a 3D scene's materials and render them — on your "
             "machine or a farm.\n\nWhat's ready on this computer:\n\n"
-            + "\n".join(lines) + tail)
-        qs = box.addButton("Open Quick Start", QMessageBox.ButtonRole.ActionRole)
-        # When Blender is missing, lead with the one-click auto-download.
-        dl = box.addButton("Download Blender", QMessageBox.ButtonRole.ActionRole) \
-            if (not blender and can_fetch) else None
-        loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) \
-            if not blender else None
-        go = box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(dl or go)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is qs:
+            + "\n".join(lines) + tail,
+            kind="info",
+            buttons=buttons,
+            default="download" if has_dl else "go")
+        if clicked == "quickstart":
             self._show_quick_start()
-        elif dl is not None and clicked is dl:
+        elif has_dl and clicked == "download":
             self._install_managed_runtime()
-        elif loc is not None and clicked is loc:
+        elif has_loc and clicked == "locate":
             self._show_properties_dialog()
         self._save_profile()   # ensure a profile exists so this won't show again
 

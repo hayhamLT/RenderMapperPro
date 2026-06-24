@@ -9,12 +9,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtWidgets import QInputDialog
 
 from app_window.base import _WindowMembers
 from core.models import MaterialVideoAssignment, RenderJob
 from core.utils import OUTPUT_PROFILES, resolve_output_path
 from media import reveal_in_file_manager
+from ui_dialogs import confirm, inform, warn
 
 
 class QueueMixin(_WindowMembers):
@@ -60,12 +61,15 @@ class QueueMixin(_WindowMembers):
         # A hand-typed name always wins and is never auto-overwritten.
         if getattr(job, "custom_label", False) and (job.label or "").strip():
             return job.label
-        for raw in ((job.output_input or "").strip(), (job.output_path or "").strip()):
+        # Show the *resolved* output filename, not the raw token template — so the
+        # queue reads "Sunset_clipA_1920x1080.mp4", not "{scene}_{clip}_{res}.mp4".
+        # Prefer output_path (already token-expanded); fall back to output_input but
+        # skip it while it still contains unresolved "{tokens}".
+        for raw in ((job.output_path or "").strip(), (job.output_input or "").strip()):
             if not raw:
                 continue
-            p = Path(raw).expanduser()
-            name = p.name.strip()
-            if name:
+            name = Path(raw).expanduser().name.strip()
+            if name and "{" not in name:
                 return name
         # Auto label: tag with the camera so duplicated variations of the same
         # scene are distinguishable at a glance.
@@ -156,7 +160,7 @@ class QueueMixin(_WindowMembers):
                 to_add.append(job)
 
         if not to_add:
-            QMessageBox.information(self, "Queue", "Nothing to queue. Add videos or assignments first.")
+            inform(self, "Queue", "Nothing to queue. Add videos or assignments first.")
             return
 
         # New jobs go to the top of the queue.
@@ -310,7 +314,7 @@ class QueueMixin(_WindowMembers):
 
     def _remove_queue_jobs(self, job_ids: list[int]) -> None:
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress", "Stop rendering before removing queue items.")
+            inform(self, "Render In Progress", "Stop rendering before removing queue items.")
             return
         ids = {jid for jid in job_ids if isinstance(jid, int)}
         if not ids:
@@ -341,16 +345,15 @@ class QueueMixin(_WindowMembers):
 
     def _clear_queue(self) -> None:
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress", "Stop rendering before clearing the queue.")
+            inform(self, "Render In Progress", "Stop rendering before clearing the queue.")
             return
         if not self._jobs:
             return
-        resp = QMessageBox.question(
+        if not confirm(
             self, "Clear Queue",
             f"Remove all {len(self._jobs)} job(s) from the queue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
+            ok="Clear", cancel="Cancel", danger=True,
+        ):
             return
         import copy
         snap_jobs, snap_active = copy.deepcopy(self._jobs), self._active_job_id
@@ -379,17 +382,13 @@ class QueueMixin(_WindowMembers):
         job = next((j for j in self._jobs if j.id == job_id), None)
         if job is None:
             return
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Why This Job Failed")
-        box.setText(f"{job.label or f'Job {job.id}'} failed.")
         info = "The last error from the renderer is below. The full output is in Live Logs."
         hint = self._friendly_error_hint(job.error or "")
         if hint:
             info = f"What to try:  {hint}\n\n{info}"
-        box.setInformativeText(info)
-        box.setDetailedText(job.error or "No error text was captured — check Live Logs.")
-        box.exec()
+        detail = job.error or "No error text was captured — check Live Logs."
+        message = f"{job.label or f'Job {job.id}'} failed.\n\n{info}\n\n{detail}"
+        warn(self, "Why This Job Failed", message)
 
     def _reveal_job_output(self, job_id: int) -> None:
         p = self._job_output_target(job_id)
@@ -533,6 +532,12 @@ class QueueMixin(_WindowMembers):
                 )
             except Exception:
                 j.output_path = ""
+            # Now that the path is resolved, refresh an auto-derived label so the
+            # queue's Job column shows the real filename instead of the template.
+            if not getattr(j, "custom_label", False):
+                name = Path(j.output_path).name if j.output_path else ""
+                if name and "{" not in name:
+                    j.label = name
 
     @staticmethod
     def _job_has_mapping(job: RenderJob) -> bool:

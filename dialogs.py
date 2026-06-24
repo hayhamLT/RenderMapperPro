@@ -19,14 +19,12 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QTabWidget,
@@ -36,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from core.utils import find_deadlinecommand, subprocess_creation_flags
 from media import _find_ffprobe, find_ffmpeg_tool
+from ui_dialogs import error, inform, warn
 from workers import DeadlineQueryThread
 
 
@@ -177,7 +176,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             if resolved:
                 blender_edit.setText(resolved)
             else:
-                QMessageBox.warning(
+                warn(
                     dlg, "Not a Blender App",
                     "That location doesn't contain Blender. Pick the Blender app itself "
                     "(e.g. /Applications/Blender.app) or its executable.")
@@ -272,173 +271,18 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
 
     # ── Watch & Auto-render ──────────────────────────────────────────
     lay = _tab("Watch && Auto-render")
+    g, gl = group("Watch & Auto-render")
+    gl.addWidget(hint("Watch a folder and render dropped clips automatically. The setup now "
+                      "lives in its own panel — choose a folder, pick auto-map or previz "
+                      "assembly, set the naming, and watch progress live."))
+    open_watch_btn = QPushButton("Open the Watch & Auto-render panel  →")
+    open_watch_btn.setObjectName("PrimaryButton")
 
-    g, gl = group("Watch folder")
-    gl.addWidget(hint("Drop clips into a watch folder and they import + map by name "
-                      "automatically (latest version wins)."))
-    _wi, _ws = win.scene_panel.get_watch_options()
-    watch_form = QFormLayout()
-    watch_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-    watch_interval_edit = QLineEdit(f"{_wi / 1000:g}")
-    watch_interval_edit.setFixedWidth(80)
-    watch_interval_edit.setToolTip("How often the watch folder is polled, in seconds.")
-    watch_settle_edit = QLineEdit(f"{_ws:g}")
-    watch_settle_edit.setFixedWidth(80)
-    watch_settle_edit.setToolTip("How long a file's size must stay steady before it's imported "
-                                 "(guards against half-copied files).")
-    watch_form.addRow("Poll interval (s):", watch_interval_edit)
-    watch_form.addRow("Stability window (s):", watch_settle_edit)
-    gl.addLayout(watch_form)
-    lay.addWidget(g)
-
-    g, gl = group("Auto-render")
-    ar_enable_cb = QCheckBox("Auto-render once every render-target screen has a clip")
-    ar_enable_cb.setChecked(win._autorender_enabled)
-    ar_enable_cb.setToolTip("Mark screens as render targets (right-click a material, or click its "
-                            "left stripe). When every target has a clip — or newer versions arrive — "
-                            "a single render covering all targets is queued (debounced).")
-    gl.addWidget(ar_enable_cb)
-    gl.addWidget(hint("Mark targets by right-clicking a material → Set as Render Target, or click the "
-                      "stripe on its left. Linking a clip also targets it. The render waits until "
-                      "every target has a clip."))
-    ar_body, ar_body_l = disclose(ar_enable_cb)   # options appear once auto-render is on
-    ar_start_cb = QCheckBox("Start it automatically (otherwise just add it to the queue)")
-    ar_start_cb.setChecked(win._autorender_start)
-    ar_body_l.addWidget(ar_start_cb)
-    ar_out_row = QHBoxLayout()
-    ar_out_edit = QLineEdit(win._autorender_output)
-    ar_out_edit.setPlaceholderText("Output folder (blank = a PREVIZ subfolder of the watch folder)")
-    ar_out_browse = QPushButton("Browse")
-    def _pick_ar_out() -> None:
-        d = QFileDialog.getExistingDirectory(dlg, "Auto-render output folder", ar_out_edit.text() or str(Path.home()))
-        if d:
-            ar_out_edit.setText(d)
-    ar_out_browse.clicked.connect(_pick_ar_out)
-    ar_out_row.addWidget(QLabel("Output:"))
-    ar_out_row.addWidget(ar_out_edit, 1)
-    ar_out_row.addWidget(ar_out_browse)
-    ar_body_l.addLayout(ar_out_row)
-    ar_pat_row = QHBoxLayout()
-    ar_pat_edit = QLineEdit(win._autorender_pattern)
-    ar_pat_edit.setToolTip("Output filename. Tokens: {clip} (first mapped clip), {scene}, {date}.")
-    ar_pat_row.addWidget(QLabel("Name:"))
-    ar_pat_row.addWidget(ar_pat_edit, 1)
-    ar_pat_hint = QLabel("tokens: {clip} {scene} {date}")
-    ar_pat_hint.setStyleSheet(f"color:{win._palette.text_muted}; font-size:11px;")
-    ar_pat_row.addWidget(ar_pat_hint)
-    ar_body_l.addLayout(ar_pat_row)
-    gl.addWidget(ar_body)
-    lay.addWidget(g)
-
-    g, gl = group("Delivery")
-    gl.addWidget(hint("After a render finishes, copy the output(s) into this folder "
-                      "automatically — e.g. a synced delivery/review folder. Blank = off."))
-    dlv_row = QHBoxLayout()
-    dlv_edit = QLineEdit(win._deliver_dir)
-    dlv_edit.setPlaceholderText("Delivery folder (blank = no copy)")
-    dlv_browse = QPushButton("Browse")
-    def _pick_dlv() -> None:
-        d2 = QFileDialog.getExistingDirectory(dlg, "Delivery folder", dlv_edit.text() or str(Path.home()))
-        if d2:
-            dlv_edit.setText(d2)
-    dlv_browse.clicked.connect(_pick_dlv)
-    dlv_row.addWidget(QLabel("Copy to:"))
-    dlv_row.addWidget(dlv_edit, 1)
-    dlv_row.addWidget(dlv_browse)
-    gl.addLayout(dlv_row)
-    lay.addWidget(g)
-    lay.addStretch()
-
-    # ── Previz Assembly ──────────────────────────────────────────────
-    # Split off its own tab: it's a distinct, advanced watch-folder workflow
-    # and was the bulk of what made the Watch tab overwhelming.
-    lay = _tab("Previz Assembly")
-    _ag = win._asset_grouping
-    g, gl = group("Group watch-folder clips into previz renders")
-    gl.addWidget(hint("Build one previz render per asset from a filename convention like "
-                      "PRJ001_D01_S01_A017_CENTER_ANIM_V003 — dropped clips are grouped by "
-                      "setup + asset, each screen maps to its material, and the newest "
-                      "version of each screen wins. Replaces auto-map while it's on."))
-    ag_enable_cb = QCheckBox("Group watch-folder clips into previz renders by filename")
-    ag_enable_cb.setChecked(_ag.enabled)
-    gl.addWidget(ag_enable_cb)
-    ag_body, ag_body_l = disclose(ag_enable_cb)   # the whole config hides until it's on
-
-    ag_body_l.addWidget(QLabel("Filename pattern:"))
-    ag_pat_edit = QLineEdit(_ag.pattern)
-    ag_pat_edit.setPlaceholderText("{Project}_D{Day#}_S{Setup#}_A{Asset#}_{Screen}_{Type}_V{Version#}")
-    from ui_widgets import FilenamePatternBuilder
-    ag_body_l.addWidget(FilenamePatternBuilder(ag_pat_edit))   # visual chip editor (writes the field below)
-    ag_body_l.addWidget(ag_pat_edit)                           # canonical text form — editable directly
-    ag_body_l.addWidget(hint("Build it with the chips above (click a chip to rename, set Text or Number, "
-                             "mark optional, reorder or delete), or just type it: {Field} = text, "
-                             "{Field#} = number, {Field#?} = optional. Recognised fields: Project, Day, "
-                             "Setup, Asset, Screen, Type, Version. (A raw regex still works too.)"))
-
-    # Live preview: type a sample filename and see exactly what each field captures —
-    # or where the pattern stops matching — so it's tunable without knowing regex.
-    ag_sample_edit = QLineEdit()
-    ag_sample_edit.setPlaceholderText("Try a sample filename, e.g. PRJ001_D01_S01_A017_CENTER_ANIM_V003")
-    ag_body_l.addWidget(ag_sample_edit)
-    ag_preview_lbl = QLabel()
-    ag_preview_lbl.setWordWrap(True)
-    ag_body_l.addWidget(ag_preview_lbl)
-
-    def _update_pattern_preview(*_a) -> None:
-        from core.naming import preview as _preview_pattern
-        res = _preview_pattern(ag_pat_edit.text().strip(), ag_sample_edit.text().strip())
-        if res.ok:
-            shown = "    ".join(f"{k} = {v}" for k, v in res.fields.items())
-            ag_preview_lbl.setText("✓  " + shown)
-            ag_preview_lbl.setStyleSheet(f"color:{win._palette.success}; font-size:11px;")
-        else:
-            ag_preview_lbl.setText("•  " + res.error)
-            ag_preview_lbl.setStyleSheet(f"color:{win._palette.warning}; font-size:11px;")
-    ag_pat_edit.textChanged.connect(_update_pattern_preview)
-    ag_sample_edit.textChanged.connect(_update_pattern_preview)
-    _update_pattern_preview()
-
-    ag_form = QFormLayout()
-    ag_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-    ag_type_edit = QLineEdit(_ag.content_type)
-    ag_type_edit.setFixedWidth(90)
-    ag_type_edit.setPlaceholderText("ANIM")
-    ag_tmpl_edit = QLineEdit(_ag.output_template)
-    ag_tmpl_edit.setPlaceholderText("{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}")
-    ag_screen_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in _ag.screen_to_material.items()))
-    ag_screen_edit.setPlaceholderText("CENTER=Center_Screen, LEFT=Left_Screen   (blank = code is the material name)")
-    ag_setup_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in sorted(_ag.setup_to_scene.items())))
-    ag_setup_edit.setPlaceholderText("1=/scenes/StageA.blend, 2=/scenes/StageB.blend   (blank = current scene)")
-    ag_form.addRow("Content type:", ag_type_edit)
-    ag_form.addRow("Output name:", ag_tmpl_edit)
-    ag_form.addRow("Screen → material:", ag_screen_edit)
-    ag_form.addRow("Setup → scene:", ag_setup_edit)
-    ag_body_l.addLayout(ag_form)
-
-    def _preview_assembly_dry_run() -> None:
-        from core.asset_grouping import GroupingConfig
-
-        def _pairs(text: str) -> dict:
-            out: dict[str, str] = {}
-            for part in text.split(","):
-                if "=" in part and part.split("=", 1)[0].strip():
-                    k, v = part.split("=", 1)
-                    out[k.strip()] = v.strip()
-            return out
-        tmp = GroupingConfig(
-            enabled=True,
-            pattern=ag_pat_edit.text().strip() or _ag.pattern,
-            content_type=ag_type_edit.text().strip() or "ANIM",
-            output_template=ag_tmpl_edit.text().strip() or _ag.output_template,
-            screen_to_material=_pairs(ag_screen_edit.text()),
-            setup_to_scene={int(k): v for k, v in _pairs(ag_setup_edit.text()).items() if k.isdigit()},
-        )
-        win._preview_assembly(tmp)
-    ag_preview_btn = QPushButton("Preview assembly (dry run)…")
-    ag_preview_btn.setToolTip("Show exactly what would be built from the watch folder's current clips")
-    ag_preview_btn.clicked.connect(_preview_assembly_dry_run)
-    ag_body_l.addWidget(ag_preview_btn)
-    gl.addWidget(ag_body)
+    def _open_watch_panel() -> None:
+        win._open_watch_render_panel()
+        dlg.accept()
+    open_watch_btn.clicked.connect(_open_watch_panel)
+    gl.addWidget(open_watch_btn)
     lay.addWidget(g)
     lay.addStretch()
 
@@ -612,42 +456,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         else:
             win._preview_enabled = preview_cb.isChecked()
 
-        # Watch / ingest options
-        def _to_float(s, d):
-            try:
-                return float(s)
-            except ValueError:
-                return d
-        interval_ms = int(max(1.0, _to_float(watch_interval_edit.text().strip(), 3.0)) * 1000)
-        settle_s = max(0.0, _to_float(watch_settle_edit.text().strip(), 2.0))
-        win.scene_panel.set_watch_options(interval_ms, settle_s)
-
-        # Auto-render (targets)
-        win._autorender_enabled = ar_enable_cb.isChecked()
-        win._autorender_start = ar_start_cb.isChecked()
-        win._autorender_output = ar_out_edit.text().strip()
-        win._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
-        win._deliver_dir = dlv_edit.text().strip()
-
-        # Asset grouping
-        def _parse_pairs(text: str) -> dict:
-            out: dict[str, str] = {}
-            for part in text.split(","):
-                part = part.strip()
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    if k.strip():
-                        out[k.strip()] = v.strip()
-            return out
-        _ag = win._asset_grouping
-        _ag.enabled = ag_enable_cb.isChecked()
-        _ag.pattern = ag_pat_edit.text().strip() or _ag.pattern
-        _ag.content_type = ag_type_edit.text().strip()
-        _ag.output_template = ag_tmpl_edit.text().strip() or _ag.output_template
-        _ag.screen_to_material = _parse_pairs(ag_screen_edit.text())
-        _ag.setup_to_scene = {int(k): v for k, v in _parse_pairs(ag_setup_edit.text()).items()
-                              if k.isdigit()}
-        win._sync_grouping_mode()
+        # Watch / Auto-render / Previz settings now live in the Watch & Auto-render
+        # dock panel (which owns + persists them); the Properties tab is just a
+        # shortcut into it, so there is nothing to read back here.
 
         # Updates
         win._check_updates_on_launch = launch_check_cb.isChecked()
@@ -707,12 +518,12 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             if ok:
                 status_lbl.setText("Connection status: Connected")
                 status_lbl.setStyleSheet(f"color: {win._palette.success}; font-size: 11px; font-weight: bold;")
-                QMessageBox.information(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
+                inform(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
             else:
                 status_lbl.setText("Connection status: Connection failed")
                 status_lbl.setStyleSheet(f"color: {win._palette.danger}; font-size: 11px; font-weight: bold;")
-                QMessageBox.warning(dlg, "Deadline Warning",
-                                    res.get("error", "") or "deadlinecommand failed.")
+                warn(dlg, "Deadline Warning",
+                     res.get("error", "") or "deadlinecommand failed.")
         except RuntimeError:
             pass   # dialog already closed
 
@@ -723,7 +534,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         if not Path(cmd).exists() and not shutil.which(cmd):
             status_lbl.setText("Connection status: deadlinecommand not found")
             status_lbl.setStyleSheet(f"color: {win._palette.danger}; font-size: 11px; font-weight: bold;")
-            QMessageBox.critical(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
+            error(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
             return
         if win._props_deadline_thread is not None and win._props_deadline_thread.isRunning():
             return

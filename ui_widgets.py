@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLineEdit,
     QListWidget,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTableWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -686,3 +688,89 @@ class FilenamePatternBuilder(QWidget):
             parts.append(Literal("_"))      # keep adjacent fields separable
         parts.append(Token(name))
         self._apply(parts)
+
+
+class PairTableEditor(QWidget):
+    """A compact two-column key→value editor — a styled add/remove table that
+    replaces raw comma-separated ``k=v, k=v`` text fields. Emits ``changed`` on
+    any edit; ``get_pairs()`` / ``set_pairs()`` round-trip an ordered dict.
+
+    With ``numeric_from=True`` the left column is validated as an integer on
+    ``get_pairs`` (non-numeric keys are dropped) — used for the setup→scene map.
+    """
+
+    changed = Signal()
+
+    def __init__(self, from_header: str = "From", to_header: str = "To", *,
+                 numeric_from: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._numeric_from = numeric_from
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels([from_header, to_header])
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setMinimumHeight(92)
+        self.table.itemChanged.connect(lambda *_: self.changed.emit())
+        v.addWidget(self.table)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        add = QPushButton("+ Add")
+        add.setObjectName("SmallButton")
+        add.clicked.connect(self._add_row)
+        rem = QPushButton("Remove")
+        rem.setObjectName("SmallButton")
+        rem.clicked.connect(self._remove_row)
+        row.addWidget(add)
+        row.addWidget(rem)
+        row.addStretch()
+        v.addLayout(row)
+
+    def _add_row(self) -> None:
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        cell = QTableWidgetItem("")
+        self.table.setItem(r, 0, cell)
+        self.table.setItem(r, 1, QTableWidgetItem(""))
+        self.table.setCurrentCell(r, 0)
+        self.table.editItem(cell)
+        self.changed.emit()
+
+    def _remove_row(self) -> None:
+        r = self.table.currentRow()
+        if r < 0:
+            r = self.table.rowCount() - 1
+        if r >= 0:
+            self.table.removeRow(r)
+            self.changed.emit()
+
+    def set_pairs(self, pairs: dict) -> None:
+        self.table.blockSignals(True)
+        self.table.setRowCount(0)
+        for k, val in pairs.items():
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            self.table.setItem(r, 0, QTableWidgetItem(str(k)))
+            self.table.setItem(r, 1, QTableWidgetItem(str(val)))
+        self.table.blockSignals(False)
+
+    def get_pairs(self) -> dict:
+        out: dict = {}
+        for r in range(self.table.rowCount()):
+            ki = self.table.item(r, 0)
+            vi = self.table.item(r, 1)
+            k = ki.text().strip() if ki else ""
+            val = vi.text().strip() if vi else ""
+            if not k or not val:
+                continue
+            if self._numeric_from:
+                if not k.isdigit():
+                    continue
+                out[int(k)] = val
+            else:
+                out[k] = val
+        return out
