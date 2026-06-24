@@ -136,6 +136,7 @@ from panels import (
     QueuePanel,
     RenderPanel,
     ScenePanel,
+    WatchPanel,
 )
 from theme import set_active_palette
 from ui_widgets import (
@@ -463,6 +464,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             getattr(self, "queue_panel", None),
             getattr(self, "logs_panel", None),
             getattr(self, "preview_panel", None),
+            getattr(self, "watch_panel", None),
         ):
             if panel is not None and hasattr(panel, "restyle"):
                 panel.restyle(self._palette)
@@ -1219,8 +1221,17 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         )
         self._apply_layout("default")
 
+        # Watch / Ingest: an opt-in dock for the (occasional) watch-folder
+        # workflow. Kept out of the layout presets, parked on the right and
+        # hidden until the user toggles it on from the View menu.
+        self.watch_panel = WatchPanel()
+        self.watch_dock = self._mk_dock("Watch / Ingest", "WatchDock", self.watch_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.watch_dock)
+        self.watch_dock.hide()
+
         self.view_menu.addSeparator()
-        for d in (self.scene_dock, self.render_dock, self.deadline_dock, self.queue_dock, self.presets_dock, self.logs_dock, self.preview_dock):
+        for d in (self.scene_dock, self.render_dock, self.deadline_dock, self.queue_dock,
+                  self.presets_dock, self.logs_dock, self.preview_dock, self.watch_dock):
             self.view_menu.addAction(d.toggleViewAction())
 
         self.scene_panel.scan_requested.connect(self._scan_scene)
@@ -1231,9 +1242,16 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 f"[app] Auto-mapped {n} of {total} materials by name"
                 + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
+        self.scene_panel.watch_status.connect(lambda msg: self.watch_panel.add_activity("Ingest", msg))
         self.scene_panel.watch_changed.connect(lambda *_: self._save_and_refresh_status())
+        self.scene_panel.watch_changed.connect(self._refresh_watch_panel)
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
         self.scene_panel.watch_clips_ready.connect(self._on_watch_clips_ready)
+
+        self.watch_panel.choose_folder_requested.connect(self._pick_watch_folder)
+        self.watch_panel.watch_toggled.connect(self._toggle_watch_from_panel)
+        self.watch_panel.configure_requested.connect(lambda: self._show_properties_dialog("Watch"))
+        self._refresh_watch_panel()
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
@@ -2124,6 +2142,33 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         """Switch the watch folder between auto-map (normal) and asset-grouping."""
         if hasattr(self, "scene_panel"):
             self.scene_panel.set_grouping_mode(self._asset_grouping.enabled)
+        if hasattr(self, "watch_panel"):
+            self.watch_panel.set_mode(self._asset_grouping.enabled)
+
+    def _refresh_watch_panel(self, *_a) -> None:
+        """Mirror the watch engine's folder/enabled/mode into the Watch panel."""
+        if not hasattr(self, "watch_panel"):
+            return
+        folder, enabled = self.scene_panel.get_watch_folder()
+        self.watch_panel.set_folder_state(folder, enabled)
+        self.watch_panel.set_mode(self._asset_grouping.enabled)
+
+    def _pick_watch_folder(self) -> None:
+        folder, _en = self.scene_panel.get_watch_folder()
+        d = QFileDialog.getExistingDirectory(self, "Choose watch folder", folder or str(Path.home()))
+        if d:
+            self.scene_panel.set_watch_folder(d, True)
+            self._refresh_watch_panel()
+            self.watch_panel.add_activity("Watch", f"Watching {d}")
+
+    def _toggle_watch_from_panel(self, on: bool) -> None:
+        folder, _en = self.scene_panel.get_watch_folder()
+        if on and not folder:
+            self._pick_watch_folder()   # nothing to watch yet — pick one first
+            return
+        self.scene_panel.set_watch_folder(folder, on)
+        self._refresh_watch_panel()
+        self.watch_panel.add_activity("Watch", "Started" if on else "Stopped")
 
     def _on_watch_clips_ready(self, paths: list) -> None:
         """Asset-grouping watch path: parse the ready clips by the naming
@@ -2194,6 +2239,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._append_log(
             f"[app] Asset grouping: {created} new + {updated} updated previz job(s) "
             f"from {len(groups)} asset group(s).")
+        self.watch_panel.add_activity(
+            "Previz", f"{created} new + {updated} updated job(s) from {len(groups)} group(s)")
         if self._autorender_start and not self._is_rendering:
             self._start_render(only_job_ids=touched)
 
