@@ -62,11 +62,6 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     tabs = QTabWidget()
     root.addWidget(tabs)
 
-    def section_title(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setObjectName("DialogSection")
-        return lbl
-
     def group(title: str) -> tuple[QGroupBox, QVBoxLayout]:
         """A titled, framed section — the modern replacement for a bare all-caps
         header. Returns the box (add it to the tab) and its content layout."""
@@ -124,7 +119,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
 
     # ── General ──────────────────────────────────────────────────────
     lay = _tab("General")
-    lay.addWidget(section_title("WHEN A RENDER FINISHES"))
+    g, gl = group("When a render finishes")
     behave_row = QHBoxLayout()
     behave_row.addWidget(QLabel("Then:"))
     when_combo = QComboBox()
@@ -134,24 +129,27 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     when_combo.setCurrentIndex(_vals.index(win._when_done) if win._when_done in _vals else 0)
     behave_row.addWidget(when_combo)
     behave_row.addStretch()
-    lay.addLayout(behave_row)
+    gl.addLayout(behave_row)
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("PREVIEW"))
+    g, gl = group("Preview")
     preview_cb = QCheckBox("Show a live frame preview while rendering")
     preview_cb.setChecked(win._preview_enabled)
-    lay.addWidget(preview_cb)
-    lay.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
-                       "Turn off for a small speed-up on heavy scenes."))
+    gl.addWidget(preview_cb)
+    gl.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
+                      "Turn off for a small speed-up on heavy scenes."))
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("STARTUP"))
+    g, gl = group("Startup")
     restore_cb = QCheckBox("Reopen the last session on launch")
     restore_cb.setChecked(getattr(win, "_restore_session_on_launch", False))
-    lay.addWidget(restore_cb)
-    lay.addWidget(hint("Off (default): the app opens to a clean, empty workspace — use "
-                       "Profile → New (⌘N) to start fresh anytime, the Scene picker's "
-                       "recents to reopen a scene, or Reopen Last Session to bring back "
-                       "your last scene + queue. On: it restores your last scene, mappings "
-                       "and queue automatically."))
+    gl.addWidget(restore_cb)
+    gl.addWidget(hint("Off (default): the app opens to a clean, empty workspace — use "
+                      "Profile → New (⌘N) to start fresh anytime, the Scene picker's "
+                      "recents to reopen a scene, or Reopen Last Session to bring back "
+                      "your last scene + queue. On: it restores your last scene, mappings "
+                      "and queue automatically."))
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Render Engines ───────────────────────────────────────────────
@@ -159,7 +157,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     lay.addWidget(hint("Scenes route to a renderer automatically by type — Blender for "
                        ".blend / .fbx / .usd / .obj…, and Cinema 4D + Redshift for .c4d."))
 
-    lay.addWidget(section_title("BLENDER"))
+    g, gl = group("Blender")
     blender_row = QHBoxLayout()
     blender_edit = QLineEdit(win._blender_path)
     blender_edit.setPlaceholderText("Path to the Blender executable")
@@ -167,7 +165,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     blender_row.addWidget(QLabel("Executable:"))
     blender_row.addWidget(blender_edit, 1)
     blender_row.addWidget(blender_locate)
-    lay.addLayout(blender_row)
+    gl.addLayout(blender_row)
 
     def do_locate_blender() -> None:
         if sys.platform == "darwin":
@@ -193,9 +191,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     detect_row.addWidget(detect_btn)
     detect_row.addWidget(install_btn)
     detect_row.addStretch()
-    lay.addLayout(detect_row)
+    gl.addLayout(detect_row)
     blender_ver_lbl = hint("")
-    lay.addWidget(blender_ver_lbl)
+    gl.addWidget(blender_ver_lbl)
 
     def do_check_version() -> None:
         exe = blender_edit.text().strip()
@@ -226,8 +224,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     install_btn.clicked.connect(win._install_managed_runtime)
     blender_edit.editingFinished.connect(do_check_version)
     do_check_version()
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("CINEMA 4D + REDSHIFT"))
+    g, gl = group("Cinema 4D + Redshift")
     c4d_row = QHBoxLayout()
     c4dpy_edit = QLineEdit(win._c4dpy_path)
     c4dpy_edit.setPlaceholderText("Path to c4dpy (Cinema 4D's headless Python)")
@@ -235,13 +234,13 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     c4d_row.addWidget(QLabel("c4dpy:"))
     c4d_row.addWidget(c4dpy_edit, 1)
     c4d_row.addWidget(c4d_locate)
-    lay.addLayout(c4d_row)
+    gl.addLayout(c4d_row)
     c4d_detect_row = QHBoxLayout()
     c4d_detect_btn = QPushButton("Auto-detect")
     c4d_detect_btn.setToolTip("Search the usual install locations for Cinema 4D's c4dpy")
     c4d_detect_row.addWidget(c4d_detect_btn)
     c4d_detect_row.addStretch()
-    lay.addLayout(c4d_detect_row)
+    gl.addLayout(c4d_detect_row)
     c4d_status_lbl = hint("")
 
     def _c4d_refresh() -> None:
@@ -266,8 +265,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     c4d_locate.clicked.connect(do_locate_c4d)
     c4d_detect_btn.clicked.connect(do_detect_c4d)
     c4dpy_edit.editingFinished.connect(_c4d_refresh)
-    lay.addWidget(c4d_status_lbl)
+    gl.addWidget(c4d_status_lbl)
     _c4d_refresh()
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Watch & Auto-render ──────────────────────────────────────────
@@ -444,34 +444,35 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
 
     # ── Updates ──────────────────────────────────────────────────────
     lay = _tab("Updates")
-    lay.addWidget(section_title("SOFTWARE UPDATES"))
-    lay.addWidget(hint("When a newer version is released, the app shows a popup with the "
-                       "release notes so you can download it — nothing installs without "
-                       "your say-so."))
+    g, gl = group("Software updates")
+    gl.addWidget(hint("When a newer version is released, the app shows a popup with the "
+                      "release notes so you can download it — nothing installs without "
+                      "your say-so."))
     upd_status = QLabel(f"This build is v{APP_VERSION}.")
     upd_status.setStyleSheet(f"color:{win._palette.text_muted}; font-size:12px;")
-    lay.addWidget(upd_status)
+    gl.addWidget(upd_status)
 
     launch_check_cb = QCheckBox("Check for updates on launch")
     launch_check_cb.setChecked(getattr(win, "_check_updates_on_launch", True))
-    lay.addWidget(launch_check_cb)
-    lay.addWidget(hint("Looks for a newer release a few seconds after the app starts and "
-                       "pops the update notice if one is found. Turn off to only check "
-                       "manually with the button below."))
+    gl.addWidget(launch_check_cb)
+    gl.addWidget(hint("Looks for a newer release a few seconds after the app starts and "
+                      "pops the update notice if one is found. Turn off to only check "
+                      "manually with the button below."))
 
     upd_check_btn = QPushButton("Check for Updates Now")
     upd_check_btn.clicked.connect(lambda: win._check_for_updates(manual=True))
     upd_row = QHBoxLayout()
     upd_row.addWidget(upd_check_btn)
     upd_row.addStretch()
-    lay.addLayout(upd_row)
+    gl.addLayout(upd_row)
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Deadline ─────────────────────────────────────────────────────
     lay = _tab("Deadline")
     lay.addWidget(hint("Submit Blender and Cinema 4D jobs to a Thinkbox Deadline farm. "
                        "Leave blank to render locally."))
-    lay.addWidget(section_title("CONFIGURATION"))
+    g, gl = group("Configuration")
 
     # Repo Path
     repo_row = QHBoxLayout()
@@ -481,7 +482,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     repo_row.addWidget(QLabel("Repository Path:"))
     repo_row.addWidget(repo_edit, 1)
     repo_row.addWidget(repo_locate)
-    lay.addLayout(repo_row)
+    gl.addLayout(repo_row)
 
     def do_locate_repo() -> None:
         chosen = QFileDialog.getExistingDirectory(dlg, "Select Deadline Repository Path", repo_edit.text() or "")
@@ -497,7 +498,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     cmd_row.addWidget(QLabel("Command Path:   "))
     cmd_row.addWidget(cmd_edit, 1)
     cmd_row.addWidget(cmd_locate)
-    lay.addLayout(cmd_row)
+    gl.addLayout(cmd_row)
 
     def do_locate_cmd() -> None:
         chosen, _ = QFileDialog.getOpenFileName(dlg, "Select deadlinecommand executable", cmd_edit.text() or "")
@@ -513,7 +514,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         "Use Test Connection to verify — any failure shows full details in Live Logs.")
     repo_help.setWordWrap(True)
     repo_help.setStyleSheet(f"color:{win._palette.text_muted}; font-size:11px;")
-    lay.addWidget(repo_help)
+    gl.addWidget(repo_help)
 
     # Name Template
     template_row = QHBoxLayout()
@@ -521,7 +522,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     template_edit.setPlaceholderText("e.g. Render Mapper Pro Job - {scene_name}")
     template_row.addWidget(QLabel("Name Template:  "))
     template_row.addWidget(template_edit, 1)
-    lay.addLayout(template_row)
+    gl.addLayout(template_row)
 
     # Comment
     comment_row = QHBoxLayout()
@@ -529,13 +530,13 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     comment_edit.setPlaceholderText("Optional job comment")
     comment_row.addWidget(QLabel("Job Comment:    "))
     comment_row.addWidget(comment_edit, 1)
-    lay.addLayout(comment_row)
+    gl.addLayout(comment_row)
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("CONNECTION"))
-
+    g, gl = group("Connection")
     status_lbl = QLabel("Connection status: Not tested")
     status_lbl.setStyleSheet(f"color: {win._palette.text_faint}; font-size: 11px; font-weight: bold;")
-    lay.addWidget(status_lbl)
+    gl.addWidget(status_lbl)
 
     # Buttons Row
     diag_btn_layout = QHBoxLayout()
@@ -544,19 +545,21 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     diag_btn_layout.addWidget(test_conn_btn)
     diag_btn_layout.addWidget(export_files_btn)
     diag_btn_layout.addStretch()
-    lay.addLayout(diag_btn_layout)
+    gl.addLayout(diag_btn_layout)
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Diagnostics ──────────────────────────────────────────────────
     lay = _tab("Diagnostics")
-    lay.addWidget(section_title("BUNDLED TOOLS"))
+    g, gl = group("Bundled tools")
     ff_lbl = QLabel(f"ffmpeg:   {find_ffmpeg_tool('ffmpeg') or 'not found'}\n"
                     f"ffprobe:  {_find_ffprobe() or 'not found'}")
     ff_lbl.setStyleSheet(f"color:{win._palette.text_muted}; font-size:11px;")
     ff_lbl.setWordWrap(True)
-    lay.addWidget(ff_lbl)
+    gl.addWidget(ff_lbl)
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("FILES & LOGS"))
+    g, gl = group("Files & logs")
     data_dir = PROFILE_PATH.parent
     data_row = QHBoxLayout()
     data_row.addWidget(QLabel("App data folder:"))
@@ -566,7 +569,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     open_data_btn = QPushButton("Open")
     open_data_btn.clicked.connect(lambda: _open_path(data_dir))
     data_row.addWidget(open_data_btn)
-    lay.addLayout(data_row)
+    gl.addLayout(data_row)
     diag_tools = QHBoxLayout()
     open_log_btn = QPushButton("Open Logs Folder")
     open_log_btn.clicked.connect(lambda: _open_path(LOG_PATH.parent))
@@ -575,7 +578,8 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     diag_tools.addWidget(open_log_btn)
     diag_tools.addWidget(copy_diag_btn)
     diag_tools.addStretch()
-    lay.addLayout(diag_tools)
+    gl.addLayout(diag_tools)
+    lay.addWidget(g)
     lay.addStretch()
 
     # Dialog buttons live below the tabs.
