@@ -16,18 +16,6 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-class _NoBox:
-    """Stand-in for QMessageBox so an info/question modal can't block the
-    offscreen test run (a real .exec() there has no one to dismiss it)."""
-    @staticmethod
-    def information(*a, **k):
-        return None
-
-    @staticmethod
-    def question(*a, **k):
-        return None
-
-
 def _window(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
@@ -35,7 +23,11 @@ def _window(tmp_path, monkeypatch):
     monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
     monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")
     monkeypatch.setattr(app_qt, "LOG_PATH", tmp_path / "l.txt")
-    monkeypatch.setattr("app_window.queue_mixin.QMessageBox", _NoBox)
+    # queue_mixin now shows the app-styled ui_dialogs helpers (not QMessageBox);
+    # stub them so an offscreen modal can't block the run (confirm → proceed).
+    monkeypatch.setattr("app_window.queue_mixin.inform", lambda *a, **k: None)
+    monkeypatch.setattr("app_window.queue_mixin.warn", lambda *a, **k: None)
+    monkeypatch.setattr("app_window.queue_mixin.confirm", lambda *a, **k: True)
     w = app_qt.BlenderVideoMapperQt()
     w._blender_path = ""                       # no `blender --version` subprocess
     monkeypatch.setattr(w, "_request_auto_preview", lambda *a, **k: None)
