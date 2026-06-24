@@ -29,6 +29,13 @@ from dataclasses import field as dc_field
 # slugified to a safe regex group name internally.
 _TOKEN_RE = re.compile(r"\{\s*([A-Za-z][A-Za-z0-9 _]*?)\s*(#?)\s*(\??)\s*\}")
 
+# What a text (non-number) field matches: letters, digits and hyphens, so
+# real-world codes like "TC-MASTER", "War-Treaty" or "Day-1-Pre" are captured as
+# one field. Hyphen is last in the class so it's a literal, not a range. Fields
+# are still bounded by the pattern's literal separators (usually "_"), and the
+# regex backtracks correctly even when a hyphen is itself used as a separator.
+_TEXT_FIELD_CLASS = r"[A-Za-z0-9-]+"
+
 
 class PatternError(ValueError):
     """A filename pattern that can't be compiled, with a human-readable reason."""
@@ -121,7 +128,7 @@ def compile_pattern(pattern: str) -> CompiledPattern:
                   group=_slug_group(name, used_groups))
         fields.append(f)
         segments.append(("tok", f))
-        cls = r"\d+" if is_number else r"[A-Za-z0-9]+"
+        cls = r"\d+" if is_number else _TEXT_FIELD_CLASS
         piece = f"(?P<{f.group}>{cls})"
         regex_parts.append(f"(?:{piece})?" if optional else piece)
         pos = m.end()
@@ -184,7 +191,7 @@ def preview(pattern: str, sample: str) -> PreviewResult:
             assert isinstance(val, str)
             return re.escape(val)
         assert isinstance(val, Field)
-        cls = r"\d+" if val.is_number else r"[A-Za-z0-9]+"
+        cls = r"\d+" if val.is_number else _TEXT_FIELD_CLASS
         piece = f"(?:{cls})"
         return f"{piece}?" if val.optional else piece
 

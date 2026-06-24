@@ -44,6 +44,23 @@ def test_default_pattern_matches_legacy_regex_fields():
     assert int(legacy.group("version")) == parsed["Version"]
 
 
+def test_text_fields_capture_hyphens():
+    # Real-world codes contain hyphens (TC-MASTER, War-Treaty, Day-1-Pre); a text
+    # field captures them whole, still bounded by the '_' separators.
+    p = compile_pattern("{ID#}_D{Day#}_{Section}_{Cue}_{Screen}_v{Version#}")
+    assert p.parse("80230_D2_War-Treaty_MusicH_TC-MASTER_v001") == {
+        "ID": 80230, "Day": 2, "Section": "War-Treaty",
+        "Cue": "MusicH", "Screen": "TC-MASTER", "Version": 1,
+    }
+    assert p.parse("50800_D1_Day-1-Pre_Matte-TransA_DJBS_v001")["Section"] == "Day-1-Pre"
+
+
+def test_hyphen_as_separator_still_resolves():
+    # A literal hyphen separator still parses (the matcher backtracks even though
+    # text fields may now contain hyphens).
+    assert compile_pattern("{Code}-{Num#}").parse("ABC-12") == {"Code": "ABC", "Num": 12}
+
+
 def test_number_fields_are_ints_and_strip_leading_zeros():
     parsed = compile_pattern("{Project}_D{Day#}").parse("Foo_D007")
     assert parsed == {"Project": "Foo", "Day": 7}
