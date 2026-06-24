@@ -343,6 +343,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._deliver_dir = ""           # blank = no post-render delivery copy
         self._asset_grouping = AssetGroupingConfig()   # filename-convention previz assembly
         self._asset_group_jobs: dict = {}   # (setup, asset) → job id, for grouped-watch dedup
+        self._watch_first_run_seen = False   # one-time intro banner in the Watch panel
         self._restore_session_on_launch = False   # False = open clean; True = reopen last scene+queue
         self._last_session: dict = {}      # snapshot of the previous session, for Reopen Last Session
         self._material_aspects: dict = {}   # material → screen aspect (from discovery)
@@ -1226,7 +1227,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # workflow. Kept out of the layout presets, parked on the right and
         # hidden until the user toggles it on from the View menu.
         self.watch_panel = WatchPanel()
-        self.watch_dock = self._mk_dock("Watch / Ingest", "WatchDock", self.watch_panel)
+        self.watch_dock = self._mk_dock("Watch & Auto-render", "WatchDock", self.watch_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.watch_dock)
         self.watch_dock.hide()
 
@@ -1251,8 +1252,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         self.watch_panel.choose_folder_requested.connect(self._pick_watch_folder)
         self.watch_panel.watch_toggled.connect(self._toggle_watch_from_panel)
-        self.watch_panel.configure_requested.connect(lambda: self._show_properties_dialog("Watch"))
-        self._refresh_watch_panel()
+        self.watch_panel.config_changed.connect(self._apply_watch_panel)
+        self.watch_panel.pick_output_dir_requested.connect(self._pick_watch_output_dir)
+        self.watch_panel.first_run_dismissed.connect(self._on_watch_first_run_dismissed)
+        self._load_watch_panel()
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
@@ -2157,6 +2160,66 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         folder, enabled = self.scene_panel.get_watch_folder()
         self.watch_panel.set_folder_state(folder, enabled)
         self.watch_panel.set_mode(self._asset_grouping.enabled)
+
+    def _load_watch_panel(self) -> None:
+        """Populate the Watch panel from the current config (folder + grouping +
+        auto-render + file-stability). The panel suppresses signals while loading."""
+        if not hasattr(self, "watch_panel"):
+            return
+        ag = self._asset_grouping
+        folder, enabled = self.scene_panel.get_watch_folder()
+        _interval, settle = self.scene_panel.get_watch_options()
+        self.watch_panel.set_folder_state(folder, enabled)
+        self.watch_panel.load_config(
+            grouping_enabled=ag.enabled,
+            pattern=ag.pattern,
+            content_type=ag.content_type,
+            output_template=ag.output_template,
+            autorender_pattern=self._autorender_pattern,
+            screen_to_material=dict(ag.screen_to_material),
+            setup_to_scene=dict(ag.setup_to_scene),
+            settle_s=settle,
+            autorender_start=self._autorender_start,
+            output_dir=self._autorender_output,
+        )
+        # First-run banner: only until acknowledged, and only before any folder is set.
+        seen = getattr(self, "_watch_first_run_seen", False)
+        self.watch_panel.show_first_run(not seen and not folder)
+
+    def _apply_watch_panel(self) -> None:
+        """Write the Watch panel's settings back onto the live config + engine and
+        persist. Connected to the panel's ``config_changed`` (fires on any edit)."""
+        if not hasattr(self, "watch_panel"):
+            return
+        c = self.watch_panel.get_config()
+        ag = self._asset_grouping
+        ag.enabled = bool(c["grouping_enabled"])
+        ag.pattern = c["pattern"] or ag.pattern
+        ag.content_type = c["content_type"]
+        ag.output_template = c["output_template"] or ag.output_template
+        ag.screen_to_material = dict(c["screen_to_material"])
+        ag.setup_to_scene = dict(c["setup_to_scene"])
+        self._autorender_pattern = c["autorender_pattern"] or self._autorender_pattern
+        self._autorender_output = c["output_dir"]
+        self._autorender_start = bool(c["autorender_start"])
+        # In auto-map mode the checkbox also gates whether dropped clips render at
+        # all; in previz mode jobs are always built, so it only gates auto-start.
+        if not ag.enabled:
+            self._autorender_enabled = bool(c["autorender_start"])
+        interval_ms, _settle = self.scene_panel.get_watch_options()
+        self.scene_panel.set_watch_options(interval_ms, float(c["settle_s"]))
+        self.scene_panel.set_grouping_mode(ag.enabled)
+        self._save_profile()
+
+    def _pick_watch_output_dir(self) -> None:
+        cur = self._autorender_output or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Choose render output folder", cur)
+        if d:
+            self.watch_panel.out_dir_edit.setText(d)   # triggers config_changed → apply
+
+    def _on_watch_first_run_dismissed(self) -> None:
+        self._watch_first_run_seen = True
+        self._save_profile()
 
     def _pick_watch_folder(self) -> None:
         folder, _en = self.scene_panel.get_watch_folder()
@@ -3875,6 +3938,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             "autorender_pattern": self._autorender_pattern,
             "deliver_dir": self._deliver_dir,
             "asset_grouping": self._asset_grouping.to_dict(),
+            "watch_first_run_seen": self._watch_first_run_seen,
             "restore_session_on_launch": self._restore_session_on_launch,
             "render_targets": self.scene_panel.get_targets(),
             "custom_layout": self._custom_layout_state,
@@ -4150,6 +4214,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
         self._deliver_dir = str(d.get("deliver_dir", "") or "")
         self._asset_grouping = AssetGroupingConfig.from_dict(d.get("asset_grouping"))
+        self._watch_first_run_seen = bool(d.get("watch_first_run_seen", False))
         self._sync_grouping_mode()
         tg = d.get("render_targets", [])
         if isinstance(tg, list):
@@ -4157,6 +4222,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
+        self._load_watch_panel()   # reflect the loaded watch/auto-render config
 
         cam = d.get("camera", "")
         if cam:
