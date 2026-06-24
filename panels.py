@@ -3475,3 +3475,118 @@ class PreviewPanel(QWidget):
         self.mute_btn.setText("Unmute" if muted else "Mute")
 
 
+class WatchPanel(QWidget):
+    """Live view + controls for the watch-folder / auto-ingest workflow.
+
+    A thin *view* over ScenePanel's watch engine — that panel owns the folder,
+    the poll timer and emits the activity; this one just drives it (choose
+    folder, start/stop) and shows what's happening (an ingest activity feed).
+    Hidden by default; toggled from the View menu for the occasional ingest run.
+    """
+    choose_folder_requested = Signal()
+    watch_toggled = Signal(bool)        # user pressed Start / Stop
+    configure_requested = Signal()      # open Properties → Watch & Auto-render
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._suppress = False           # guard set_* from re-emitting toggled
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
+
+        # Folder + Start/Stop.
+        folder_row = QHBoxLayout()
+        folder_row.setSpacing(6)
+        self.watch_toggle = QPushButton("Start")
+        self.watch_toggle.setObjectName("PrimaryButton")
+        self.watch_toggle.setCheckable(True)
+        self.watch_toggle.setMinimumWidth(96)
+        self.watch_toggle.setToolTip("Start / stop watching the folder for new clips")
+        self.watch_toggle.toggled.connect(self._on_toggle)
+        self.folder_label = QLabel("No watch folder")
+        self.folder_label.setObjectName("FieldLabel")
+        choose_btn = QPushButton("Choose…")
+        choose_btn.setToolTip("Pick the folder to watch")
+        choose_btn.clicked.connect(self.choose_folder_requested.emit)
+        folder_row.addWidget(self.watch_toggle)
+        folder_row.addWidget(self.folder_label, 1)
+        folder_row.addWidget(choose_btn)
+        lay.addLayout(folder_row)
+
+        # Mode + Configure.
+        mode_row = QHBoxLayout()
+        self.mode_label = QLabel("Mode: Auto-map onto current scene")
+        self.mode_label.setStyleSheet(f"color:{active_palette().text_muted}; font-size:11px;")
+        cfg_btn = QPushButton("Configure…")
+        cfg_btn.setToolTip("Open Watch & Auto-render settings")
+        cfg_btn.clicked.connect(self.configure_requested.emit)
+        mode_row.addWidget(self.mode_label, 1)
+        mode_row.addWidget(cfg_btn)
+        lay.addLayout(mode_row)
+
+        # Activity feed (newest first).
+        self.activity = HintTableWidget(
+            0, 3,
+            "Ingest activity appears here.\n\nChoose a folder and press Start — dropped clips "
+            "import, version-update and queue automatically.")
+        self.activity.setHorizontalHeaderLabels(["Time", "Event", "Detail"])
+        self.activity.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.activity.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.activity.verticalHeader().setVisible(False)
+        self.activity.setColumnWidth(0, 76)
+        self.activity.setColumnWidth(1, 92)
+        self.activity.horizontalHeader().setStretchLastSection(True)
+        self.activity.setAlternatingRowColors(True)
+        lay.addWidget(self.activity, 1)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self.clear_activity)
+        bottom.addWidget(clear_btn)
+        lay.addLayout(bottom)
+
+    def restyle(self, pal: T.Palette) -> None:
+        self.mode_label.setStyleSheet(f"color:{pal.text_muted}; font-size:11px;")
+
+    def _on_toggle(self, on: bool) -> None:
+        if self._suppress:
+            return
+        self.watch_toggle.setText("Watching" if on else "Start")
+        self.watch_toggled.emit(on)
+
+    def set_folder_state(self, folder: str, enabled: bool) -> None:
+        """Reflect the engine's folder + watching state (no signal re-emit)."""
+        self._suppress = True
+        try:
+            self.folder_label.setText(Path(folder).name if folder else "No watch folder")
+            self.folder_label.setToolTip(folder or "Choose a folder to watch")
+            on = bool(enabled and folder)
+            self.watch_toggle.setChecked(on)
+            self.watch_toggle.setText("Watching" if on else "Start")
+        finally:
+            self._suppress = False
+
+    def set_mode(self, grouping_on: bool) -> None:
+        self.mode_label.setText(
+            "Mode: Previz assembly (group by filename)" if grouping_on
+            else "Mode: Auto-map onto current scene")
+
+    def add_activity(self, event: str, detail: str) -> None:
+        self.activity.insertRow(0)
+        cells = (time.strftime("%H:%M:%S"), event, detail)
+        for col, text in enumerate(cells):
+            item = QTableWidgetItem(text)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if col == 2:
+                item.setToolTip(detail)
+            self.activity.setItem(0, col, item)
+        # Cap history so a long-running watch doesn't grow unbounded.
+        while self.activity.rowCount() > 200:
+            self.activity.removeRow(self.activity.rowCount() - 1)
+
+    def clear_activity(self) -> None:
+        self.activity.setRowCount(0)
+
+
+
