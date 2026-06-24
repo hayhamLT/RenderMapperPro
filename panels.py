@@ -3503,10 +3503,15 @@ class WatchPanel(QWidget):
     config_changed = Signal()               # any non-folder setting was edited
     first_run_dismissed = Signal()          # the intro banner was acknowledged
     pick_output_dir_requested = Signal()    # browse for the render output folder
+    pick_deliver_dir_requested = Signal()   # browse for the delivery copy folder
+    preview_requested = Signal()            # previz dry-run preview
 
     # Friendly label → file-stability seconds (the debounce window before ingest).
     _SETTLE_OPTS: tuple[tuple[str, float], ...] = (
         ("1 s", 1.0), ("2 s", 2.0), ("3 s", 3.0), ("5 s", 5.0), ("10 s", 10.0))
+    # Friendly label → poll cadence seconds (backstop; FS events catch local drops).
+    _POLL_OPTS: tuple[tuple[str, float], ...] = (
+        ("2 s", 2.0), ("3 s", 3.0), ("5 s", 5.0), ("10 s", 10.0), ("20 s", 20.0))
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3621,6 +3626,20 @@ class WatchPanel(QWidget):
         hint.setObjectName("HintLabel")
         srow.addWidget(hint, 1)
         v.addLayout(srow)
+        prow = QHBoxLayout()
+        prow.setSpacing(6)
+        prow.addWidget(QLabel("Re-scan every"))
+        self.poll_combo = QComboBox()
+        self.poll_combo.addItems([lbl for lbl, _ in self._POLL_OPTS])
+        self.poll_combo.setFixedWidth(72)
+        self.poll_combo.setToolTip("Backstop poll cadence — local drops are caught instantly by "
+                                   "filesystem events, so this only matters on network shares")
+        self.poll_combo.currentIndexChanged.connect(lambda *_: self._emit_changed())
+        prow.addWidget(self.poll_combo)
+        ph = QLabel("(filesystem events catch local drops instantly)")
+        ph.setObjectName("HintLabel")
+        prow.addWidget(ph, 1)
+        v.addLayout(prow)
         return f
 
     def _build_mode_card(self) -> QFrame:
@@ -3679,6 +3698,14 @@ class WatchPanel(QWidget):
         self.setup_table = PairTableEditor("Setup #", "Scene", numeric_from=True)
         self.setup_table.changed.connect(self._emit_changed)
         v.addWidget(self.setup_table)
+        prow = QHBoxLayout()
+        prow.addStretch()
+        prev_btn = QPushButton("Preview (dry run)…")
+        prev_btn.setObjectName("SmallButton")
+        prev_btn.setToolTip("Show exactly what would be built from the watch folder's current clips")
+        prev_btn.clicked.connect(self.preview_requested.emit)
+        prow.addWidget(prev_btn)
+        v.addLayout(prow)
         return f
 
     def _build_output_card(self) -> QFrame:
@@ -3709,6 +3736,20 @@ class WatchPanel(QWidget):
                                      "(and queue), so you can review before rendering.")
         self.autostart_cb.stateChanged.connect(lambda *_: self._emit_changed())
         v.addWidget(self.autostart_cb)
+        delrow = QHBoxLayout()
+        delrow.setSpacing(6)
+        delrow.addWidget(QLabel("Deliver to"))
+        self.deliver_edit = QLineEdit()
+        self.deliver_edit.setPlaceholderText("(optional) also copy finished renders here")
+        self.deliver_edit.setToolTip("After a render finishes, copy its output(s) into this folder "
+                                     "too — e.g. a synced review folder. Blank = off.")
+        self.deliver_edit.textChanged.connect(lambda *_: self._emit_changed())
+        delbrowse = QPushButton("…")
+        delbrowse.setFixedWidth(32)
+        delbrowse.clicked.connect(self.pick_deliver_dir_requested.emit)
+        delrow.addWidget(self.deliver_edit, 1)
+        delrow.addWidget(delbrowse)
+        v.addLayout(delrow)
         return f
 
     def _build_activity_card(self) -> QFrame:
@@ -3832,7 +3873,8 @@ class WatchPanel(QWidget):
     def load_config(self, *, grouping_enabled: bool, pattern: str, content_type: str,
                     output_template: str, autorender_pattern: str,
                     screen_to_material: dict, setup_to_scene: dict,
-                    settle_s: float, autorender_start: bool, output_dir: str) -> None:
+                    settle_s: float, poll_interval_s: float, autorender_start: bool,
+                    output_dir: str, deliver_dir: str) -> None:
         """Populate every control from the persisted config without emitting."""
         self._suppress = True
         try:
@@ -3845,14 +3887,18 @@ class WatchPanel(QWidget):
             self.screen_table.set_pairs(screen_to_material)
             self.setup_table.set_pairs(setup_to_scene)
             self.out_dir_edit.setText(output_dir)
+            self.deliver_edit.setText(deliver_dir)
             self.autostart_cb.setChecked(bool(autorender_start))
-            idx = min(range(len(self._SETTLE_OPTS)),
-                      key=lambda i: abs(self._SETTLE_OPTS[i][1] - float(settle_s)))
-            self.settle_combo.setCurrentIndex(idx)
+            self.settle_combo.setCurrentIndex(self._nearest(self._SETTLE_OPTS, settle_s))
+            self.poll_combo.setCurrentIndex(self._nearest(self._POLL_OPTS, poll_interval_s))
         finally:
             self._suppress = False
         self._refresh_mode_ui()
         self._update_preview()
+
+    @staticmethod
+    def _nearest(opts: tuple[tuple[str, float], ...], value: float) -> int:
+        return min(range(len(opts)), key=lambda i: abs(opts[i][1] - float(value)))
 
     def get_config(self) -> dict:
         """Read every control into a flat dict the window maps onto its config."""
@@ -3865,6 +3911,8 @@ class WatchPanel(QWidget):
             "screen_to_material": self.screen_table.get_pairs(),
             "setup_to_scene": self.setup_table.get_pairs(),
             "settle_s": self._SETTLE_OPTS[self.settle_combo.currentIndex()][1],
+            "poll_interval_s": self._POLL_OPTS[self.poll_combo.currentIndex()][1],
+            "deliver_dir": self.deliver_edit.text().strip(),
             "autorender_start": self.autostart_cb.isChecked(),
             "output_dir": self.out_dir_edit.text().strip(),
         }

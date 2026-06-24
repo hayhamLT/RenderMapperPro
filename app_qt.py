@@ -1254,6 +1254,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.watch_panel.watch_toggled.connect(self._toggle_watch_from_panel)
         self.watch_panel.config_changed.connect(self._apply_watch_panel)
         self.watch_panel.pick_output_dir_requested.connect(self._pick_watch_output_dir)
+        self.watch_panel.pick_deliver_dir_requested.connect(self._pick_watch_deliver_dir)
+        self.watch_panel.preview_requested.connect(self._preview_watch_assembly)
         self.watch_panel.first_run_dismissed.connect(self._on_watch_first_run_dismissed)
         self._load_watch_panel()
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
@@ -2168,7 +2170,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             return
         ag = self._asset_grouping
         folder, enabled = self.scene_panel.get_watch_folder()
-        _interval, settle = self.scene_panel.get_watch_options()
+        interval_ms, settle = self.scene_panel.get_watch_options()
         self.watch_panel.set_folder_state(folder, enabled)
         self.watch_panel.load_config(
             grouping_enabled=ag.enabled,
@@ -2179,8 +2181,10 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             screen_to_material=dict(ag.screen_to_material),
             setup_to_scene=dict(ag.setup_to_scene),
             settle_s=settle,
+            poll_interval_s=interval_ms / 1000.0,
             autorender_start=self._autorender_start,
             output_dir=self._autorender_output,
+            deliver_dir=self._deliver_dir,
         )
         # First-run banner: only until acknowledged, and only before any folder is set.
         seen = getattr(self, "_watch_first_run_seen", False)
@@ -2202,12 +2206,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._autorender_pattern = c["autorender_pattern"] or self._autorender_pattern
         self._autorender_output = c["output_dir"]
         self._autorender_start = bool(c["autorender_start"])
+        self._deliver_dir = c["deliver_dir"]
         # In auto-map mode the checkbox also gates whether dropped clips render at
         # all; in previz mode jobs are always built, so it only gates auto-start.
         if not ag.enabled:
             self._autorender_enabled = bool(c["autorender_start"])
-        interval_ms, _settle = self.scene_panel.get_watch_options()
-        self.scene_panel.set_watch_options(interval_ms, float(c["settle_s"]))
+        self.scene_panel.set_watch_options(int(max(1.0, float(c["poll_interval_s"])) * 1000),
+                                           float(c["settle_s"]))
         self.scene_panel.set_grouping_mode(ag.enabled)
         self._save_profile()
 
@@ -2216,6 +2221,23 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         d = QFileDialog.getExistingDirectory(self, "Choose render output folder", cur)
         if d:
             self.watch_panel.out_dir_edit.setText(d)   # triggers config_changed → apply
+
+    def _pick_watch_deliver_dir(self) -> None:
+        cur = self._deliver_dir or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Choose delivery folder", cur)
+        if d:
+            self.watch_panel.deliver_edit.setText(d)   # triggers config_changed → apply
+
+    def _preview_watch_assembly(self) -> None:
+        """Dry-run the previz grouping from the panel's current config."""
+        self._apply_watch_panel()        # make sure _asset_grouping reflects the panel
+        self._preview_assembly(self._asset_grouping)
+
+    def _open_watch_render_panel(self) -> None:
+        """Reveal + focus the Watch & Auto-render dock (the editable home)."""
+        self.watch_dock.show()
+        self.watch_dock.raise_()
+        self.watch_panel.setFocus()
 
     def _on_watch_first_run_dismissed(self) -> None:
         self._watch_first_run_seen = True

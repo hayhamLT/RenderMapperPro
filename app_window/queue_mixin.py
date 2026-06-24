@@ -61,12 +61,15 @@ class QueueMixin(_WindowMembers):
         # A hand-typed name always wins and is never auto-overwritten.
         if getattr(job, "custom_label", False) and (job.label or "").strip():
             return job.label
-        for raw in ((job.output_input or "").strip(), (job.output_path or "").strip()):
+        # Show the *resolved* output filename, not the raw token template — so the
+        # queue reads "Sunset_clipA_1920x1080.mp4", not "{scene}_{clip}_{res}.mp4".
+        # Prefer output_path (already token-expanded); fall back to output_input but
+        # skip it while it still contains unresolved "{tokens}".
+        for raw in ((job.output_path or "").strip(), (job.output_input or "").strip()):
             if not raw:
                 continue
-            p = Path(raw).expanduser()
-            name = p.name.strip()
-            if name:
+            name = Path(raw).expanduser().name.strip()
+            if name and "{" not in name:
                 return name
         # Auto label: tag with the camera so duplicated variations of the same
         # scene are distinguishable at a glance.
@@ -529,6 +532,12 @@ class QueueMixin(_WindowMembers):
                 )
             except Exception:
                 j.output_path = ""
+            # Now that the path is resolved, refresh an auto-derived label so the
+            # queue's Job column shows the real filename instead of the template.
+            if not getattr(j, "custom_label", False):
+                name = Path(j.output_path).name if j.output_path else ""
+                if name and "{" not in name:
+                    j.label = name
 
     @staticmethod
     def _job_has_mapping(job: RenderJob) -> bool:
