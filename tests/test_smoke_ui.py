@@ -103,8 +103,9 @@ def test_first_run_welcome_suppressed_when_headless(tmp_path, monkeypatch):
     platform. A blocking .exec() there has no one to dismiss it and hung the
     headless CI smoke job for ~10 min (then failed) on most releases."""
     from PySide6.QtWidgets import QApplication, QMessageBox
-    app = QApplication.instance() or QApplication([])
-    assert app.platformName() == "offscreen"
+    QApplication.instance() or QApplication([])
+    # (class access: .instance() is typed QCoreApplication, no platformName)
+    assert QApplication.platformName() == "offscreen"
     import app_qt
     monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
     monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")
