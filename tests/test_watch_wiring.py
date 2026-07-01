@@ -125,7 +125,7 @@ def test_crash_offer_headless_noop_and_windowed_ack(tmp_path, monkeypatch):
     assert crash.pending_reports(crash_dir) == [report]
 
     # Windowed: the dialog is offered once, then everything is acknowledged.
-    asked = {}
+    asked: dict[str, str] = {}
     monkeypatch.setattr(w, "_is_headless", lambda: False)
     monkeypatch.setattr(app_qt, "ask",
                         lambda *a, **k: asked.setdefault("title", a[1]) and "dismiss")
