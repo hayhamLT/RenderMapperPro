@@ -9,11 +9,11 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtGui import QKeyEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import QApplication
 
-from ui_dialogs import MessageDialog  # noqa: E402
+from ui_dialogs import MessageDialog
 
 app = QApplication.instance() or QApplication([])
 
