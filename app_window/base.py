@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from PySide6.QtCore import QThread, SignalInstance
     from PySide6.QtGui import QAction
-    from PySide6.QtWidgets import QDialog, QLabel
+    from PySide6.QtWidgets import QDialog, QDockWidget, QLabel
 
     # For typing, mixins ARE a QWidget (the concrete window is a QMainWindow), so
     # `QMessageBox(self, …)` type-checks. At runtime the base is plain ``object``
@@ -25,8 +25,16 @@ if TYPE_CHECKING:
     # as a base class.
     from PySide6.QtWidgets import QWidget as _Base
 
+    from core.asset_grouping import GroupingConfig
     from core.models import RenderJob
-    from panels import DeadlinePanel, PresetBrowserPanel, QueuePanel, RenderPanel, ScenePanel
+    from panels import (
+        DeadlinePanel,
+        PresetBrowserPanel,
+        QueuePanel,
+        RenderPanel,
+        ScenePanel,
+        WatchPanel,
+    )
     from theme import Palette
     from workers import DeadlineQueryThread, FuncThread
 else:
@@ -70,6 +78,19 @@ class _WindowMembers(_Base):
         _last_html_report_path: str
         _open_report_action: QAction
         _open_html_action: QAction
+        # ── Watch & auto-render (WatchMixin) ───────────────────────────────
+        _asset_grouping: GroupingConfig
+        _asset_group_jobs: dict[tuple[int, int], tuple[int, int]]
+        _pending_autorender_ids: set[int]
+        _autorender_enabled: bool
+        _autorender_pattern: str
+        _autorender_output: str
+        _autorender_start: bool
+        _deliver_dir: str
+        _watch_first_run_seen: bool
+        _discovered_materials: list[str]
+        watch_panel: WatchPanel
+        watch_dock: QDockWidget
         scene_panel: ScenePanel
         render_panel: RenderPanel
         deadline_panel: DeadlinePanel
@@ -90,6 +111,8 @@ class _WindowMembers(_Base):
         def _push_undo(self, desc: str, restore) -> None: ...
         def _update_status_bar(self) -> None: ...
         def _update_progress_caption(self) -> None: ...
+        def _make_job_snapshot(self, job: RenderJob, assignments: list) -> None: ...
+        def _start_render(self, render_all: bool = ..., only_job_ids: set | None = ...) -> None: ...
         def _unsaved_floating_changes(self) -> bool: ...
         def _effective_chunk_size(self, job: RenderJob) -> int: ...
         def _fmt_dur(self, seconds: float) -> str: ...               # window (ReportMixin uses)
