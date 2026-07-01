@@ -16,17 +16,19 @@ if TYPE_CHECKING:
 
     from PySide6.QtCore import QThread, SignalInstance
     from PySide6.QtGui import QAction
-    from PySide6.QtWidgets import QDialog, QLabel, QWidget
+    from PySide6.QtWidgets import QDialog, QLabel
+
+    # For typing, mixins ARE a QWidget (the concrete window is a QMainWindow), so
+    # `QMessageBox(self, …)` type-checks. At runtime the base is plain ``object``
+    # — no second QWidget in the MRO — and the real window supplies QMainWindow.
+    # Imported under the alias (not assigned) so every mypy version accepts it
+    # as a base class.
+    from PySide6.QtWidgets import QWidget as _Base
 
     from core.models import RenderJob
     from panels import DeadlinePanel, PresetBrowserPanel, QueuePanel, RenderPanel, ScenePanel
     from theme import Palette
     from workers import DeadlineQueryThread, FuncThread
-
-    # For typing, mixins ARE a QWidget (the concrete window is a QMainWindow), so
-    # `QMessageBox(self, …)` type-checks. At runtime the base is plain ``object``
-    # — no second QWidget in the MRO — and the real window supplies QMainWindow.
-    _Base = QWidget
 else:
     _Base = object
 

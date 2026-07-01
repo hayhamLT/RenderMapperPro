@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import cast
 
 from core.utils import (
     atomic_write_text,
@@ -78,26 +79,32 @@ class _FakeStat:
             self.st_file_attributes = attrs
 
 
+def _fake_stat(**kw) -> os.stat_result:
+    # Duck-typed stand-in: is_cloud_placeholder only reads st_size/st_blocks/
+    # st_file_attributes, so a cast keeps the call sites honestly typed.
+    return cast(os.stat_result, _FakeStat(**kw))
+
+
 def test_cloud_placeholder_local_file_is_not_flagged():
     # Fully-allocated file: blocks cover the size → local, ingest it.
-    st = _FakeStat(size=1_000_000, blocks=2048)   # 2048*512 = ~1MB
+    st = _fake_stat(size=1_000_000, blocks=2048)   # 2048*512 = ~1MB
     assert is_cloud_placeholder("x.mp4", st) is False
 
 
 def test_cloud_placeholder_dataless_unix_is_flagged():
     # Logical size present but almost no blocks on disk → online-only placeholder.
-    st = _FakeStat(size=1_000_000, blocks=0)
+    st = _fake_stat(size=1_000_000, blocks=0)
     assert is_cloud_placeholder("x.mp4", st) is True
 
 
 def test_cloud_placeholder_windows_offline_attr_is_flagged():
     # Windows OneDrive/Dropbox OFFLINE attribute (0x1000), blocks irrelevant.
-    st = _FakeStat(size=1_000_000, blocks=2048, attrs=0x1000)
+    st = _fake_stat(size=1_000_000, blocks=2048, attrs=0x1000)
     assert is_cloud_placeholder("x.mp4", st) is True
 
 
 def test_cloud_placeholder_empty_file_not_flagged():
-    st = _FakeStat(size=0, blocks=0)
+    st = _fake_stat(size=0, blocks=0)
     assert is_cloud_placeholder("x.mp4", st) is False
 
 

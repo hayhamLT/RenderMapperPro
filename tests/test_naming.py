@@ -52,7 +52,8 @@ def test_text_fields_capture_hyphens():
         "ID": 80230, "Day": 2, "Section": "War-Treaty",
         "Cue": "MusicH", "Screen": "TC-MASTER", "Version": 1,
     }
-    assert p.parse("50800_D1_Day-1-Pre_Matte-TransA_DJBS_v001")["Section"] == "Day-1-Pre"
+    parsed = p.parse("50800_D1_Day-1-Pre_Matte-TransA_DJBS_v001")
+    assert parsed is not None and parsed["Section"] == "Day-1-Pre"
 
 
 def test_hyphen_as_separator_still_resolves():
