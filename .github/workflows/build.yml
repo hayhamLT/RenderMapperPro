@@ -227,12 +227,24 @@ jobs:
               "RenderMapperPro-${{ matrix.label }}.zip"
             exit 0
           fi
-          # Submit the DMG; Apple validates every binary inside it.
+          # Submit the DMG; Apple validates every binary inside it. Parse the
+          # result ourselves: notarytool --wait can exit 0 on an "Invalid"
+          # verdict, and a bare stapler failure hides the actual reason.
           xcrun notarytool submit "RenderMapperPro-${{ matrix.label }}.dmg" \
             --apple-id "$NOTARIZATION_APPLE_ID" \
             --team-id "$NOTARIZATION_TEAM_ID" \
             --password "$NOTARIZATION_PWD" \
-            --wait
+            --wait --output-format json | tee notarize.json
+          status=$(python3 -c "import json;print(json.load(open('notarize.json'))['status'])")
+          sub_id=$(python3 -c "import json;print(json.load(open('notarize.json'))['id'])")
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::Notarization verdict: $status — fetching Apple's log"
+            xcrun notarytool log "$sub_id" \
+              --apple-id "$NOTARIZATION_APPLE_ID" \
+              --team-id "$NOTARIZATION_TEAM_ID" \
+              --password "$NOTARIZATION_PWD" || true
+            exit 1
+          fi
           # Staple the ticket to the DMG and to the .app (so the zip is clean too)
           xcrun stapler staple "RenderMapperPro-${{ matrix.label }}.dmg"
           xcrun stapler staple "dist/Render Mapper Pro.app"
@@ -241,6 +253,35 @@ jobs:
             "dist/Render Mapper Pro.app" \
             "RenderMapperPro-${{ matrix.label }}.zip"
           echo "Notarization and stapling complete"
+      # ── Windows code-signing (Authenticode) ────────────────────────────────
+      # Optional, mirroring the macOS pattern: set two repository secrets and
+      # the exe + installer get signed; leave them unset and the build stays
+      # unsigned (SmartScreen "More info → Run anyway").
+      #   WINDOWS_CERTIFICATE      base64-encoded code-signing .pfx
+      #                            export:  base64 -w0 cert.pfx
+      #   WINDOWS_CERTIFICATE_PWD  the .pfx password
+      # (Azure Trusted Signing is the modern cert-less alternative — swap this
+      # step for azure/trusted-signing-action if you go that route.)
+      - name: Sign app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PWD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Host "::warning::WINDOWS_CERTIFICATE not set - Windows build will be unsigned"
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing-cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PWD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "dist/Render Mapper Pro/Render Mapper Pro.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "App executable signed"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -251,6 +292,23 @@ jobs:
           $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
           Copy-Item "installer\Output\RenderMapperPro-Windows-x64-Setup.exe" .
+      - name: Sign installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PWD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing-cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PWD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "RenderMapperPro-Windows-x64-Setup.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "Installer signed"
       # Signed SLSA build-provenance for each shipped artifact (verifiable with
       # `gh attestation verify <file> --repo <owner>/<repo>`). Skipped on PRs
       # (this whole job is push/tag-only).
