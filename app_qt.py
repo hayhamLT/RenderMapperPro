@@ -82,7 +82,8 @@ from app_window.preset_mixin import PRESETS_DIR, PresetMixin
 from app_window.queue_mixin import QueueMixin
 from app_window.reporting_mixin import ReportMixin
 from app_window.runtime_mixin import RuntimeMixin
-from app_window.update_mixin import UpdateMixin
+from app_window.update_mixin import GITHUB_REPO, UpdateMixin
+from core import crash as crash_capture
 from core.asset_grouping import GroupingConfig as AssetGroupingConfig
 from core.asset_grouping import group_clips, parse_clip
 from core.jobs import disk_space_warnings, migrate_profile
@@ -157,6 +158,7 @@ HISTORY_PATH = Path.home() / ".blender_video_mapper" / "history.json"
 # Branded file extensions (JSON underneath) for user-facing Save/Open.
 PROJECT_EXT = ".rmproj"      # full project: scene, clips, mappings, queue
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
+CRASH_DIR = Path.home() / ".blender_video_mapper" / "crashes"
 APP_NAME = app_version.APP_NAME
 APP_VERSION: str = app_version.__version__  # single source of truth (see app_version.py)
 PROFILE_VERSION = 3
@@ -393,6 +395,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # turned the on-launch check off). A newer version pops the offer dialog.
         QTimer.singleShot(3000, self._launch_update_check)
         QTimer.singleShot(300, self._maybe_first_run)   # one-time welcome on first launch
+        QTimer.singleShot(900, self._offer_crash_reports)  # did the last run crash?
         # Size/position the window once it's shown: restore the user's last
         # adjustment if it's reasonable, otherwise default to 70% of the screen
         # centered.
@@ -4519,6 +4522,46 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # where platformName() lives.
         return isinstance(app, QGuiApplication) and app.platformName() == "offscreen"
 
+    def _offer_crash_reports(self) -> None:
+        """If the previous run crashed (native fault, or an exception the user
+        never saw), offer the report once: view it, or open a prefilled GitHub
+        issue. Nothing leaves the machine unless the user submits it."""
+        if self._is_headless():
+            return
+        try:
+            crash_capture.collect_faults(CRASH_DIR, version=APP_VERSION)
+            reports = crash_capture.pending_reports(CRASH_DIR)
+        except Exception:
+            _log.debug("crash-report sweep failed", exc_info=True)
+            return
+        if not reports:
+            return
+        report = reports[0]
+        detail = crash_capture.summarize(report)
+        extra = f" (+{len(reports) - 1} older)" if len(reports) > 1 else ""
+        clicked = ask(
+            self, f"{APP_NAME} crashed last time",
+            f"The previous session ended unexpectedly{extra}.\n\n"
+            + (f"{detail}\n\n" if detail else "")
+            + "You can look at the report, or open a prefilled GitHub issue — "
+              "nothing is sent unless you submit it yourself.",
+            kind="warning",
+            buttons=[("Dismiss", "dismiss", "neutral"),
+                     ("View Report", "view", "neutral"),
+                     ("Report on GitHub…", "report", "primary")],
+            default="dismiss",
+        )
+        if clicked == "view":
+            try:
+                reveal_in_file_manager(report)
+            except Exception:
+                _log.debug("could not reveal crash report", exc_info=True)
+        elif clicked == "report":
+            QDesktopServices.openUrl(QUrl(crash_capture.github_issue_url(
+                GITHUB_REPO, report, version=APP_VERSION)))
+        for r in reports:
+            crash_capture.acknowledge(r)
+
     def _maybe_first_run(self) -> None:
         """A one-time welcome on the very first launch: show what's detected and
         point new users at setup + Quick Start."""
@@ -4677,6 +4720,9 @@ def _install_crash_handler(window) -> None:
                 f.write(f"\n[{datetime.now().isoformat()}] UNHANDLED EXCEPTION\n{text}\n")
         except Exception:
             _log.warning("failed to write crash traceback to the log file", exc_info=True)
+        # Also keep a structured report: if the dialog below is shown, it's
+        # acknowledged right away; if the app dies first, next launch offers it.
+        report = crash_capture.write_crash_report(CRASH_DIR, text, version=APP_VERSION)
         if showing["active"]:
             return
         showing["active"] = True
@@ -4693,6 +4739,8 @@ def _install_crash_handler(window) -> None:
             box.addButton(QMessageBox.StandardButton.Close)
             box.exec()
             clicked = box.clickedButton()
+            if report is not None:            # surfaced live — don't re-offer next launch
+                crash_capture.acknowledge(report)
             if clicked is copy_btn:
                 QApplication.clipboard().setText(text)
             elif clicked is log_btn:
@@ -4723,6 +4771,11 @@ def run_qt_app() -> None:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("Toy Robot Media")
     app.setWindowIcon(_make_app_icon())
+
+    # Native-crash evidence: faulthandler writes a per-pid dump that a clean
+    # exit removes; a dump left behind means the next launch offers a report.
+    crash_capture.enable_fault_capture(CRASH_DIR)
+    app.aboutToQuit.connect(crash_capture.disable_fault_capture)
 
     # ── Single-instance guard ────────────────────────────────────────────
     # If another copy is already running, ask it to surface its window and
