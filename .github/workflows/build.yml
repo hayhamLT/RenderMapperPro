@@ -230,19 +230,27 @@ jobs:
           # Submit the DMG; Apple validates every binary inside it. Parse the
           # result ourselves: notarytool --wait can exit 0 on an "Invalid"
           # verdict, and a bare stapler failure hides the actual reason.
+          if [ -z "$NOTARIZATION_PWD" ]; then
+            echo "::error::NOTARIZATION_PWD is empty — create the repo secret with the app-specific password from account.apple.com"
+            exit 1
+          fi
           xcrun notarytool submit "RenderMapperPro-${{ matrix.label }}.dmg" \
             --apple-id "$NOTARIZATION_APPLE_ID" \
             --team-id "$NOTARIZATION_TEAM_ID" \
             --password "$NOTARIZATION_PWD" \
-            --wait --output-format json | tee notarize.json
-          status=$(python3 -c "import json;print(json.load(open('notarize.json'))['status'])")
-          sub_id=$(python3 -c "import json;print(json.load(open('notarize.json'))['id'])")
+            --wait --output-format json | tee notarize.json || true
+          # Parse defensively: on bad credentials notarytool emits a plain-text
+          # error, not JSON — surface a clean verdict either way.
+          status=$(python3 -c "import json;print(json.load(open('notarize.json')).get('status','Unknown'))" 2>/dev/null || echo Unknown)
+          sub_id=$(python3 -c "import json;print(json.load(open('notarize.json')).get('id',''))" 2>/dev/null || echo "")
           if [ "$status" != "Accepted" ]; then
-            echo "::error::Notarization verdict: $status — fetching Apple's log"
-            xcrun notarytool log "$sub_id" \
-              --apple-id "$NOTARIZATION_APPLE_ID" \
-              --team-id "$NOTARIZATION_TEAM_ID" \
-              --password "$NOTARIZATION_PWD" || true
+            echo "::error::Notarization verdict: ${status:-Unknown} (see notarytool output above — 401 means a bad Apple ID / app-specific password)"
+            if [ -n "$sub_id" ]; then
+              xcrun notarytool log "$sub_id" \
+                --apple-id "$NOTARIZATION_APPLE_ID" \
+                --team-id "$NOTARIZATION_TEAM_ID" \
+                --password "$NOTARIZATION_PWD" || true
+            fi
             exit 1
           fi
           # Staple the ticket to the DMG and to the .app (so the zip is clean too)
