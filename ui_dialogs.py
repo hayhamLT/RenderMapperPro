@@ -44,11 +44,19 @@ class MessageDialog(QDialog):
         self.setObjectName("MessageDialog")
         self._value = None
         self._drag_offset = None
+        self._buttons: list[QPushButton] = []
+        self._default_btn: QPushButton | None = None
         pal = active_palette()
 
         self.setModal(True)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Frameless = no visible title bar, but screen readers and window
+        # switchers still announce these.
+        self.setWindowTitle(title)
+        self.setAccessibleName(title)
+        if message:
+            self.setAccessibleDescription(message)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 18, 18, 18)   # breathing room for the shadow
@@ -88,6 +96,8 @@ class MessageDialog(QDialog):
             body = QLabel(message)
             body.setObjectName("DialogBody")
             body.setWordWrap(True)
+            # Error/report text should be copyable, like native message boxes.
+            body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             col.addWidget(body)
         col.addStretch(1)
         top.addLayout(col, 1)
@@ -104,10 +114,17 @@ class MessageDialog(QDialog):
             elif role == "danger":
                 btn.setObjectName("DangerButton")
             btn.setMinimumWidth(84)
+            btn.setAccessibleName(label)
             btn.clicked.connect(lambda _=False, v=value: self._choose(v))
             is_default = (value == default) if default is not None else (role in ("primary", "danger"))
             btn.setDefault(is_default)
-            btn.setAutoDefault(is_default)
+            # autoDefault on ALL buttons: Return activates the FOCUSED button
+            # (falling back to the default) — never a hidden destructive default
+            # while focus sits on Cancel.
+            btn.setAutoDefault(True)
+            self._buttons.append(btn)
+            if is_default:
+                self._default_btn = btn
             row.addWidget(btn)
         lay.addLayout(row)
 
@@ -124,9 +141,22 @@ class MessageDialog(QDialog):
         return self._value
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
             self._value = None
             self.reject()
+            return
+        # Arrow keys walk the button row, like native message boxes.
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_Right, Qt.Key.Key_Down) \
+                and self._buttons:
+            step = -1 if key in (Qt.Key.Key_Left, Qt.Key.Key_Up) else 1
+            focused = self.focusWidget()
+            try:
+                i = self._buttons.index(focused)  # type: ignore[arg-type]
+            except ValueError:
+                i = -step if step > 0 else 0      # enter the row from either end
+            self._buttons[(i + step) % len(self._buttons)].setFocus(
+                Qt.FocusReason.TabFocusReason)
             return
         super().keyPressEvent(event)
 
@@ -137,6 +167,11 @@ class MessageDialog(QDialog):
         if par is not None:
             center = par.window().frameGeometry().center()
             self.move(center - self.rect().center())
+        # Keyboard users start on the safe/default choice, not wherever tab
+        # order happens to land.
+        target = self._default_btn or (self._buttons[-1] if self._buttons else None)
+        if target is not None:
+            target.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     # Drag the frameless card around by pressing anywhere on it.
     def mousePressEvent(self, event):
