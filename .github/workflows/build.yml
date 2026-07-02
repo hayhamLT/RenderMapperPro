@@ -220,12 +220,18 @@ jobs:
       - name: Notarize and staple (macOS)
         if: runner.os == 'macOS'
         env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           NOTARIZATION_APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
           NOTARIZATION_TEAM_ID: ${{ secrets.NOTARIZATION_TEAM_ID }}
           NOTARIZATION_PWD: ${{ secrets.NOTARIZATION_PWD }}
         run: |
-          if [ -z "$NOTARIZATION_APPLE_ID" ]; then
-            echo "::warning::NOTARIZATION_APPLE_ID not set — skipping notarization"
+          # An unsigned app can never notarize — don't waste a round-trip to
+          # Apple when the signing secrets are absent/empty.
+          if [ -z "$NOTARIZATION_APPLE_ID" ] || [ -z "$MACOS_CERTIFICATE" ]; then
+            [ -z "$MACOS_CERTIFICATE" ] && \
+              echo "::warning::MACOS_CERTIFICATE is empty — app is unsigned, skipping notarization"
+            [ -z "$NOTARIZATION_APPLE_ID" ] && \
+              echo "::warning::NOTARIZATION_APPLE_ID not set — skipping notarization"
             ditto -c -k --sequesterRsrc --keepParent \
               "dist/Render Mapper Pro.app" \
               "RenderMapperPro-${{ matrix.label }}.zip"
