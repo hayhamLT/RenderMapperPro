@@ -49,7 +49,7 @@ def test_watch_folder_scan_actually_runs(tmp_path, monkeypatch):
     wf = tmp_path / "watch"
     wf.mkdir()
     (wf / "Screen_v1.mp4").write_bytes(b"x")
-    got = {}
+    got: dict[str, list] = {}
     sp._watch_scanned.connect(lambda listing: got.setdefault("listing", listing))
     sp._watch_folder = str(wf)
     sp.set_watch_ignore_dir(str(tmp_path / "out"))   # must not raise NameError
@@ -103,8 +103,9 @@ def test_first_run_welcome_suppressed_when_headless(tmp_path, monkeypatch):
     platform. A blocking .exec() there has no one to dismiss it and hung the
     headless CI smoke job for ~10 min (then failed) on most releases."""
     from PySide6.QtWidgets import QApplication, QMessageBox
-    app = QApplication.instance() or QApplication([])
-    assert app.platformName() == "offscreen"
+    QApplication.instance() or QApplication([])
+    # (class access: .instance() is typed QCoreApplication, no platformName)
+    assert QApplication.platformName() == "offscreen"
     import app_qt
     monkeypatch.setattr(app_qt, "PROFILE_PATH", tmp_path / "p.json")
     monkeypatch.setattr(app_qt, "HISTORY_PATH", tmp_path / "h.json")
@@ -115,6 +116,11 @@ def test_first_run_welcome_suppressed_when_headless(tmp_path, monkeypatch):
     # weren't gated, _maybe_first_run would call QMessageBox.exec() (and block).
     w._is_first_run = True
     opened = {"exec": False}
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: opened.__setitem__("exec", True) or 0)
+
+    def _spy_exec(self) -> int:
+        opened["exec"] = True
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", _spy_exec)
     w._maybe_first_run()
     assert opened["exec"] is False, "first-run welcome modal not suppressed under offscreen"

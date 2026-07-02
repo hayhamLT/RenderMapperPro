@@ -23,7 +23,8 @@ def test_driver_url_shape():
     assert url is not None
     assert url.startswith("https://")
     assert re.search(r"/playwright-\d+\.\d+\.\d+-[\w-]+\.zip$", url), url
-    assert w._web_driver_platform() in url
+    platform = w._web_driver_platform()
+    assert platform is not None and platform in url
 
 
 def test_node_present_in_dev_tree():

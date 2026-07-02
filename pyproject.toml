@@ -76,4 +76,9 @@ ignore_missing_imports = true
 # Type-check the bodies of un-annotated functions too — catches deprecated Qt
 # enum accesses (Qt.AlignCenter → Qt.AlignmentFlag.AlignCenter) that hide there.
 check_untyped_defs = true
-exclude = ["build/", "dist/", "vendor/"]
+# The config owns the file set (bare `mypy` checks everything, tests included)
+# so a newly added module can't silently drift out of CI's type-checking.
+files = ["."]
+# deadline/ runs inside Deadline's own (old) Python host on the farm — same
+# deliberate exclusion as ruff above.
+exclude = ["build/", "dist/", "vendor/", "deadline/"]

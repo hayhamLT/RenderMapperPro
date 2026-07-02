@@ -39,8 +39,8 @@ jobs:
         run: python -m pip install --upgrade pip "pytest==9.1.0" "pytest-timeout==2.4.0" "ruff==0.15.17" "mypy==2.1.0" PySide6==6.11.1
       - name: Ruff (whole repo)
         run: ruff check .
-      - name: Mypy (core + workers + UI layer)
-        run: mypy core workers.py app_qt.py panels.py icons.py ui_widgets.py media.py theme.py dialogs.py app_window
+      - name: Mypy (file set owned by pyproject [tool.mypy] files — whole repo)
+        run: mypy
       - name: Pytest
         env:
           QT_QPA_PLATFORM: offscreen
@@ -150,13 +150,160 @@ jobs:
       # shipped binary would be extractable, so we deliberately ship none.)
       - name: Build with PyInstaller
         run: python -m PyInstaller --noconfirm --clean BlenderVideoMapper.spec
+      # ── macOS code-signing + notarization ──────────────────────────────────
+      # Requires four repository secrets (Settings → Secrets → Actions):
+      #   MACOS_CERTIFICATE      base64-encoded Developer ID Application .p12
+      #                          export:  base64 -i cert.p12 | pbcopy
+      #   MACOS_CERTIFICATE_PWD  password you chose when exporting the .p12
+      #   MACOS_CERTIFICATE_NAME "Developer ID Application: Your Name (TEAMID)"
+      #   NOTARIZATION_APPLE_ID  your Apple ID email
+      #   NOTARIZATION_TEAM_ID   10-char Team ID from developer.apple.com
+      #   NOTARIZATION_PWD       app-specific password from appleid.apple.com
+      # All steps are no-ops (with a warning) when the secrets are absent so the
+      # build still produces a working (unsigned) app during development.
+      - name: Import signing certificate (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ]; then
+            echo "::warning::MACOS_CERTIFICATE not set — app will be unsigned"
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PWD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PWD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH" 2>/dev/null || true
+      - name: Sign app (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ]; then exit 0; fi
+          APP="dist/Render Mapper Pro.app"
+          ENT="installer/entitlements.plist"
+          # Sign EVERY Mach-O inside the bundle (dylib/so/bare executables like
+          # the bundled ffmpeg), each with a secure timestamp + hardened runtime
+          # — Apple rejects anything missing either. Failures are loud: no
+          # silenced stderr, no `|| true`. (--deep is deprecated for signing
+          # and does not apply the runtime option to nested code.)
+          find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+            if file -b "$f" | grep -q "Mach-O"; then
+              codesign --force --timestamp --options runtime \
+                --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$f"
+            fi
+          done
+          # Seal framework bundles (if any), then the .app itself last.
+          find "$APP/Contents/Frameworks" -maxdepth 1 -type d -name "*.framework" -print0 2>/dev/null \
+            | while IFS= read -r -d '' fw; do
+                codesign --force --timestamp --options runtime \
+                  --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$fw"
+              done
+          # PyInstaller strips Qt header dirs but leaves their symlinks dangling;
+          # codesign refuses to seal a bundle containing broken symlinks
+          # ("No such file or directory" on the .app itself).
+          find "$APP" -type l ! -exec test -e {} \; -print -delete
+          codesign --force --timestamp --options runtime \
+            --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "Code-signing complete"
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
+          bash installer/make_dmg.sh "RenderMapperPro-${{ matrix.label }}.dmg"
+      - name: Notarize and staple (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          NOTARIZATION_APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          NOTARIZATION_TEAM_ID: ${{ secrets.NOTARIZATION_TEAM_ID }}
+          NOTARIZATION_PWD: ${{ secrets.NOTARIZATION_PWD }}
+        run: |
+          # An unsigned app can never notarize — don't waste a round-trip to
+          # Apple when the signing secrets are absent/empty.
+          if [ -z "$NOTARIZATION_APPLE_ID" ] || [ -z "$MACOS_CERTIFICATE" ]; then
+            [ -z "$MACOS_CERTIFICATE" ] && \
+              echo "::warning::MACOS_CERTIFICATE is empty — app is unsigned, skipping notarization"
+            [ -z "$NOTARIZATION_APPLE_ID" ] && \
+              echo "::warning::NOTARIZATION_APPLE_ID not set — skipping notarization"
+            ditto -c -k --sequesterRsrc --keepParent \
+              "dist/Render Mapper Pro.app" \
+              "RenderMapperPro-${{ matrix.label }}.zip"
+            exit 0
+          fi
+          # Submit the DMG; Apple validates every binary inside it. Parse the
+          # result ourselves: notarytool --wait can exit 0 on an "Invalid"
+          # verdict, and a bare stapler failure hides the actual reason.
+          if [ -z "$NOTARIZATION_PWD" ]; then
+            echo "::error::NOTARIZATION_PWD is empty — create the repo secret with the app-specific password from account.apple.com"
+            exit 1
+          fi
+          xcrun notarytool submit "RenderMapperPro-${{ matrix.label }}.dmg" \
+            --apple-id "$NOTARIZATION_APPLE_ID" \
+            --team-id "$NOTARIZATION_TEAM_ID" \
+            --password "$NOTARIZATION_PWD" \
+            --wait --output-format json | tee notarize.json || true
+          # Parse defensively: on bad credentials notarytool emits a plain-text
+          # error, not JSON — surface a clean verdict either way.
+          status=$(python3 -c "import json;print(json.load(open('notarize.json')).get('status','Unknown'))" 2>/dev/null || echo Unknown)
+          sub_id=$(python3 -c "import json;print(json.load(open('notarize.json')).get('id',''))" 2>/dev/null || echo "")
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::Notarization verdict: ${status:-Unknown} (see notarytool output above — 401 means a bad Apple ID / app-specific password)"
+            if [ -n "$sub_id" ]; then
+              xcrun notarytool log "$sub_id" \
+                --apple-id "$NOTARIZATION_APPLE_ID" \
+                --team-id "$NOTARIZATION_TEAM_ID" \
+                --password "$NOTARIZATION_PWD" || true
+            fi
+            exit 1
+          fi
+          # Staple the ticket to the DMG and to the .app (so the zip is clean too)
+          xcrun stapler staple "RenderMapperPro-${{ matrix.label }}.dmg"
+          xcrun stapler staple "dist/Render Mapper Pro.app"
+          # Build the zip from the now-stapled .app
           ditto -c -k --sequesterRsrc --keepParent \
             "dist/Render Mapper Pro.app" \
             "RenderMapperPro-${{ matrix.label }}.zip"
-          bash installer/make_dmg.sh "RenderMapperPro-${{ matrix.label }}.dmg"
+          echo "Notarization and stapling complete"
+      # ── Windows code-signing (Authenticode) ────────────────────────────────
+      # Optional, mirroring the macOS pattern: set two repository secrets and
+      # the exe + installer get signed; leave them unset and the build stays
+      # unsigned (SmartScreen "More info → Run anyway").
+      #   WINDOWS_CERTIFICATE      base64-encoded code-signing .pfx
+      #                            export:  base64 -w0 cert.pfx
+      #   WINDOWS_CERTIFICATE_PWD  the .pfx password
+      # (Azure Trusted Signing is the modern cert-less alternative — swap this
+      # step for azure/trusted-signing-action if you go that route.)
+      - name: Sign app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PWD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Host "::warning::WINDOWS_CERTIFICATE not set - Windows build will be unsigned"
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing-cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PWD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "dist/Render Mapper Pro/Render Mapper Pro.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "App executable signed"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -167,6 +314,23 @@ jobs:
           $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
           Copy-Item "installer\Output\RenderMapperPro-Windows-x64-Setup.exe" .
+      - name: Sign installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PWD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing-cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PWD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "RenderMapperPro-Windows-x64-Setup.exe"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "Installer signed"
       # Signed SLSA build-provenance for each shipped artifact (verifiable with
       # `gh attestation verify <file> --repo <owner>/<repo>`). Skipped on PRs
       # (this whole job is push/tag-only).
@@ -248,7 +412,7 @@ jobs:
             | Windows (x64) | `RenderMapperPro-Windows-x64-Setup.exe` | `RenderMapperPro-Windows-x64.zip` |
             | macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.dmg` | `RenderMapperPro-macOS-arm64.zip` |
 
-            **Windows:** run the **Setup.exe** (installs to Program Files + Start-Menu shortcut). SmartScreen may warn — **More info → Run anyway** (the build isn't code-signed).
-            **macOS:** open the **.dmg** and drag the app to Applications. First launch: right-click → **Open** → **Open** (it isn't notarized). Apple-Silicon only.
+            **Windows:** run the **Setup.exe** (installs to Program Files + Start-Menu shortcut). Windows SmartScreen may prompt on first run.
+            **macOS:** open the **.dmg** and drag the app to Applications. The app is signed and notarized — it opens normally on first launch. Apple Silicon only.
 
             **Verify your download:** `SHA256SUMS.txt` lists the checksum of every artifact (`shasum -a 256 -c SHA256SUMS.txt`). Each binary also carries signed build provenance — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
