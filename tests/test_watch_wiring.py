@@ -139,6 +139,7 @@ def test_recursive_toggle_scans_subfolders(tmp_path, monkeypatch):
 
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance()
+    assert app is not None
     w = _make_window(tmp_path, monkeypatch)
     sp = w.scene_panel
     wf = tmp_path / "watch"
