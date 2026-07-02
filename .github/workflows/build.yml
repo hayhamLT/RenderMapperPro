@@ -209,6 +209,10 @@ jobs:
                 codesign --force --timestamp --options runtime \
                   --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$fw"
               done
+          # PyInstaller strips Qt header dirs but leaves their symlinks dangling;
+          # codesign refuses to seal a bundle containing broken symlinks
+          # ("No such file or directory" on the .app itself).
+          find "$APP" -type l ! -exec test -e {} \; -print -delete
           codesign --force --timestamp --options runtime \
             --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
