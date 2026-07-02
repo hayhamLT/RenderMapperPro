@@ -132,3 +132,89 @@ def test_crash_offer_headless_noop_and_windowed_ack(tmp_path, monkeypatch):
     w._offer_crash_reports()
     assert "crashed last time" in asked["title"]
     assert crash.pending_reports(crash_dir) == []
+
+
+def test_recursive_toggle_scans_subfolders(tmp_path, monkeypatch):
+    import time as _time
+
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    w = _make_window(tmp_path, monkeypatch)
+    sp = w.scene_panel
+    wf = tmp_path / "watch"
+    (wf / "day2").mkdir(parents=True)
+    (wf / "top_v1.mp4").write_bytes(b"x")
+    (wf / "day2" / "deep_v1.mp4").write_bytes(b"x")
+    out = wf / "PREVIZ"
+    out.mkdir()
+    (out / "rendered_v1.mp4").write_bytes(b"x")     # must NEVER be ingested
+    sp.set_watch_ignore_dir(str(out))
+    sp._watch_folder = str(wf)
+
+    def _scan_paths():
+        got: dict[str, list] = {}
+        sp._watch_scanned.connect(lambda listing: got.setdefault("l", listing))
+        sp._scan_watch_folder()
+        for _ in range(100):
+            app.processEvents()
+            if "l" in got:
+                break
+            _time.sleep(0.02)
+        return sorted(p for p, _s, _m, _d in got.get("l", []))
+
+    flat = _scan_paths()
+    assert any(p.endswith("top_v1.mp4") for p in flat)
+    assert not any("day2" in p for p in flat), "non-recursive must stay top-level"
+
+    sp.set_watch_recursive(True)
+    deep = _scan_paths()
+    assert any(p.endswith("deep_v1.mp4") for p in deep), "recursive must find subfolder clips"
+    assert not any("PREVIZ" in p for p in deep), "output subtree must stay excluded"
+
+
+def test_recursive_round_trips_through_panel_and_profile(tmp_path, monkeypatch):
+    w = _make_window(tmp_path, monkeypatch)
+    w.watch_panel.recursive_check.setChecked(True)      # emits config_changed → apply
+    assert w.scene_panel.get_watch_recursive() is True
+    w._save_profile()
+    w2 = _make_window(tmp_path, monkeypatch)
+    assert w2.scene_panel.get_watch_recursive() is True
+    assert w2.watch_panel.recursive_check.isChecked()
+
+
+def test_ignored_clips_badge_counts_non_matching(tmp_path, monkeypatch):
+    w = _make_window(tmp_path, monkeypatch)
+    ag = w._asset_grouping
+    ag.enabled = True
+    ag.pattern = "{ID#}_D{Day#}_{Sec}_{Cue}_{Screen}_v{Ver#}"
+    ag.content_type = ""
+    ag.screen_to_material = {}
+    ag.setup_to_scene = {}
+    w.watch_panel.set_mode(True)      # reflect previz without re-emitting config
+    w.scene_panel.scene_edit.setText(str(tmp_path / "Stage.c4d"))
+    w._on_watch_clips_ready([
+        "/drop/80230_D2_War-Treaty_MusicH_TC-MASTER_v001.mp4",   # matches → job
+        "/drop/nonsense-name.mp4",                               # no match → ignored
+        "/drop/also wrong.mov",                                  # no match → ignored
+    ])
+    assert len(w._jobs) == 1
+    assert w.watch_panel._ignored_count == 2
+    assert w.watch_panel.ignored_btn.isVisible() or not w.watch_panel.isVisible()
+    assert "2" in w.watch_panel.ignored_btn.text()
+
+
+def test_activity_feed_persists_and_preloads(tmp_path, monkeypatch):
+    w = _make_window(tmp_path, monkeypatch)
+    w.watch_panel.add_activity("Previz", "2 new job(s) from 1 group(s)")
+    hist = tmp_path / "l.txt"
+    hist = hist.parent / "ingest_history.log"
+    text = hist.read_text()
+    assert "Previz" in text and "2 new job(s)" in text
+    # A rebuilt window preloads the tail into the feed.
+    w2 = _make_window(tmp_path, monkeypatch)
+    rows = w2.watch_panel.activity.rowCount()
+    assert rows >= 1
+    assert w2.watch_panel.activity.item(0, 1).text() == "Previz"
+    # Clearing the visible feed must keep the on-disk audit trail.
+    w2.watch_panel.clear_activity()
+    assert hist.exists() and "Previz" in hist.read_text()

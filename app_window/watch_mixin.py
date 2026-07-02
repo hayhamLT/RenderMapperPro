@@ -109,6 +109,7 @@ class WatchMixin(_WindowMembers):
             autorender_start=self._autorender_start,
             output_dir=self._autorender_output,
             deliver_dir=self._deliver_dir,
+            recursive=self.scene_panel.get_watch_recursive(),
         )
         # First-run banner: only until acknowledged, and only before any folder is set.
         seen = getattr(self, "_watch_first_run_seen", False)
@@ -137,6 +138,7 @@ class WatchMixin(_WindowMembers):
             self._autorender_enabled = bool(c["autorender_start"])
         self.scene_panel.set_watch_options(int(max(1.0, float(c["poll_interval_s"])) * 1000),
                                            float(c["settle_s"]))
+        self.scene_panel.set_watch_recursive(bool(c["recursive"]))
         self.scene_panel.set_grouping_mode(ag.enabled)
         self._save_profile()
 
@@ -196,6 +198,12 @@ class WatchMixin(_WindowMembers):
         except Exception as exc:
             self._append_log(f"[app] Asset grouping failed: {exc}")
             return
+        # Silent-ignore fix: clips that are present but did NOT land in any
+        # group's assignments (pattern/type mismatch, unmapped screen, superseded
+        # version) are surfaced as a badge — the dry run explains each one.
+        used = {clip for g in groups
+                for _m, clip in g.material_assignments(self._asset_grouping.screen_to_material)}
+        self.watch_panel.set_ignored(len([p for p in paths if p not in used]))
         if not groups:
             return
         cur_scene = self.scene_panel.scene_edit.text().strip()

@@ -1259,6 +1259,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.watch_panel.pick_deliver_dir_requested.connect(self._pick_watch_deliver_dir)
         self.watch_panel.preview_requested.connect(self._preview_watch_assembly)
         self.watch_panel.first_run_dismissed.connect(self._on_watch_first_run_dismissed)
+        # Ingest history: the activity feed writes through to disk and preloads
+        # its tail, so "did that clip get picked up last night?" is answerable.
+        self.watch_panel.set_history_path(Path(LOG_PATH).parent / "ingest_history.log")
         self._load_watch_panel()
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
@@ -3645,6 +3648,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             "watch_enabled": watch_enabled,
             "watch_interval_ms": watch_interval_ms,
             "watch_settle": watch_settle,
+            "watch_recursive": self.scene_panel.get_watch_recursive(),
             "autorender_enabled": self._autorender_enabled,
             "autorender_start": self._autorender_start,
             "autorender_output": self._autorender_output,
@@ -3921,6 +3925,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 int(d.get("watch_interval_ms", 3000)), float(d.get("watch_settle", 2.0)))
         except (TypeError, ValueError):
             _log.debug("invalid watch-folder values in profile; using defaults", exc_info=True)
+        self.scene_panel.set_watch_recursive(bool(d.get("watch_recursive", False)))
         self._autorender_enabled = bool(d.get("autorender_enabled", False))
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")

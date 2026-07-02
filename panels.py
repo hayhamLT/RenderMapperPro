@@ -163,6 +163,7 @@ class ScenePanel(QWidget):
         self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
         self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
         self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
+        self._watch_recursive = False            # also scan subfolders of the watch folder
         self._targets: list[str] = []            # materials marked as render targets
         self._autorender_last: frozenset | None = None   # last target version-set emitted
         self._watch_idle_polls = 0               # consecutive no-change polls (drives back-off)
@@ -869,6 +870,18 @@ class ScenePanel(QWidget):
     def get_watch_options(self) -> tuple[int, float]:
         return self._watch_interval_ms, self._watch_settle
 
+    def set_watch_recursive(self, on: bool) -> None:
+        """Also scan subfolders (the poll covers them; FS events still watch the
+        top folder only, which is fine — the poll is the reliable backstop)."""
+        on = bool(on)
+        if on != self._watch_recursive:
+            self._watch_recursive = on
+            self._watch_seen = {}       # force a fresh scan under the new scope
+            self._watch_sizes = {}
+
+    def get_watch_recursive(self) -> bool:
+        return self._watch_recursive
+
     def set_grouping_mode(self, on: bool) -> None:
         """When on, the watch folder emits ready clips for asset-grouping instead
         of auto-mapping them onto the current scene."""
@@ -886,25 +899,40 @@ class ScenePanel(QWidget):
         self._watch_scanning = True
         exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
         ignore = os.path.normpath(self._watch_ignore) if self._watch_ignore else ""
+        recursive = self._watch_recursive
+
+        def _ignored(path: str) -> bool:
+            # Skip the auto-render output dir (whole subtree) so rendered PREVIZ
+            # files are never re-ingested (no feedback loop).
+            if not ignore:
+                return False
+            p = os.path.normpath(path)
+            return p == ignore or p.startswith(ignore + os.sep)
+
+        def _collect(listing: list, path: str, name: str) -> None:
+            try:
+                if Path(name).suffix.lower() in exts:
+                    st = os.stat(path)
+                    # Flag cloud "online-only" placeholders so we don't ingest a
+                    # file whose bytes aren't on disk yet.
+                    dataless = is_cloud_placeholder(path, st)
+                    listing.append((path, st.st_size, st.st_mtime, dataless))
+            except OSError:
+                _log.debug("watch folder: failed to stat an entry", exc_info=True)
 
         def work():
-            listing = []
+            listing: list = []
             try:
-                with os.scandir(folder) as it:
-                    for e in it:
-                        try:
-                            # Skip the auto-render output dir so rendered PREVIZ
-                            # files are never re-ingested (no feedback loop).
-                            if ignore and os.path.normpath(e.path) == ignore:
-                                continue
-                            if e.is_file() and Path(e.name).suffix.lower() in exts:
-                                st = e.stat()
-                                # Flag cloud "online-only" placeholders so we don't
-                                # ingest a file whose bytes aren't on disk yet.
-                                dataless = is_cloud_placeholder(e.path, st)
-                                listing.append((e.path, st.st_size, st.st_mtime, dataless))
-                        except OSError:
-                            _log.debug("watch folder: failed to stat an entry", exc_info=True)
+                if recursive:
+                    for root, dirs, files in os.walk(folder):
+                        dirs[:] = [d for d in dirs if not _ignored(os.path.join(root, d))]
+                        for name in files:
+                            _collect(listing, os.path.join(root, name), name)
+                else:
+                    with os.scandir(folder) as it:
+                        for e in it:
+                            if not _ignored(e.path) and e.is_file():
+                                _collect(listing, e.path, e.name)
             except OSError:
                 listing = []
             self._watch_scanned.emit(listing)   # queued → delivered on the UI thread
@@ -923,10 +951,14 @@ class ScenePanel(QWidget):
         # All listed files count as "present" — including cloud placeholders — so
         # a clip that's evicted to online-only after ingest isn't treated as gone.
         present = {os.path.normpath(p) for p, _s, _m, _d in listing}
-        # Clips that came from the watch folder but are gone now (deleted, or
-        # renamed away) — drop them so a rename doesn't leave a stale duplicate.
+        # Clips that came from the watch folder (any depth, for recursive mode)
+        # but are gone now (deleted, or renamed away) — drop them so a rename
+        # doesn't leave a stale duplicate.
+        def _under_folder(v: str) -> bool:
+            d = os.path.normpath(os.path.dirname(v))
+            return d == folder or d.startswith(folder + os.sep)
         gone = {v for v in self._videos
-                if os.path.normpath(os.path.dirname(v)) == folder and os.path.normpath(v) not in present}
+                if _under_folder(v) and os.path.normpath(v) not in present}
 
         ready, mtimes, sizes = [], {}, {}
         for path, size, mtime, dataless in listing:
@@ -3640,6 +3672,11 @@ class WatchPanel(QWidget):
         ph.setObjectName("HintLabel")
         prow.addWidget(ph, 1)
         v.addLayout(prow)
+        self.recursive_check = QCheckBox("Include subfolders")
+        self.recursive_check.setToolTip("Also watch every folder inside the watch folder — "
+                                        "clips dropped in subfolders (per-day, per-setup…) are picked up too")
+        self.recursive_check.toggled.connect(lambda *_: self._emit_changed())
+        v.addWidget(self.recursive_check)
         return f
 
     def _build_mode_card(self) -> QFrame:
@@ -3757,6 +3794,16 @@ class WatchPanel(QWidget):
         head = QHBoxLayout()
         head.addWidget(_step_label("⑤", "ACTIVITY"))
         head.addStretch()
+        # Silent-ignore fix: clips sitting in the folder that DIDN'T become jobs
+        # are surfaced, not swallowed — click opens the dry-run with per-file why.
+        self.ignored_btn = QPushButton("")
+        self.ignored_btn.setObjectName("SmallButton")
+        self.ignored_btn.setStyleSheet(f"color:{active_palette().warning};")
+        self.ignored_btn.setToolTip("Some clips in the watch folder didn't become jobs — "
+                                    "click to see each one and why (dry run)")
+        self.ignored_btn.clicked.connect(self.preview_requested.emit)
+        self.ignored_btn.setVisible(False)
+        head.addWidget(self.ignored_btn)
         clear_btn = QPushButton("Clear")
         clear_btn.setObjectName("SmallButton")
         clear_btn.clicked.connect(self.clear_activity)
@@ -3811,6 +3858,7 @@ class WatchPanel(QWidget):
 
     def _refresh_mode_ui(self) -> None:
         self.naming_card.setVisible(self.previz_radio.isChecked())
+        self.set_ignored(getattr(self, "_ignored_count", 0))   # badge is previz-only
 
     def _on_pattern_changed(self, *_a) -> None:
         self._update_preview()
@@ -3874,7 +3922,7 @@ class WatchPanel(QWidget):
                     output_template: str, autorender_pattern: str,
                     screen_to_material: dict, setup_to_scene: dict,
                     settle_s: float, poll_interval_s: float, autorender_start: bool,
-                    output_dir: str, deliver_dir: str) -> None:
+                    output_dir: str, deliver_dir: str, recursive: bool = False) -> None:
         """Populate every control from the persisted config without emitting."""
         self._suppress = True
         try:
@@ -3891,6 +3939,7 @@ class WatchPanel(QWidget):
             self.autostart_cb.setChecked(bool(autorender_start))
             self.settle_combo.setCurrentIndex(self._nearest(self._SETTLE_OPTS, settle_s))
             self.poll_combo.setCurrentIndex(self._nearest(self._POLL_OPTS, poll_interval_s))
+            self.recursive_check.setChecked(bool(recursive))
         finally:
             self._suppress = False
         self._refresh_mode_ui()
@@ -3912,25 +3961,63 @@ class WatchPanel(QWidget):
             "setup_to_scene": self.setup_table.get_pairs(),
             "settle_s": self._SETTLE_OPTS[self.settle_combo.currentIndex()][1],
             "poll_interval_s": self._POLL_OPTS[self.poll_combo.currentIndex()][1],
+            "recursive": self.recursive_check.isChecked(),
             "deliver_dir": self.deliver_edit.text().strip(),
             "autorender_start": self.autostart_cb.isChecked(),
             "output_dir": self.out_dir_edit.text().strip(),
         }
 
-    # ── activity feed ────────────────────────────────────────────────────
+    # ── ignored-clips badge ──────────────────────────────────────────────
+    def set_ignored(self, count: int) -> None:
+        """Surface clips that were seen but did NOT become jobs (pattern/type
+        mismatch, unmapped screen, superseded). Zero (or auto-map mode) hides."""
+        self._ignored_count = max(0, int(count))
+        show = self._ignored_count > 0 and self.previz_radio.isChecked()
+        if show:
+            self.ignored_btn.setText(f"⚠ {self._ignored_count} clip(s) skipped — why?")
+        self.ignored_btn.setVisible(show)
+
+    # ── activity feed (persisted) ────────────────────────────────────────
+    def set_history_path(self, path) -> None:
+        """Point the feed at an on-disk ingest history and preload the recent
+        tail, so 'did that clip get picked up last night?' survives a restart."""
+        self._history_path = Path(path)
+        try:
+            lines = self._history_path.read_text(encoding="utf-8").splitlines()[-100:]
+        except OSError:
+            return
+        for line in lines:                      # oldest→newest; newest ends on top
+            parts = line.split("\t", 2)
+            if len(parts) == 3:
+                stamp, event, detail = parts
+                self._insert_activity_row(stamp.split(" ")[-1], event, detail,
+                                          tooltip=f"{stamp} — {detail}")
+
     def add_activity(self, event: str, detail: str) -> None:
+        self._insert_activity_row(time.strftime("%H:%M:%S"), event, detail, tooltip=detail)
+        hist = getattr(self, "_history_path", None)
+        if hist is not None:
+            try:
+                hist.parent.mkdir(parents=True, exist_ok=True)
+                with hist.open("a", encoding="utf-8") as f:
+                    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    f.write(f"{stamp}\t{event}\t{detail}\n".replace("\r", " "))
+            except OSError:
+                pass                             # history is best-effort, never blocks ingest
+
+    def _insert_activity_row(self, when: str, event: str, detail: str, *, tooltip: str) -> None:
         self.activity.insertRow(0)
-        cells = (time.strftime("%H:%M:%S"), event, detail)
-        for col, text in enumerate(cells):
+        for col, text in enumerate((when, event, detail)):
             item = QTableWidgetItem(text)
             item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             if col == 2:
-                item.setToolTip(detail)
+                item.setToolTip(tooltip)
             self.activity.setItem(0, col, item)
         while self.activity.rowCount() > 200:
             self.activity.removeRow(self.activity.rowCount() - 1)
 
     def clear_activity(self) -> None:
+        # Clears the visible feed only — the on-disk history stays (audit trail).
         self.activity.setRowCount(0)
 
 
