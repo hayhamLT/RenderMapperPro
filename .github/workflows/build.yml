@@ -191,23 +191,27 @@ jobs:
         run: |
           if [ -z "$MACOS_CERTIFICATE" ]; then exit 0; fi
           APP="dist/Render Mapper Pro.app"
-          # Sign nested dylibs/so files individually first (--deep misses some)
-          find "$APP/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) \
-            -print0 | xargs -0 -I{} codesign --force --sign "$MACOS_CERTIFICATE_NAME" \
-              --options runtime \
-              --entitlements installer/entitlements.plist "{}" 2>/dev/null || true
-          # Sign any nested .framework bundles
-          find "$APP/Contents/Frameworks" -type d -name "*.framework" 2>/dev/null \
-            -print0 | xargs -0 -I{} codesign --force --sign "$MACOS_CERTIFICATE_NAME" \
-              --options runtime \
-              --entitlements installer/entitlements.plist "{}" 2>/dev/null || true
-          # Sign the outer .app (--deep catches anything the above loops missed)
-          codesign --force --deep --verify --verbose \
-            --sign "$MACOS_CERTIFICATE_NAME" \
-            --options runtime \
-            --entitlements installer/entitlements.plist \
-            "$APP"
-          codesign --verify --deep --strict "$APP"
+          ENT="installer/entitlements.plist"
+          # Sign EVERY Mach-O inside the bundle (dylib/so/bare executables like
+          # the bundled ffmpeg), each with a secure timestamp + hardened runtime
+          # — Apple rejects anything missing either. Failures are loud: no
+          # silenced stderr, no `|| true`. (--deep is deprecated for signing
+          # and does not apply the runtime option to nested code.)
+          find "$APP" -type f -print0 | while IFS= read -r -d '' f; do
+            if file -b "$f" | grep -q "Mach-O"; then
+              codesign --force --timestamp --options runtime \
+                --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$f"
+            fi
+          done
+          # Seal framework bundles (if any), then the .app itself last.
+          find "$APP/Contents/Frameworks" -maxdepth 1 -type d -name "*.framework" -print0 2>/dev/null \
+            | while IFS= read -r -d '' fw; do
+                codesign --force --timestamp --options runtime \
+                  --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$fw"
+              done
+          codesign --force --timestamp --options runtime \
+            --entitlements "$ENT" --sign "$MACOS_CERTIFICATE_NAME" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
           echo "Code-signing complete"
       - name: Package (macOS)
         if: runner.os == 'macOS'
