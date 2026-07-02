@@ -273,6 +273,19 @@ def _resolve_runtime_script(name: str) -> str:
     raise FileNotFoundError(f"Runtime script not found: {name}")
 
 
+def _help_image_dir() -> str:
+    """The bundled User Guide screenshots (assets/help/img), '' if absent —
+    the guide degrades to text-only rather than showing broken images."""
+    roots = [Path(__file__).parent, Path.cwd()]
+    if getattr(sys, "frozen", False):
+        roots.insert(0, Path(getattr(sys, "_MEIPASS", "")))
+    for root in roots:
+        c = root / "assets" / "help" / "img"
+        if c.is_dir():
+            return str(c)
+    return ""
+
+
 class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, UpdateMixin, RuntimeMixin,
                           ReportMixin, WatchMixin):
     _update_checked = Signal(object, bool, str)   # (manifest dict | None, was-manual, error-text)
@@ -683,9 +696,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         tabs.setDocumentMode(True)
         pal = self._palette
         css = self._help_css()
+        img_dir = _help_image_dir()
         for title, body in self._guide_sections():
             browser = QTextBrowser()
             browser.setOpenLinks(False)
+            if img_dir:
+                browser.setSearchPaths([img_dir])   # resolves the guide's <img> tags
             browser.setStyleSheet(
                 f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 20px 26px; }}")
             browser.setHtml(css + body)
@@ -709,6 +725,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         <p class="lead">Render Mapper Pro maps your videos onto a 3D scene's
         materials and renders them — on your machine or a render farm. Each tab
         above covers one part of the app; here's the whole flow first.</p>
+        <p><img src="main-window.png" width="640"></p>
         <table class="steps" width="100%">
           <tr><td class="num" width="30">1</td><td><b>Add a scene</b> — drag a 3D
               file onto the <b>Scene</b> box, then click <b>Scan Scene</b>. See the
@@ -857,89 +874,85 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         """),
             ("Watch & Auto-render", """
         <h2>Watch &amp; Auto-render</h2>
-        <p class="lead">Hands-off mode: point the app at a folder, mark the screens
-        that matter, and every time fresh footage lands it imports, maps, and
-        renders on its own — ideal for review loops and "drop a new cut, get a new
-        preview" pipelines.</p>
+        <p class="lead">Hands-off mode: point the app at a folder and every clip that
+        lands there imports, maps and renders on its own. Everything lives in the
+        <b>Watch &amp; Auto-render panel</b> (View → Watch &amp; Auto-render) — one
+        rule that reads top to bottom, ① Source → ⑤ Activity.</p>
+        <p><img src="watch-panel.png" width="430"></p>
 
-        <h3>1 · The watch folder</h3>
-        <p class="muted">Click the <b>clock</b> button under the Videos list (or set
-        it in <a href="action:properties/Watch">Properties → Watch &amp; Auto-render</a>)
-        and pick a folder. Anything you — or another app — drops there imports and
-        <b>auto-maps</b> to a material by name. It's:</p>
+        <h3>① Source — what to watch</h3>
+        <p><img src="watch-source.png" width="420"></p>
+        <p class="muted"><b>Choose…</b> a folder and press <b>Start</b>. The knobs:</p>
         <table class="feat" width="100%">
-          <tr><td class="fname">Version-aware</td><td>Drop <code>Screen_v2.mp4</code>
-              next to <code>Screen_v1.mp4</code> and the newer version takes over the
-              mapping — <b>latest wins</b>, no re-linking.</td></tr>
-          <tr><td class="fname">Instant + reliable</td><td>Local drops are picked up
-              the moment they land; folders on a <b>network share</b> or
-              <b>Dropbox/cloud</b> are polled as a backstop, so nothing is missed.</td></tr>
-          <tr><td class="fname">Copy-safe</td><td>A file is only imported once it has
-              finished writing (its size holds steady) — never a half-copied clip.</td></tr>
-          <tr><td class="fname">Cloud-aware</td><td>Dropbox/OneDrive <b>"online-only"</b>
-              placeholders are skipped until their contents are actually downloaded.</td></tr>
+          <tr><td class="fname">Wait</td><td>How long a file must stop changing before
+              it's imported — never a half-copied clip. Raise it for very large files
+              on slow copies.</td></tr>
+          <tr><td class="fname">Re-scan every</td><td>Backstop poll for network shares
+              and cloud folders; local drops are caught instantly by filesystem
+              events.</td></tr>
+          <tr><td class="fname">Include subfolders</td><td>Also watch every folder
+              inside — clips dropped into per-day or per-setup subfolders are picked
+              up too. The render output folder is always excluded.</td></tr>
+        </table>
+        <p class="muted">Dropbox/OneDrive <b>online-only placeholders</b> are skipped
+        until their bytes are actually on disk.</p>
+
+        <h3>② Mode — what happens to a clip</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Auto-map</td><td>The clip maps onto the <b>current
+              scene's</b> material with the matching name; once every render-target
+              screen has a clip, one multi-screen render is queued. Drop
+              <code>Screen_v2.mp4</code> next to <code>v1</code> and the newer version
+              takes over — <b>latest wins</b>.</td></tr>
+          <tr><td class="fname">Assemble previz</td><td>For shows with a filename
+              convention: clips group into <b>one render per asset</b>, each routed to
+              the right scene file — drop 10 clips, get 5 assembled previz jobs.</td></tr>
         </table>
 
-        <h3>2 · Mark render targets</h3>
-        <p class="muted">Tell the app which screens an auto-render must cover:
-        <b>right-click a material → Mark as Render Target</b>, or click the coloured
-        <b>stripe</b> on the material's left edge. Targets are what the next step
-        waits for.</p>
-
-        <h3>3 · Auto-render</h3>
-        <p class="muted">In <a href="action:properties/Watch">Properties → Watch &amp;
-        Auto-render</a>, turn on <b>"Auto-render once every render-target screen has a
-        clip"</b>. As soon as every target has footage, a single <b>multi-screen
-        render</b> is created automatically (a burst of new versions is coalesced into
-        one render, not one per file). Choose how it behaves:</p>
+        <h3>③ Naming — teach it your convention (previz)</h3>
+        <p><img src="watch-naming.png" width="420"></p>
+        <p class="muted">Build the pattern from <b>chips</b> — no regex.
+        <code>{Field}</code> is text, <code>{Field#}</code> a number,
+        <code>{Field#?}</code> optional. Hyphenated codes like
+        <code>TC-MASTER</code> or <code>War-Treaty</code> are fine. Paste a real
+        filename into the sample box and the live preview shows exactly what parses
+        — or <i>where</i> it stopped and what it expected.</p>
         <table class="feat" width="100%">
-          <tr><td class="fname">Start automatically</td><td>On = it renders straight
-              away. Off = the job is just <b>added to the Queue</b> for you to start.</td></tr>
-          <tr><td class="fname">Output folder</td><td>Where renders go. Blank = a
-              <code>PREVIZ</code> subfolder inside the watch folder (kept out of the
-              scan, so previews never re-trigger themselves).</td></tr>
-          <tr><td class="fname">Name</td><td>Filename pattern with tokens
-              <code>{clip}</code> · <code>{scene}</code> · <code>{date}</code>.</td></tr>
+          <tr><td class="fname">Screen → Material</td><td>Which scene material each
+              screen code drives (defaults to the same name).</td></tr>
+          <tr><td class="fname">Setup # → Scene</td><td>Routes each setup number to
+              its own scene file (D1.c4d, D2.c4d, …); unmapped setups use the
+              current scene.</td></tr>
+          <tr><td class="fname">Version</td><td><b>Newest wins</b> — a newer version
+              updates that asset's existing job in place instead of piling up.</td></tr>
         </table>
+        <p class="muted"><b>Preview (dry run)</b> shows exactly what WOULD assemble —
+        per asset: screen → material → clip → version — plus every skipped clip and
+        why, before anything renders:</p>
+        <p><img src="preview-assembly.png" width="430"></p>
 
-        <h3>4 · Delivery (optional)</h3>
-        <p class="muted">Set a <b>Copy&nbsp;to</b> folder under <b>Delivery</b> and every
-        finished render is also copied there — e.g. a synced review/hand-off folder —
-        so collaborators get it without you lifting a finger. Blank = off.</p>
+        <h3>④ Output &amp; delivery</h3>
+        <p class="muted">Output name supports tokens; blank output folder = a
+        <code>PREVIZ</code> subfolder inside the watch folder (always excluded from
+        scanning). <b>Start renders automatically</b> = fully hands-off; off = jobs
+        just queue. Set a <b>delivery folder</b> and every finished render is also
+        copied there for review/hand-off.</p>
 
-        <h3>Tuning</h3>
-        <p class="muted">Two knobs in Properties: <b>poll interval</b> (how often a
-        network/cloud folder is re-checked) and the <b>settle</b> window (how long a
-        file's size must hold steady before import). Defaults suit most setups; raise
-        the settle time for very large files copied slowly.</p>
-        <p class="muted"><b>Tip:</b> watch + targets + auto-start + a delivery folder =
-        a fully automatic "new footage → rendered preview in the review folder"
-        pipeline.</p>
-
-        <h3>Asset grouping → previz auto-export (advanced)</h3>
-        <p class="muted">If your show uses a structured filename convention, the watch
-        folder can export <b>one multi-screen previz render per asset</b> instead of
-        mapping onto the current scene — drop 10 clips, get 5 assets. Turn it on in
-        <a href="action:properties/Watch">Properties → Watch &amp; Auto-render → Asset
-        grouping</a>.</p>
-        <p class="muted">From a name like
-        <code>PRJ001_D01_S01_A017_CENTER_ANIM_V003</code> it reads:</p>
+        <h3>⑤ Activity — trust, but verify</h3>
+        <p><img src="watch-activity.png" width="420"></p>
         <table class="feat" width="100%">
-          <tr><td class="fname">Setup (S##)</td><td>routes the render to that setup's
-              <b>scene</b> (or the current scene if none is mapped).</td></tr>
-          <tr><td class="fname">Asset (A###)</td><td>the <b>group key</b> — every screen
-              of one asset assembles into a single render.</td></tr>
-          <tr><td class="fname">Screen</td><td>maps to the <b>material</b> of the same name
-              (or an override you set).</td></tr>
-          <tr><td class="fname">Type (ANIM)</td><td>only this content type feeds a render;
-              stills/maps are ignored.</td></tr>
-          <tr><td class="fname">Version (V###)</td><td><b>newest wins</b>; a newer version
-              updates that asset's job in place instead of piling up.</td></tr>
+          <tr><td class="fname">Skipped badge</td><td>Clips that did <b>not</b> become
+              jobs (wrong name, unmapped screen, superseded version) are counted, not
+              swallowed — click <b>“N clip(s) skipped — why?”</b> for the per-file
+              explanation.</td></tr>
+          <tr><td class="fname">Ingest history</td><td>The feed is saved to
+              <code>logs/ingest_history.log</code> and reloaded on launch, so “did
+              that clip get picked up last night?” always has an answer. <b>Clear</b>
+              empties the visible list only.</td></tr>
         </table>
-        <p class="muted">Each asset exports as
-        <code>{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}</code> (the name template,
-        parser regex, content type, screen→material map and per-setup scene are all
-        editable). Queue-only by default, or auto-start with the toggle above.</p>
+        <p class="muted"><b>Tip:</b> watch + previz mode + auto-start + a delivery
+        folder = a fully automatic “clip lands on the share → assembled preview in
+        the review folder” pipeline.</p>
         """),
             ("Render Farm", """
         <h2>Render Farm (Deadline)</h2>
