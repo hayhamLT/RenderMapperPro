@@ -107,8 +107,9 @@ def ca_bundle_path() -> str | None:
     CERTIFICATE_VERIFY_FAILED ("Couldn't reach GitHub …") unless we point it at a
     bundled cacert.pem. Tries, in order: certifi (if importable), then the
     cacert.pem the build drops into the bundle root / certifi/ dir — so HTTPS
-    works even if ``import certifi`` itself fails inside the frozen app. Returns
-    None from source (the system trust store is fine there)."""
+    works even if ``import certifi`` itself fails inside the frozen app, then an
+    explicit ``SSL_CERT_FILE`` / ``REQUESTS_CA_BUNDLE`` env var. Returns None
+    from a normal source checkout (the system trust store is fine there)."""
     try:
         import certifi
         p = certifi.where()
@@ -122,6 +123,12 @@ def ca_bundle_path() -> str | None:
                      os.path.join(base, "certifi", "cacert.pem")):
             if os.path.exists(cand):
                 return cand
+    # Last resort: honour an explicitly configured bundle so a user on a locked-
+    # down machine can point us at their own CA file without a rebuild.
+    for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        env_path = os.environ.get(var)
+        if env_path and os.path.exists(env_path):
+            return env_path
     return None
 
 

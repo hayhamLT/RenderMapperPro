@@ -2,6 +2,10 @@
 # Pinned for reproducibility; see requirements-dev.txt for dev/CI tooling and
 # requirements-build.txt for the frozen-app build pins.
 PySide6==6.11.1
+# CA bundle for HTTPS verification. A frozen build ships its own Python with no
+# system certificates, so the GitHub update check fails with
+# CERTIFICATE_VERIFY_FAILED without this. ca_bundle_path() prefers it.
+certifi
 # Optional — enables the headless three.js (.glb/.gltf) render backend. The
 # Chromium browser itself is downloaded on demand, not via pip.
 playwright==1.60.0

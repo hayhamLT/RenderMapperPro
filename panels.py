@@ -103,6 +103,7 @@ from media import (
     _audio_probe_cache,
     file_manager_name,
     find_ffmpeg_tool,
+    reveal_in_file_manager,
     video_has_audio,
 )
 from theme import LINK_COLORS, active_palette
@@ -1162,6 +1163,8 @@ class ScenePanel(QWidget):
 
     def _show_video_context_menu(self, pos) -> None:
         item = self.vid_list.itemAt(pos)
+        path = str(item.data(ROLE_VIDEO_PATH) or "") if item is not None else ""
+        is_video = bool(path) and not path.startswith("__add_video__")
         menu = QMenu(self)
         add_action = menu.addAction("Add Videos...")
         render_action = menu.addAction("Start Render")
@@ -1171,7 +1174,12 @@ class ScenePanel(QWidget):
             menu.addSeparator()
             muted = bool(item.data(ROLE_MUTED))
             mute_action = menu.addAction("Unmute audio" if muted else "Mute audio")
-        if item is None or str(item.data(ROLE_VIDEO_PATH) or "").startswith("__add_video__"):
+        reveal_action = None
+        if is_video:
+            menu.addSeparator()
+            reveal_action = menu.addAction(f"Reveal in {file_manager_name()}")
+            reveal_action.setToolTip(str(Path(path).parent))
+        if not is_video:
             remove_action.setEnabled(False)
         chosen = menu.exec(self.vid_list.viewport().mapToGlobal(pos))
         if chosen == add_action:
@@ -1182,6 +1190,8 @@ class ScenePanel(QWidget):
             self._remove_selected_video()
         elif mute_action is not None and item is not None and chosen == mute_action:
             self.toggle_mute(item.data(ROLE_VIDEO_PATH))
+        elif reveal_action is not None and chosen == reveal_action:
+            reveal_in_file_manager(path)
 
 
 # Compact field widths so a single value never spans the panel: small numeric

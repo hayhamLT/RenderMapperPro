@@ -137,8 +137,17 @@ class UpdateMixin(_WindowMembers):
                 self._append_log(f"[update] Check failed — {error}")
             if manual:
                 detail = f"\n\n{error}" if error else ""
+                # A TLS/cert failure means no CA bundle is reachable — installed
+                # builds ship one, so this only bites when running from source.
+                cert_hint = ""
+                if "CERTIFICATE_VERIFY" in error or "SSL" in error:
+                    cert_hint = (
+                        "\n\nThis looks like a missing HTTPS certificate bundle. "
+                        "Installed builds ship one; running from source, install "
+                        "it with:  pip install certifi")
                 warn(self, "Updates",
                     "Couldn't reach GitHub to check for updates." + detail
+                    + cert_hint
                     + "\n\nYou can always download the latest version from the "
                     "Releases page on GitHub.")
             return

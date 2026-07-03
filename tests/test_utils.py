@@ -4,8 +4,11 @@ import subprocess
 import sys
 from typing import cast
 
+import pytest
+
 from core.utils import (
     atomic_write_text,
+    ca_bundle_path,
     expand_output_tokens,
     ext_for_format,
     ffmpeg_movie_av_args,
@@ -176,3 +179,24 @@ def test_terminate_process_already_exited_is_noop():
     p.wait()
     terminate_process(p)          # must not raise on an already-dead process
     assert p.poll() is not None
+
+
+def test_ca_bundle_prefers_certifi():
+    # When certifi is importable its bundle wins — this is what a source checkout
+    # and every installed build rely on for HTTPS verification (the update check).
+    # CI's lint-test job installs only pinned tools, so skip when it's absent.
+    certifi = pytest.importorskip("certifi")
+    p = ca_bundle_path()
+    assert p is not None and p == certifi.where()
+
+
+def test_ca_bundle_env_fallback(tmp_path, monkeypatch):
+    # No certifi, not frozen, but SSL_CERT_FILE points at a real bundle → honour
+    # it, so a locked-down machine can supply its own CA file without a rebuild.
+    ca = tmp_path / "corp-ca.pem"
+    ca.write_text("dummy")
+    monkeypatch.setitem(sys.modules, "certifi", None)   # force `import certifi` to fail
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    assert ca_bundle_path() == str(ca)

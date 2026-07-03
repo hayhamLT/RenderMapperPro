@@ -9,6 +9,9 @@ requires-python = ">=3.12"
 dynamic = ["version"]
 dependencies = [
     "PySide6==6.11.1",
+    # Ships a CA bundle so HTTPS (the GitHub update check) verifies even in a
+    # frozen build whose bundled Python carries no system certificates.
+    "certifi",
 ]
 
 [project.optional-dependencies]
