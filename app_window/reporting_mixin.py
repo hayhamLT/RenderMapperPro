@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from app_version import APP_NAME
 from app_window.base import _WindowMembers
 from core.logging_setup import get_logger
 from core.metrics import estimate_energy_cost
@@ -105,7 +106,7 @@ class ReportMixin(_WindowMembers):
             '.err{color:#ed4245;font-family:ui-monospace,monospace;font-size:12px;'
             'white-space:pre-wrap;margin:6px 0}.brand{color:#e8833a;font-weight:700}'
             '</style></head><body>'
-            '<h1><span class="brand">Render Mapper Pro</span> — Render Report</h1>'
+            f'<h1><span class="brand">{APP_NAME}</span> — Render Report</h1>'
             f'<div class="sub">{stamp} · Scene: {scene}</div>'
             '<table><thead><tr><th>Job</th><th>Status</th><th>Frames</th>'
             '<th>Duration</th><th>Avg/frame</th><th>Est. Cost</th></tr></thead>'

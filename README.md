@@ -1,10 +1,12 @@
-# Render Mapper Pro
+# PrevizRender <sub>(formerly Render Mapper Pro)</sub>
 
 A standalone desktop app that maps videos onto 3D‑scene materials and renders them headlessly — built for LED‑wall / screen‑content workflows where one scene drives many video surfaces.
 
+PrevizRender is one of three sibling tools built by [hamLT](https://motion.hamlt.com) and powered by [Toy Robot Media](https://toyrobotmedia.com): **[Preshow.link](https://www.preshow.link)** plans and previzes the show, **[UV Studio](https://uv.preshow.link)** maps artwork onto the venue's screens, and **PrevizRender** renders the comps locally. Product site: **[render.preshow.link](https://render.preshow.link)** (deployed from [`site/`](site/) via GitHub Pages, same as UV Studio's). (Installer and bundle artifacts keep the `RenderMapperPro` name so auto-updates and install paths stay valid.)
+
 It supports **two render backends**, chosen automatically by scene type: **Blender** (`.blend`, `.fbx`, `.usd`, …) and **Cinema 4D + Redshift** (`.c4d`). It runs the renderer in the background, so a renderer crash can never take down the app, and ships bundled static `ffmpeg`/`ffprobe` so audio muxing and clip probing work out of the box.
 
-![Render Mapper Pro](docs/screenshots/render-mapper-pro.png)
+![PrevizRender](docs/screenshots/previzrender.png)
 
 ## Download
 
