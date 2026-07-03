@@ -7,8 +7,8 @@
 # styling step fails (e.g. no Finder/window-server session), it falls back to a
 # plain dmg so a release build never breaks.
 #
-# Unsigned — Gatekeeper still shows a one-time "unidentified developer" prompt
-# (right-click → Open) until the .app is signed + notarized with an Apple cert.
+# The .app should be signed + notarized before calling this script so Gatekeeper
+# opens it without prompts. The script works with unsigned builds too (CI dev).
 set -euo pipefail
 
 OUT="${1:?usage: make_dmg.sh <output.dmg> [app]}"

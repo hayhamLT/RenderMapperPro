@@ -562,8 +562,13 @@ def run_web_job(job: JobConfig, on_log: LogCallback | None = None,
                     raise RuntimeError("web renderer returned no frame data")
                 (out_dir / f"out_{out_i:05d}.png").write_bytes(
                     base64.b64decode(data_url.split(",", 1)[1]))
-                if out_i % 20 == 0:
-                    log(f"[web] frame {out_i + 1}/{total}")
+                # Per-frame progress. The desktop queue bar parses 'Fra:<frame>'
+                # (the same absolute-frame token the Blender backend emits) so it
+                # advances correctly for any frame range — the old 'frame i/total'
+                # (an output index, logged only every 20) left the queue bar stuck
+                # near 0%. The live-log panel still coalesces 'frame i/total' into
+                # one in-place bar, and throttles the per-frame spam.
+                log(f"[web] Rendering frame {out_i + 1}/{total} (Fra:{frame})")
             # Surface any error the page recorded during rendering instead of
             # silently shipping a partial result.
             page_err = page.evaluate("window.__error")

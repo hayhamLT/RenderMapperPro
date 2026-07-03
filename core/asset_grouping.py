@@ -22,22 +22,29 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core import naming
 from core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
-# Default parser for the spec convention. Every field is a named group so the
-# pattern can be edited per-show without touching code. Case-insensitive on the
-# fixed letters (d/s/a/v) so "d01"/"D01" both parse.
-DEFAULT_PATTERN = (
-    r"^(?P<prj>[A-Za-z][A-Za-z0-9]*?)_"
-    r"[Dd](?P<day>\d+)_"
-    r"[Ss](?P<setup>\d+)_"
-    r"[Aa](?P<asset>\d+)_"
-    r"(?P<screen>[A-Za-z0-9]+)_"
-    r"(?P<type>[A-Za-z0-9]+)_"
-    r"[Vv](?P<version>\d+)$"
-)
+# Filenames are described with the friendly, regex-free pattern from core.naming,
+# e.g. "{Project}_D{Day#}_S{Setup#}_A{Asset#}_{Screen}_{Type}_V{Version#}" — much
+# easier to read/edit per-show than a regex. A raw regex using the legacy named
+# groups (prj/day/setup/asset/screen/type/version) is still accepted, so
+# previously-saved configs keep working unchanged.
+DEFAULT_PATTERN = naming.DEFAULT_PATTERN
+
+# Friendly field name (lowercased) -> canonical ParsedClip key, so a pattern can
+# use human names ({Project}, {Version}) and still feed the spec's fields.
+_FIELD_ALIASES = {
+    "project": "prj", "prj": "prj", "proj": "prj",
+    "day": "day",
+    "setup": "setup",
+    "asset": "asset",
+    "screen": "screen",
+    "type": "type",
+    "version": "version", "ver": "version",
+}
 
 # Default output name for an assembled previz. Tokens are filled by
 # AssetGroup.output_name(); zero-padding matches the spec's fixed widths.
@@ -158,28 +165,54 @@ def _safe_format(template: str, tokens: dict[str, str]) -> str:
     return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", repl, template)
 
 
-def parse_clip(path: str, pattern: str = DEFAULT_PATTERN) -> ParsedClip | None:
-    """Decode a single clip path's stem into a :class:`ParsedClip`, or None when
-    it doesn't match the convention (so non-conforming files are skipped, not
-    misfiled)."""
-    stem = Path(path).stem
+def _is_friendly_pattern(pattern: str) -> bool:
+    return "{" in pattern and "}" in pattern
+
+
+def _match_fields(pattern: str, stem: str) -> dict | None:
+    """Canonical {prj,day,setup,asset,screen,type,version} values for a clip
+    stem, from either a friendly token pattern or a legacy named-group regex.
+    None if the stem doesn't match or the pattern is invalid."""
+    if _is_friendly_pattern(pattern):
+        try:
+            compiled = naming.compile_pattern(pattern)
+        except naming.PatternError:
+            _log.warning("asset-grouping: invalid pattern %r", pattern)
+            return None
+        parsed = compiled.parse(stem)
+        if parsed is None:
+            return None
+        out: dict = {}
+        for fname, value in parsed.items():
+            key = _FIELD_ALIASES.get(fname.lower())
+            if key:
+                out[key] = value
+        return out
     try:
         m = re.match(pattern, stem)
     except re.error:
         _log.warning("asset-grouping: invalid pattern %r", pattern)
         return None
-    if not m:
+    return m.groupdict() if m else None
+
+
+def parse_clip(path: str, pattern: str = DEFAULT_PATTERN) -> ParsedClip | None:
+    """Decode a single clip path's stem into a :class:`ParsedClip`, or None when
+    it doesn't match the convention (so non-conforming files are skipped, not
+    misfiled). ``pattern`` may be a friendly token pattern or a legacy regex."""
+    stem = Path(path).stem
+    g = _match_fields(pattern, stem)
+    if g is None:
         return None
-    g = m.groupdict()
     try:
         return ParsedClip(
             path=path,
-            prj=g.get("prj", ""),
+            prj=str(g.get("prj", "") or ""),
             day=int(g.get("day", 0) or 0),
             setup=int(g.get("setup", 0) or 0),
             asset=int(g.get("asset", 0) or 0),
-            screen=g.get("screen", ""),
-            type=g.get("type", ""),
+            screen=str(g.get("screen", "") or ""),
+            type=str(g.get("type", "") or ""),
             version=int(g.get("version", 0) or 0),
         )
     except (TypeError, ValueError):

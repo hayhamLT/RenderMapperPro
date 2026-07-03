@@ -42,6 +42,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -52,9 +54,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidgetItem,
     QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -85,6 +87,7 @@ from core.models import (
     is_c4d_scene,
     uses_web_backend,
 )
+from core.naming import preview as naming_preview
 from core.utils import (
     IMAGE_MEDIA_EXTENSIONS,
     OUTPUT_PROFILES,
@@ -103,6 +106,7 @@ from media import (
     video_has_audio,
 )
 from theme import LINK_COLORS, active_palette
+from ui_dialogs import confirm
 from ui_widgets import (
     ROLE_HAS_AUDIO,
     ROLE_MAP_COLOR,
@@ -110,9 +114,11 @@ from ui_widgets import (
     ROLE_TARGET,
     ROLE_VIDEO_PATH,
     AudioBadgeDelegate,
+    FilenamePatternBuilder,
     HintListWidget,
     HintTableWidget,
     MaterialListWidget,
+    PairTableEditor,
     ScenePathLineEdit,
     TargetStripeDelegate,
     VideoListWidget,
@@ -157,6 +163,7 @@ class ScenePanel(QWidget):
         self._watch_interval_ms = 3000           # poll cadence (configurable in Properties)
         self._watch_settle = 2.0                 # seconds a file must be quiet before ingest
         self._watch_ignore = ""                  # a dir to skip while scanning (auto-render output)
+        self._watch_recursive = False            # also scan subfolders of the watch folder
         self._targets: list[str] = []            # materials marked as render targets
         self._autorender_last: frozenset | None = None   # last target version-set emitted
         self._watch_idle_polls = 0               # consecutive no-change polls (drives back-off)
@@ -570,11 +577,12 @@ class ScenePanel(QWidget):
             return
         n = len(paths)
         mapped = sum(1 for a in self._assignments if a.video_path in paths)
-        msg = f"Remove {n} clip{'s' if n != 1 else ''}?"
+        title = f"Remove {n} clip{'s' if n != 1 else ''}?"
+        parts = []
         if mapped:
-            msg += f"\n\n{mapped} material mapping{'s' if mapped != 1 else ''} will be removed too."
-        msg += "\n\nThis can be undone with Ctrl+Z."
-        if QMessageBox.question(self, "Remove Clips", msg) != QMessageBox.StandardButton.Yes:
+            parts.append(f"{mapped} material mapping{'s' if mapped != 1 else ''} will be removed too.")
+        parts.append("This can be undone with Ctrl+Z.")
+        if not confirm(self, title, "\n\n".join(parts), ok="Remove", cancel="Cancel", danger=True):
             return
         # Snapshot for undo: removing clips silently cascades to their mappings
         # and mute state, so it must be reversible like the other destructive actions.
@@ -640,10 +648,10 @@ class ScenePanel(QWidget):
         if not self._assignments:
             return
         n = len(self._assignments)
-        if QMessageBox.question(
+        if not confirm(
             self, "Clear Mappings",
             f"Remove all {n} mapping{'s' if n != 1 else ''}?\n\nThis can be undone with Ctrl+Z.",
-        ) != QMessageBox.StandardButton.Yes:
+            ok="Clear", cancel="Cancel", danger=True):
             return
         self.assignments_cleared.emit(
             [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in self._assignments])
@@ -862,6 +870,18 @@ class ScenePanel(QWidget):
     def get_watch_options(self) -> tuple[int, float]:
         return self._watch_interval_ms, self._watch_settle
 
+    def set_watch_recursive(self, on: bool) -> None:
+        """Also scan subfolders (the poll covers them; FS events still watch the
+        top folder only, which is fine — the poll is the reliable backstop)."""
+        on = bool(on)
+        if on != self._watch_recursive:
+            self._watch_recursive = on
+            self._watch_seen = {}       # force a fresh scan under the new scope
+            self._watch_sizes = {}
+
+    def get_watch_recursive(self) -> bool:
+        return self._watch_recursive
+
     def set_grouping_mode(self, on: bool) -> None:
         """When on, the watch folder emits ready clips for asset-grouping instead
         of auto-mapping them onto the current scene."""
@@ -879,25 +899,40 @@ class ScenePanel(QWidget):
         self._watch_scanning = True
         exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
         ignore = os.path.normpath(self._watch_ignore) if self._watch_ignore else ""
+        recursive = self._watch_recursive
+
+        def _ignored(path: str) -> bool:
+            # Skip the auto-render output dir (whole subtree) so rendered PREVIZ
+            # files are never re-ingested (no feedback loop).
+            if not ignore:
+                return False
+            p = os.path.normpath(path)
+            return p == ignore or p.startswith(ignore + os.sep)
+
+        def _collect(listing: list, path: str, name: str) -> None:
+            try:
+                if Path(name).suffix.lower() in exts:
+                    st = os.stat(path)
+                    # Flag cloud "online-only" placeholders so we don't ingest a
+                    # file whose bytes aren't on disk yet.
+                    dataless = is_cloud_placeholder(path, st)
+                    listing.append((path, st.st_size, st.st_mtime, dataless))
+            except OSError:
+                _log.debug("watch folder: failed to stat an entry", exc_info=True)
 
         def work():
-            listing = []
+            listing: list = []
             try:
-                with os.scandir(folder) as it:
-                    for e in it:
-                        try:
-                            # Skip the auto-render output dir so rendered PREVIZ
-                            # files are never re-ingested (no feedback loop).
-                            if ignore and os.path.normpath(e.path) == ignore:
-                                continue
-                            if e.is_file() and Path(e.name).suffix.lower() in exts:
-                                st = e.stat()
-                                # Flag cloud "online-only" placeholders so we don't
-                                # ingest a file whose bytes aren't on disk yet.
-                                dataless = is_cloud_placeholder(e.path, st)
-                                listing.append((e.path, st.st_size, st.st_mtime, dataless))
-                        except OSError:
-                            _log.debug("watch folder: failed to stat an entry", exc_info=True)
+                if recursive:
+                    for root, dirs, files in os.walk(folder):
+                        dirs[:] = [d for d in dirs if not _ignored(os.path.join(root, d))]
+                        for name in files:
+                            _collect(listing, os.path.join(root, name), name)
+                else:
+                    with os.scandir(folder) as it:
+                        for e in it:
+                            if not _ignored(e.path) and e.is_file():
+                                _collect(listing, e.path, e.name)
             except OSError:
                 listing = []
             self._watch_scanned.emit(listing)   # queued → delivered on the UI thread
@@ -916,10 +951,14 @@ class ScenePanel(QWidget):
         # All listed files count as "present" — including cloud placeholders — so
         # a clip that's evicted to online-only after ingest isn't treated as gone.
         present = {os.path.normpath(p) for p, _s, _m, _d in listing}
-        # Clips that came from the watch folder but are gone now (deleted, or
-        # renamed away) — drop them so a rename doesn't leave a stale duplicate.
+        # Clips that came from the watch folder (any depth, for recursive mode)
+        # but are gone now (deleted, or renamed away) — drop them so a rename
+        # doesn't leave a stale duplicate.
+        def _under_folder(v: str) -> bool:
+            d = os.path.normpath(os.path.dirname(v))
+            return d == folder or d.startswith(folder + os.sep)
         gone = {v for v in self._videos
-                if os.path.normpath(os.path.dirname(v)) == folder and os.path.normpath(v) not in present}
+                if _under_folder(v) and os.path.normpath(v) not in present}
 
         ready, mtimes, sizes = [], {}, {}
         for path, size, mtime, dataless in listing:
@@ -2290,6 +2329,8 @@ def _compose_job_icon(png_path: str, kind: str) -> QIcon:
 
 class QueuePanel(QWidget):
     queue_requested = Signal()
+    queue_clear_videos_requested = Signal()   # Shift+New: queue, then empty Videos
+    new_blank_requested = Signal()            # Ctrl/Cmd+Shift+New: brand-new empty
     start_selected_requested = Signal()
     start_all_requested = Signal()
     cancel_requested = Signal()
@@ -2317,9 +2358,13 @@ class QueuePanel(QWidget):
         btns.setSpacing(6)
         self.queue_btn = QPushButton("")
         self.queue_btn.setObjectName("IconButton")
-        self.queue_btn.setToolTip("New job — add a copy of the current setup to the queue (⌘D duplicates a selected job)")
+        self.queue_btn.setToolTip(
+            "New job — add a copy of the current setup to the queue.\n"
+            "Shift+click: also empty the Videos section (keep the scene).\n"
+            "Ctrl/⌘+Shift+click: start a brand-new empty job (no scene, no videos).\n"
+            "(⌘D duplicates a selected job)")
         self.queue_btn.setFixedSize(36, 30)
-        self.queue_btn.clicked.connect(self.queue_requested.emit)
+        self.queue_btn.clicked.connect(self._on_queue_btn_clicked)
         self.render_selected_btn = QPushButton("")
         self.render_selected_btn.setObjectName("PrimaryButton")
         self.render_selected_btn.setToolTip("Start rendering queued jobs")
@@ -2427,6 +2472,22 @@ class QueuePanel(QWidget):
         self.queue_btn.setIcon(icons.icon("plus", pal.text))
         self.render_selected_btn.setIcon(icons.icon("play", pal.accent_text, 15))
         self.cancel_btn.setIcon(icons.icon("stop", pal.danger, 14))
+
+    def _on_queue_btn_clicked(self) -> None:
+        """Route the New-job (+) button by held modifier:
+          • plain            → queue the current setup
+          • Shift            → queue, then empty the Videos section (keep the scene)
+          • Ctrl/Cmd + Shift → start a brand-new empty job (no scene, no videos)
+        Qt maps ⌘ to ControlModifier on macOS, so this mirrors the ⌘D shortcut."""
+        mods = QApplication.keyboardModifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and shift:
+            self.new_blank_requested.emit()
+        elif shift:
+            self.queue_clear_videos_requested.emit()
+        else:
+            self.queue_requested.emit()
 
     def set_progress(self, value: float, caption: str) -> None:
         self.progress_bar.setValue(int(max(0, min(100, value))))
@@ -3450,5 +3511,514 @@ class PreviewPanel(QWidget):
         muted = not self.audio.isMuted()
         self.audio.setMuted(muted)
         self.mute_btn.setText("Unmute" if muted else "Mute")
+
+
+def _step_label(num: str, title: str) -> QLabel:
+    lbl = QLabel(f"{num}  {title}")
+    pal = active_palette()
+    lbl.setStyleSheet(f"color:{pal.accent}; font-weight:700; font-size:11px; letter-spacing:1px;")
+    return lbl
+
+
+class WatchPanel(QWidget):
+    """The Watch & Auto-render control surface.
+
+    A single, plain-language automation read top to bottom — Source → Mode →
+    Naming → Output — plus a live activity feed. It is the editable *home* for
+    the watch-folder workflow: it drives ScenePanel's watch engine (folder /
+    start-stop / file-stability) and owns the auto-render + previz-assembly
+    config, emitting ``config_changed`` whenever the user edits anything so the
+    window can apply + persist it. A one-time first-run banner introduces it.
+    """
+    choose_folder_requested = Signal()
+    watch_toggled = Signal(bool)            # user pressed Start / Stop
+    config_changed = Signal()               # any non-folder setting was edited
+    first_run_dismissed = Signal()          # the intro banner was acknowledged
+    pick_output_dir_requested = Signal()    # browse for the render output folder
+    pick_deliver_dir_requested = Signal()   # browse for the delivery copy folder
+    preview_requested = Signal()            # previz dry-run preview
+
+    # Friendly label → file-stability seconds (the debounce window before ingest).
+    _SETTLE_OPTS: tuple[tuple[str, float], ...] = (
+        ("1 s", 1.0), ("2 s", 2.0), ("3 s", 3.0), ("5 s", 5.0), ("10 s", 10.0))
+    # Friendly label → poll cadence seconds (backstop; FS events catch local drops).
+    _POLL_OPTS: tuple[tuple[str, float], ...] = (
+        ("2 s", 2.0), ("3 s", 3.0), ("5 s", 5.0), ("10 s", 10.0), ("20 s", 20.0))
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._suppress = False              # guard set_*/load from re-emitting
+        self._previz_output = "{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}"
+        self._automap_output = "{clip}_PREVIZ"
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+        host = QWidget()
+        scroll.setWidget(host)
+        body = QVBoxLayout(host)
+        body.setContentsMargins(12, 12, 12, 12)
+        body.setSpacing(10)
+
+        # Header.
+        title = QLabel("Watch & Auto-render")
+        title.setStyleSheet(f"color:{active_palette().text}; font-size:15px; font-weight:800;")
+        body.addWidget(title)
+        self._subtitle = QLabel("Drop clips into a folder and they import, map and render automatically.")
+        self._subtitle.setObjectName("HintLabel")
+        self._subtitle.setWordWrap(True)
+        body.addWidget(self._subtitle)
+
+        # One-time first-run banner.
+        self.first_run = self._build_first_run()
+        self.first_run.setVisible(False)
+        body.addWidget(self.first_run)
+
+        body.addWidget(self._build_source_card())
+        body.addWidget(self._build_mode_card())
+        self.naming_card = self._build_naming_card()
+        body.addWidget(self.naming_card)
+        body.addWidget(self._build_output_card())
+        body.addWidget(self._build_activity_card(), 1)
+
+        self._update_preview()
+        self._refresh_mode_ui()
+
+    # ── section builders ─────────────────────────────────────────────────
+    @staticmethod
+    def _card() -> tuple[QFrame, QVBoxLayout]:
+        f = QFrame()
+        f.setObjectName("DialogCard")
+        v = QVBoxLayout(f)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(8)
+        return f, v
+
+    def _build_first_run(self) -> QFrame:
+        f = QFrame()
+        f.setObjectName("DialogCard")
+        v = QVBoxLayout(f)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(8)
+        head = QLabel("👋  Set up automatic rendering")
+        head.setStyleSheet(f"color:{active_palette().text}; font-weight:700;")
+        v.addWidget(head)
+        msg = QLabel(
+            "1. Pick a folder to watch.\n"
+            "2. Choose what happens when clips land — map them onto your scene, or "
+            "assemble previz by filename.\n"
+            "3. Press Start. New clips import and render on their own.")
+        msg.setObjectName("HintLabel")
+        msg.setWordWrap(True)
+        v.addWidget(msg)
+        row = QHBoxLayout()
+        row.addStretch()
+        got = QPushButton("Got it")
+        got.setObjectName("PrimaryButton")
+        got.clicked.connect(self._dismiss_first_run)
+        row.addWidget(got)
+        v.addLayout(row)
+        return f
+
+    def _build_source_card(self) -> QFrame:
+        f, v = self._card()
+        v.addWidget(_step_label("①", "SOURCE"))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.watch_toggle = QPushButton("Start")
+        self.watch_toggle.setObjectName("PrimaryButton")
+        self.watch_toggle.setCheckable(True)
+        self.watch_toggle.setMinimumWidth(96)
+        self.watch_toggle.setToolTip("Start / stop watching the folder for new clips")
+        self.watch_toggle.toggled.connect(self._on_toggle)
+        self.folder_label = QLabel("No watch folder")
+        self.folder_label.setObjectName("FieldLabel")
+        choose_btn = QPushButton("Choose…")
+        choose_btn.setToolTip("Pick the folder to watch")
+        choose_btn.clicked.connect(self.choose_folder_requested.emit)
+        row.addWidget(self.watch_toggle)
+        row.addWidget(self.folder_label, 1)
+        row.addWidget(choose_btn)
+        v.addLayout(row)
+        srow = QHBoxLayout()
+        srow.setSpacing(6)
+        srow.addWidget(QLabel("Wait"))
+        self.settle_combo = QComboBox()
+        self.settle_combo.addItems([lbl for lbl, _ in self._SETTLE_OPTS])
+        self.settle_combo.setFixedWidth(72)
+        self.settle_combo.setToolTip("How long a file must stop changing before it's imported — "
+                                     "avoids grabbing a clip that's still being copied")
+        self.settle_combo.currentIndexChanged.connect(lambda *_: self._emit_changed())
+        srow.addWidget(self.settle_combo)
+        hint = QLabel("after a file stops changing")
+        hint.setObjectName("HintLabel")
+        srow.addWidget(hint, 1)
+        v.addLayout(srow)
+        prow = QHBoxLayout()
+        prow.setSpacing(6)
+        prow.addWidget(QLabel("Re-scan every"))
+        self.poll_combo = QComboBox()
+        self.poll_combo.addItems([lbl for lbl, _ in self._POLL_OPTS])
+        self.poll_combo.setFixedWidth(72)
+        self.poll_combo.setToolTip("Backstop poll cadence — local drops are caught instantly by "
+                                   "filesystem events, so this only matters on network shares")
+        self.poll_combo.currentIndexChanged.connect(lambda *_: self._emit_changed())
+        prow.addWidget(self.poll_combo)
+        ph = QLabel("(filesystem events catch local drops instantly)")
+        ph.setObjectName("HintLabel")
+        prow.addWidget(ph, 1)
+        v.addLayout(prow)
+        self.recursive_check = QCheckBox("Include subfolders")
+        self.recursive_check.setToolTip("Also watch every folder inside the watch folder — "
+                                        "clips dropped in subfolders (per-day, per-setup…) are picked up too")
+        self.recursive_check.toggled.connect(lambda *_: self._emit_changed())
+        v.addWidget(self.recursive_check)
+        return f
+
+    def _build_mode_card(self) -> QFrame:
+        f, v = self._card()
+        v.addWidget(_step_label("②", "MODE"))
+        self.mode_group = QButtonGroup(self)
+        self.auto_radio = QRadioButton("Auto-map onto the current scene")
+        self.previz_radio = QRadioButton("Previz assembly — one render per asset, by filename")
+        self.auto_radio.setChecked(True)
+        for rb, desc in (
+            (self.auto_radio, "Map each dropped clip onto the open scene's materials and render it."),
+            (self.previz_radio, "Parse a filename convention and build one previz render per asset.")):
+            self.mode_group.addButton(rb)
+            v.addWidget(rb)
+            d = QLabel(desc)
+            d.setObjectName("HintLabel")
+            d.setWordWrap(True)
+            d.setContentsMargins(20, 0, 0, 4)
+            v.addWidget(d)
+        self.auto_radio.toggled.connect(self._on_mode_changed)
+        return f
+
+    def _build_naming_card(self) -> QFrame:
+        f, v = self._card()
+        v.addWidget(_step_label("③", "NAMING  ·  previz"))
+        v.addWidget(self._field_label("Filename pattern"))
+        self.pattern_edit = QLineEdit()
+        self.pattern_edit.textChanged.connect(self._on_pattern_changed)
+        v.addWidget(FilenamePatternBuilder(self.pattern_edit))
+        v.addWidget(self.pattern_edit)
+        srow = QHBoxLayout()
+        srow.setSpacing(6)
+        self.sample_edit = QLineEdit()
+        self.sample_edit.setPlaceholderText("Paste a sample filename to preview the match…")
+        self.sample_edit.textChanged.connect(lambda *_: self._update_preview())
+        srow.addWidget(self.sample_edit, 1)
+        v.addLayout(srow)
+        self.preview_label = QLabel("")
+        self.preview_label.setWordWrap(True)
+        v.addWidget(self.preview_label)
+        crow = QHBoxLayout()
+        crow.setSpacing(6)
+        crow.addWidget(QLabel("Only ingest type"))
+        self.content_edit = QLineEdit()
+        self.content_edit.setFixedWidth(110)
+        self.content_edit.setPlaceholderText("e.g. ANIM")
+        self.content_edit.textChanged.connect(lambda *_: self._emit_changed())
+        crow.addWidget(self.content_edit)
+        crow.addStretch()
+        v.addLayout(crow)
+        v.addWidget(self._field_label("Screen → Material"))
+        self.screen_table = PairTableEditor("Screen", "Material")
+        self.screen_table.changed.connect(self._emit_changed)
+        v.addWidget(self.screen_table)
+        v.addWidget(self._field_label("Setup # → Scene"))
+        self.setup_table = PairTableEditor("Setup #", "Scene", numeric_from=True)
+        self.setup_table.changed.connect(self._emit_changed)
+        v.addWidget(self.setup_table)
+        prow = QHBoxLayout()
+        prow.addStretch()
+        prev_btn = QPushButton("Preview (dry run)…")
+        prev_btn.setObjectName("SmallButton")
+        prev_btn.setToolTip("Show exactly what would be built from the watch folder's current clips")
+        prev_btn.clicked.connect(self.preview_requested.emit)
+        prow.addWidget(prev_btn)
+        v.addLayout(prow)
+        return f
+
+    def _build_output_card(self) -> QFrame:
+        f, v = self._card()
+        v.addWidget(_step_label("④", "OUTPUT"))
+        orow = QHBoxLayout()
+        orow.setSpacing(6)
+        orow.addWidget(QLabel("Name"))
+        self.output_edit = QLineEdit()
+        self.output_edit.setToolTip("Output filename. Accepts tokens like {clip}, {scene}, {date}.")
+        self.output_edit.textChanged.connect(self._on_output_changed)
+        orow.addWidget(self.output_edit, 1)
+        v.addLayout(orow)
+        drow = QHBoxLayout()
+        drow.setSpacing(6)
+        drow.addWidget(QLabel("Folder"))
+        self.out_dir_edit = QLineEdit()
+        self.out_dir_edit.setPlaceholderText("(default) a PREVIZ folder beside the watch folder")
+        self.out_dir_edit.textChanged.connect(lambda *_: self._emit_changed())
+        browse = QPushButton("…")
+        browse.setFixedWidth(32)
+        browse.clicked.connect(self.pick_output_dir_requested.emit)
+        drow.addWidget(self.out_dir_edit, 1)
+        drow.addWidget(browse)
+        v.addLayout(drow)
+        self.autostart_cb = QCheckBox("Render automatically as clips arrive")
+        self.autostart_cb.setToolTip("On: renders kick off on their own. Off: clips just import "
+                                     "(and queue), so you can review before rendering.")
+        self.autostart_cb.stateChanged.connect(lambda *_: self._emit_changed())
+        v.addWidget(self.autostart_cb)
+        delrow = QHBoxLayout()
+        delrow.setSpacing(6)
+        delrow.addWidget(QLabel("Deliver to"))
+        self.deliver_edit = QLineEdit()
+        self.deliver_edit.setPlaceholderText("(optional) also copy finished renders here")
+        self.deliver_edit.setToolTip("After a render finishes, copy its output(s) into this folder "
+                                     "too — e.g. a synced review folder. Blank = off.")
+        self.deliver_edit.textChanged.connect(lambda *_: self._emit_changed())
+        delbrowse = QPushButton("…")
+        delbrowse.setFixedWidth(32)
+        delbrowse.clicked.connect(self.pick_deliver_dir_requested.emit)
+        delrow.addWidget(self.deliver_edit, 1)
+        delrow.addWidget(delbrowse)
+        v.addLayout(delrow)
+        return f
+
+    def _build_activity_card(self) -> QFrame:
+        f, v = self._card()
+        head = QHBoxLayout()
+        head.addWidget(_step_label("⑤", "ACTIVITY"))
+        head.addStretch()
+        # Silent-ignore fix: clips sitting in the folder that DIDN'T become jobs
+        # are surfaced, not swallowed — click opens the dry-run with per-file why.
+        self.ignored_btn = QPushButton("")
+        self.ignored_btn.setObjectName("SmallButton")
+        self.ignored_btn.setStyleSheet(f"color:{active_palette().warning};")
+        self.ignored_btn.setToolTip("Some clips in the watch folder didn't become jobs — "
+                                    "click to see each one and why (dry run)")
+        self.ignored_btn.clicked.connect(self.preview_requested.emit)
+        self.ignored_btn.setVisible(False)
+        head.addWidget(self.ignored_btn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setObjectName("SmallButton")
+        clear_btn.clicked.connect(self.clear_activity)
+        head.addWidget(clear_btn)
+        v.addLayout(head)
+        self.activity = HintTableWidget(
+            0, 3,
+            "Ingest activity appears here.\n\nPress Start — dropped clips import, "
+            "version-update and queue automatically.")
+        self.activity.setHorizontalHeaderLabels(["Time", "Event", "Detail"])
+        self.activity.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.activity.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.activity.verticalHeader().setVisible(False)
+        self.activity.setColumnWidth(0, 70)
+        self.activity.setColumnWidth(1, 84)
+        self.activity.horizontalHeader().setStretchLastSection(True)
+        self.activity.setAlternatingRowColors(True)
+        self.activity.setMinimumHeight(120)
+        v.addWidget(self.activity)
+        return f
+
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("FieldLabel")
+        return lbl
+
+    # ── behaviour ────────────────────────────────────────────────────────
+    def restyle(self, pal: T.Palette) -> None:
+        self._subtitle.setStyleSheet("")
+        self._update_preview()
+
+    def _emit_changed(self) -> None:
+        if not self._suppress:
+            self.config_changed.emit()
+
+    def _on_toggle(self, on: bool) -> None:
+        if self._suppress:
+            return
+        self.watch_toggle.setText("Watching" if on else "Start")
+        self.watch_toggled.emit(on)
+
+    def _on_mode_changed(self, *_a) -> None:
+        self._refresh_mode_ui()
+        if not self._suppress:
+            # swap the Output name to the active mode's stored template
+            self._suppress = True
+            self.output_edit.setText(self._previz_output if self.previz_radio.isChecked()
+                                     else self._automap_output)
+            self._suppress = False
+            self.config_changed.emit()
+
+    def _refresh_mode_ui(self) -> None:
+        self.naming_card.setVisible(self.previz_radio.isChecked())
+        self.set_ignored(getattr(self, "_ignored_count", 0))   # badge is previz-only
+
+    def _on_pattern_changed(self, *_a) -> None:
+        self._update_preview()
+        self._emit_changed()
+
+    def _on_output_changed(self, text: str) -> None:
+        if self._suppress:
+            return
+        if self.previz_radio.isChecked():
+            self._previz_output = text
+        else:
+            self._automap_output = text
+        self.config_changed.emit()
+
+    def _update_preview(self) -> None:
+        pal = active_palette()
+        sample = self.sample_edit.text().strip() if hasattr(self, "sample_edit") else ""
+        if not sample:
+            self.preview_label.setText("")
+            return
+        res = naming_preview(self.pattern_edit.text().strip(), sample)
+        if res.ok:
+            fields = "  ·  ".join(f"{k}={v}" for k, v in res.fields.items())
+            self.preview_label.setText(f"✓ matches   {fields}")
+            self.preview_label.setStyleSheet(f"color:{pal.success}; font-size:11px;")
+        else:
+            self.preview_label.setText(f"✗ {res.error}")
+            self.preview_label.setStyleSheet(f"color:{pal.danger}; font-size:11px;")
+
+    def _dismiss_first_run(self) -> None:
+        self.first_run.setVisible(False)
+        self.first_run_dismissed.emit()
+
+    def show_first_run(self, on: bool) -> None:
+        self.first_run.setVisible(bool(on))
+
+    # ── state in/out ─────────────────────────────────────────────────────
+    def set_folder_state(self, folder: str, enabled: bool) -> None:
+        """Reflect the engine's folder + watching state (no signal re-emit)."""
+        self._suppress = True
+        try:
+            self.folder_label.setText(Path(folder).name if folder else "No watch folder")
+            self.folder_label.setToolTip(folder or "Choose a folder to watch")
+            on = bool(enabled and folder)
+            self.watch_toggle.setChecked(on)
+            self.watch_toggle.setText("Watching" if on else "Start")
+        finally:
+            self._suppress = False
+
+    def set_mode(self, grouping_on: bool) -> None:
+        """Reflect previz vs auto-map (no signal re-emit)."""
+        self._suppress = True
+        try:
+            (self.previz_radio if grouping_on else self.auto_radio).setChecked(True)
+            self.output_edit.setText(self._previz_output if grouping_on else self._automap_output)
+        finally:
+            self._suppress = False
+        self._refresh_mode_ui()
+
+    def load_config(self, *, grouping_enabled: bool, pattern: str, content_type: str,
+                    output_template: str, autorender_pattern: str,
+                    screen_to_material: dict, setup_to_scene: dict,
+                    settle_s: float, poll_interval_s: float, autorender_start: bool,
+                    output_dir: str, deliver_dir: str, recursive: bool = False) -> None:
+        """Populate every control from the persisted config without emitting."""
+        self._suppress = True
+        try:
+            self._previz_output = output_template or self._previz_output
+            self._automap_output = autorender_pattern or self._automap_output
+            (self.previz_radio if grouping_enabled else self.auto_radio).setChecked(True)
+            self.pattern_edit.setText(pattern)
+            self.content_edit.setText(content_type)
+            self.output_edit.setText(self._previz_output if grouping_enabled else self._automap_output)
+            self.screen_table.set_pairs(screen_to_material)
+            self.setup_table.set_pairs(setup_to_scene)
+            self.out_dir_edit.setText(output_dir)
+            self.deliver_edit.setText(deliver_dir)
+            self.autostart_cb.setChecked(bool(autorender_start))
+            self.settle_combo.setCurrentIndex(self._nearest(self._SETTLE_OPTS, settle_s))
+            self.poll_combo.setCurrentIndex(self._nearest(self._POLL_OPTS, poll_interval_s))
+            self.recursive_check.setChecked(bool(recursive))
+        finally:
+            self._suppress = False
+        self._refresh_mode_ui()
+        self._update_preview()
+
+    @staticmethod
+    def _nearest(opts: tuple[tuple[str, float], ...], value: float) -> int:
+        return min(range(len(opts)), key=lambda i: abs(opts[i][1] - float(value)))
+
+    def get_config(self) -> dict:
+        """Read every control into a flat dict the window maps onto its config."""
+        return {
+            "grouping_enabled": self.previz_radio.isChecked(),
+            "pattern": self.pattern_edit.text().strip(),
+            "content_type": self.content_edit.text().strip(),
+            "output_template": self._previz_output.strip(),
+            "autorender_pattern": self._automap_output.strip(),
+            "screen_to_material": self.screen_table.get_pairs(),
+            "setup_to_scene": self.setup_table.get_pairs(),
+            "settle_s": self._SETTLE_OPTS[self.settle_combo.currentIndex()][1],
+            "poll_interval_s": self._POLL_OPTS[self.poll_combo.currentIndex()][1],
+            "recursive": self.recursive_check.isChecked(),
+            "deliver_dir": self.deliver_edit.text().strip(),
+            "autorender_start": self.autostart_cb.isChecked(),
+            "output_dir": self.out_dir_edit.text().strip(),
+        }
+
+    # ── ignored-clips badge ──────────────────────────────────────────────
+    def set_ignored(self, count: int) -> None:
+        """Surface clips that were seen but did NOT become jobs (pattern/type
+        mismatch, unmapped screen, superseded). Zero (or auto-map mode) hides."""
+        self._ignored_count = max(0, int(count))
+        show = self._ignored_count > 0 and self.previz_radio.isChecked()
+        if show:
+            self.ignored_btn.setText(f"⚠ {self._ignored_count} clip(s) skipped — why?")
+        self.ignored_btn.setVisible(show)
+
+    # ── activity feed (persisted) ────────────────────────────────────────
+    def set_history_path(self, path) -> None:
+        """Point the feed at an on-disk ingest history and preload the recent
+        tail, so 'did that clip get picked up last night?' survives a restart."""
+        self._history_path = Path(path)
+        try:
+            lines = self._history_path.read_text(encoding="utf-8").splitlines()[-100:]
+        except OSError:
+            return
+        for line in lines:                      # oldest→newest; newest ends on top
+            parts = line.split("\t", 2)
+            if len(parts) == 3:
+                stamp, event, detail = parts
+                self._insert_activity_row(stamp.split(" ")[-1], event, detail,
+                                          tooltip=f"{stamp} — {detail}")
+
+    def add_activity(self, event: str, detail: str) -> None:
+        self._insert_activity_row(time.strftime("%H:%M:%S"), event, detail, tooltip=detail)
+        hist = getattr(self, "_history_path", None)
+        if hist is not None:
+            try:
+                hist.parent.mkdir(parents=True, exist_ok=True)
+                with hist.open("a", encoding="utf-8") as f:
+                    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    f.write(f"{stamp}\t{event}\t{detail}\n".replace("\r", " "))
+            except OSError:
+                pass                             # history is best-effort, never blocks ingest
+
+    def _insert_activity_row(self, when: str, event: str, detail: str, *, tooltip: str) -> None:
+        self.activity.insertRow(0)
+        for col, text in enumerate((when, event, detail)):
+            item = QTableWidgetItem(text)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if col == 2:
+                item.setToolTip(tooltip)
+            self.activity.setItem(0, col, item)
+        while self.activity.rowCount() > 200:
+            self.activity.removeRow(self.activity.rowCount() - 1)
+
+    def clear_activity(self) -> None:
+        # Clears the visible feed only — the on-disk history stays (audit trail).
+        self.activity.setRowCount(0)
+
 
 

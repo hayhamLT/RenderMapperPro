@@ -58,6 +58,8 @@ def test_launch_enables_local_module_access() -> None:
     from core import web_render as wr
 
     for cfg in (wr._GPU_LAUNCH, wr._SOFTWARE_LAUNCH):
-        assert "--allow-file-access-from-files" in cfg["args"], (
+        args = cfg["args"]
+        assert isinstance(args, list)
+        assert "--allow-file-access-from-files" in args, (
             "Chromium blocks file://→file:// ES-module imports without this flag"
         )

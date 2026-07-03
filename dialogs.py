@@ -19,12 +19,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from core.utils import find_deadlinecommand, subprocess_creation_flags
 from media import _find_ffprobe, find_ffmpeg_tool
+from ui_dialogs import error, inform, warn
 from workers import DeadlineQueryThread
 
 
@@ -51,20 +54,47 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     dlg.setWindowTitle("Properties & Settings")
     dlg.setMinimumWidth(720)
     dlg.setMinimumHeight(460)
+    # Open tall enough that the common tabs fit without scrolling; tabs that
+    # overflow (Watch & Auto-render) now scroll rather than squeeze.
+    dlg.resize(820, 760)
     root = QVBoxLayout(dlg)
     tabs = QTabWidget()
     root.addWidget(tabs)
 
-    def section_title(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setObjectName("DialogSection")
-        return lbl
+    def group(title: str) -> tuple[QGroupBox, QVBoxLayout]:
+        """A titled, framed section — the modern replacement for a bare all-caps
+        header. Returns the box (add it to the tab) and its content layout."""
+        box = QGroupBox(title)
+        gl = QVBoxLayout(box)
+        gl.setSpacing(8)
+        return box, gl
+
+    def disclose(checkbox: QCheckBox) -> tuple[QWidget, QVBoxLayout]:
+        """A body whose visibility follows a master checkbox (progressive
+        disclosure) — advanced options stay hidden until the feature is on."""
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(18, 0, 0, 0)
+        bl.setSpacing(8)
+        body.setVisible(checkbox.isChecked())
+        checkbox.toggled.connect(body.setVisible)
+        return body, bl
 
     def _tab(title: str) -> QVBoxLayout:
-        page = QWidget()
-        v = QVBoxLayout(page)
+        # Each tab scrolls instead of squeezing. Without this, a short window
+        # compresses the page and word-wrapped hints get clipped/overlapped
+        # (the tall Watch & Auto-render tab was unreadable). The page keeps its
+        # natural height and a scrollbar appears only when it doesn't fit.
+        content = QWidget()
+        v = QVBoxLayout(content)
+        v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(10)
-        tabs.addTab(page, title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        tabs.addTab(scroll, title)
         return v
 
     def _open_path(target) -> None:
@@ -88,7 +118,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
 
     # ── General ──────────────────────────────────────────────────────
     lay = _tab("General")
-    lay.addWidget(section_title("WHEN A RENDER FINISHES"))
+    g, gl = group("When a render finishes")
     behave_row = QHBoxLayout()
     behave_row.addWidget(QLabel("Then:"))
     when_combo = QComboBox()
@@ -98,24 +128,27 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     when_combo.setCurrentIndex(_vals.index(win._when_done) if win._when_done in _vals else 0)
     behave_row.addWidget(when_combo)
     behave_row.addStretch()
-    lay.addLayout(behave_row)
+    gl.addLayout(behave_row)
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("PREVIEW"))
+    g, gl = group("Preview")
     preview_cb = QCheckBox("Show a live frame preview while rendering")
     preview_cb.setChecked(win._preview_enabled)
-    lay.addWidget(preview_cb)
-    lay.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
-                       "Turn off for a small speed-up on heavy scenes."))
+    gl.addWidget(preview_cb)
+    gl.addWidget(hint("Renders the current frame as it goes so you can watch progress. "
+                      "Turn off for a small speed-up on heavy scenes."))
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("STARTUP"))
+    g, gl = group("Startup")
     restore_cb = QCheckBox("Reopen the last session on launch")
     restore_cb.setChecked(getattr(win, "_restore_session_on_launch", False))
-    lay.addWidget(restore_cb)
-    lay.addWidget(hint("Off (default): the app opens to a clean, empty workspace — use "
-                       "Profile → New (⌘N) to start fresh anytime, the Scene picker's "
-                       "recents to reopen a scene, or Reopen Last Session to bring back "
-                       "your last scene + queue. On: it restores your last scene, mappings "
-                       "and queue automatically."))
+    gl.addWidget(restore_cb)
+    gl.addWidget(hint("Off (default): the app opens to a clean, empty workspace — use "
+                      "Profile → New (⌘N) to start fresh anytime, the Scene picker's "
+                      "recents to reopen a scene, or Reopen Last Session to bring back "
+                      "your last scene + queue. On: it restores your last scene, mappings "
+                      "and queue automatically."))
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Render Engines ───────────────────────────────────────────────
@@ -123,7 +156,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     lay.addWidget(hint("Scenes route to a renderer automatically by type — Blender for "
                        ".blend / .fbx / .usd / .obj…, and Cinema 4D + Redshift for .c4d."))
 
-    lay.addWidget(section_title("BLENDER"))
+    g, gl = group("Blender")
     blender_row = QHBoxLayout()
     blender_edit = QLineEdit(win._blender_path)
     blender_edit.setPlaceholderText("Path to the Blender executable")
@@ -131,7 +164,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     blender_row.addWidget(QLabel("Executable:"))
     blender_row.addWidget(blender_edit, 1)
     blender_row.addWidget(blender_locate)
-    lay.addLayout(blender_row)
+    gl.addLayout(blender_row)
 
     def do_locate_blender() -> None:
         if sys.platform == "darwin":
@@ -143,7 +176,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             if resolved:
                 blender_edit.setText(resolved)
             else:
-                QMessageBox.warning(
+                warn(
                     dlg, "Not a Blender App",
                     "That location doesn't contain Blender. Pick the Blender app itself "
                     "(e.g. /Applications/Blender.app) or its executable.")
@@ -157,9 +190,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     detect_row.addWidget(detect_btn)
     detect_row.addWidget(install_btn)
     detect_row.addStretch()
-    lay.addLayout(detect_row)
+    gl.addLayout(detect_row)
     blender_ver_lbl = hint("")
-    lay.addWidget(blender_ver_lbl)
+    gl.addWidget(blender_ver_lbl)
 
     def do_check_version() -> None:
         exe = blender_edit.text().strip()
@@ -190,8 +223,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     install_btn.clicked.connect(win._install_managed_runtime)
     blender_edit.editingFinished.connect(do_check_version)
     do_check_version()
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("CINEMA 4D + REDSHIFT"))
+    g, gl = group("Cinema 4D + Redshift")
     c4d_row = QHBoxLayout()
     c4dpy_edit = QLineEdit(win._c4dpy_path)
     c4dpy_edit.setPlaceholderText("Path to c4dpy (Cinema 4D's headless Python)")
@@ -199,13 +233,13 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     c4d_row.addWidget(QLabel("c4dpy:"))
     c4d_row.addWidget(c4dpy_edit, 1)
     c4d_row.addWidget(c4d_locate)
-    lay.addLayout(c4d_row)
+    gl.addLayout(c4d_row)
     c4d_detect_row = QHBoxLayout()
     c4d_detect_btn = QPushButton("Auto-detect")
     c4d_detect_btn.setToolTip("Search the usual install locations for Cinema 4D's c4dpy")
     c4d_detect_row.addWidget(c4d_detect_btn)
     c4d_detect_row.addStretch()
-    lay.addLayout(c4d_detect_row)
+    gl.addLayout(c4d_detect_row)
     c4d_status_lbl = hint("")
 
     def _c4d_refresh() -> None:
@@ -230,178 +264,59 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     c4d_locate.clicked.connect(do_locate_c4d)
     c4d_detect_btn.clicked.connect(do_detect_c4d)
     c4dpy_edit.editingFinished.connect(_c4d_refresh)
-    lay.addWidget(c4d_status_lbl)
+    gl.addWidget(c4d_status_lbl)
     _c4d_refresh()
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Watch & Auto-render ──────────────────────────────────────────
     lay = _tab("Watch && Auto-render")
-    lay.addWidget(section_title("WATCH FOLDER"))
-    lay.addWidget(hint("Drop clips into a watch folder and they import + map by name "
-                       "automatically (latest version wins)."))
-    _wi, _ws = win.scene_panel.get_watch_options()
-    watch_row = QHBoxLayout()
-    watch_interval_edit = QLineEdit(f"{_wi / 1000:g}")
-    watch_interval_edit.setFixedWidth(70)
-    watch_interval_edit.setToolTip("How often the watch folder is polled, in seconds.")
-    watch_settle_edit = QLineEdit(f"{_ws:g}")
-    watch_settle_edit.setFixedWidth(70)
-    watch_settle_edit.setToolTip("How long a file's size must stay steady before it's imported "
-                                 "(guards against half-copied files).")
-    watch_row.addWidget(QLabel("Poll interval (s):"))
-    watch_row.addWidget(watch_interval_edit)
-    watch_row.addSpacing(16)
-    watch_row.addWidget(QLabel("Stability window (s):"))
-    watch_row.addWidget(watch_settle_edit)
-    watch_row.addStretch()
-    lay.addLayout(watch_row)
+    g, gl = group("Watch & Auto-render")
+    gl.addWidget(hint("Watch a folder and render dropped clips automatically. The setup now "
+                      "lives in its own panel — choose a folder, pick auto-map or previz "
+                      "assembly, set the naming, and watch progress live."))
+    open_watch_btn = QPushButton("Open the Watch & Auto-render panel  →")
+    open_watch_btn.setObjectName("PrimaryButton")
 
-    lay.addWidget(section_title("AUTO-RENDER"))
-    ar_enable_cb = QCheckBox("Auto-render once every render-target screen has a clip")
-    ar_enable_cb.setChecked(win._autorender_enabled)
-    ar_enable_cb.setToolTip("Mark screens as render targets (right-click a material, or click its "
-                            "left stripe). When every target has a clip — or newer versions arrive — "
-                            "a single render covering all targets is queued (debounced).")
-    lay.addWidget(ar_enable_cb)
-    lay.addWidget(hint("Mark targets by right-clicking a material → Set as Render Target, or click the "
-                       "stripe on its left. Linking a clip also targets it. The render waits until "
-                       "every target has a clip."))
-    ar_start_cb = QCheckBox("Start it automatically (otherwise just add it to the queue)")
-    ar_start_cb.setChecked(win._autorender_start)
-    lay.addWidget(ar_start_cb)
-    ar_out_row = QHBoxLayout()
-    ar_out_edit = QLineEdit(win._autorender_output)
-    ar_out_edit.setPlaceholderText("Output folder (blank = a PREVIZ subfolder of the watch folder)")
-    ar_out_browse = QPushButton("Browse")
-    def _pick_ar_out() -> None:
-        d = QFileDialog.getExistingDirectory(dlg, "Auto-render output folder", ar_out_edit.text() or str(Path.home()))
-        if d:
-            ar_out_edit.setText(d)
-    ar_out_browse.clicked.connect(_pick_ar_out)
-    ar_out_row.addWidget(QLabel("Output:"))
-    ar_out_row.addWidget(ar_out_edit, 1)
-    ar_out_row.addWidget(ar_out_browse)
-    lay.addLayout(ar_out_row)
-    ar_pat_row = QHBoxLayout()
-    ar_pat_edit = QLineEdit(win._autorender_pattern)
-    ar_pat_edit.setToolTip("Output filename. Tokens: {clip} (first mapped clip), {scene}, {date}.")
-    ar_pat_row.addWidget(QLabel("Name:"))
-    ar_pat_row.addWidget(ar_pat_edit, 1)
-    ar_pat_hint = QLabel("tokens: {clip} {scene} {date}")
-    ar_pat_hint.setStyleSheet(f"color:{win._palette.text_muted}; font-size:11px;")
-    ar_pat_row.addWidget(ar_pat_hint)
-    lay.addLayout(ar_pat_row)
-
-    lay.addWidget(section_title("DELIVERY"))
-    lay.addWidget(hint("After a render finishes, copy the output(s) into this folder "
-                       "automatically — e.g. a synced delivery/review folder. Blank = off."))
-    dlv_row = QHBoxLayout()
-    dlv_edit = QLineEdit(win._deliver_dir)
-    dlv_edit.setPlaceholderText("Delivery folder (blank = no copy)")
-    dlv_browse = QPushButton("Browse")
-    def _pick_dlv() -> None:
-        d2 = QFileDialog.getExistingDirectory(dlg, "Delivery folder", dlv_edit.text() or str(Path.home()))
-        if d2:
-            dlv_edit.setText(d2)
-    dlv_browse.clicked.connect(_pick_dlv)
-    dlv_row.addWidget(QLabel("Copy to:"))
-    dlv_row.addWidget(dlv_edit, 1)
-    dlv_row.addWidget(dlv_browse)
-    lay.addLayout(dlv_row)
-
-    lay.addWidget(section_title("PREVIZ ASSEMBLY (WATCH FOLDER)"))
-    lay.addWidget(hint("Build one previz render per asset from a filename convention like "
-                       "PRJ001_D01_S01_A017_CENTER_ANIM_V003 — dropped clips are grouped by "
-                       "setup + asset, each screen maps to its material, and the newest "
-                       "version of each screen wins. Replaces auto-map while it's on."))
-    _ag = win._asset_grouping
-    ag_enable_cb = QCheckBox("Group watch-folder clips into previz renders by filename")
-    ag_enable_cb.setChecked(_ag.enabled)
-    lay.addWidget(ag_enable_cb)
-
-    lay.addWidget(QLabel("Filename pattern (regex, named groups):"))
-    ag_pat_edit = QLineEdit(_ag.pattern)
-    ag_pat_edit.setPlaceholderText("groups: prj, day, setup, asset, screen, type, version")
-    lay.addWidget(ag_pat_edit)
-
-    ag_row = QHBoxLayout()
-    ag_type_edit = QLineEdit(_ag.content_type)
-    ag_type_edit.setFixedWidth(90)
-    ag_type_edit.setPlaceholderText("ANIM")
-    ag_tmpl_edit = QLineEdit(_ag.output_template)
-    ag_tmpl_edit.setPlaceholderText("{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}")
-    ag_row.addWidget(QLabel("Content type:"))
-    ag_row.addWidget(ag_type_edit)
-    ag_row.addSpacing(12)
-    ag_row.addWidget(QLabel("Output name:"))
-    ag_row.addWidget(ag_tmpl_edit, 1)
-    lay.addLayout(ag_row)
-
-    lay.addWidget(QLabel("Screen → material overrides (optional):"))
-    ag_screen_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in _ag.screen_to_material.items()))
-    ag_screen_edit.setPlaceholderText("CENTER=Center_Screen, LEFT=Left_Screen   (blank = code is the material name)")
-    lay.addWidget(ag_screen_edit)
-
-    lay.addWidget(QLabel("Setup → scene (optional):"))
-    ag_setup_edit = QLineEdit(", ".join(f"{k}={v}" for k, v in sorted(_ag.setup_to_scene.items())))
-    ag_setup_edit.setPlaceholderText("1=/scenes/StageA.blend, 2=/scenes/StageB.blend   (blank = current scene)")
-    lay.addWidget(ag_setup_edit)
-
-    def _preview_assembly_dry_run() -> None:
-        from core.asset_grouping import GroupingConfig
-
-        def _pairs(text: str) -> dict:
-            out: dict[str, str] = {}
-            for part in text.split(","):
-                if "=" in part and part.split("=", 1)[0].strip():
-                    k, v = part.split("=", 1)
-                    out[k.strip()] = v.strip()
-            return out
-        tmp = GroupingConfig(
-            enabled=True,
-            pattern=ag_pat_edit.text().strip() or _ag.pattern,
-            content_type=ag_type_edit.text().strip() or "ANIM",
-            output_template=ag_tmpl_edit.text().strip() or _ag.output_template,
-            screen_to_material=_pairs(ag_screen_edit.text()),
-            setup_to_scene={int(k): v for k, v in _pairs(ag_setup_edit.text()).items() if k.isdigit()},
-        )
-        win._preview_assembly(tmp)
-    ag_preview_btn = QPushButton("Preview assembly (dry run)…")
-    ag_preview_btn.setToolTip("Show exactly what would be built from the watch folder's current clips")
-    ag_preview_btn.clicked.connect(_preview_assembly_dry_run)
-    lay.addWidget(ag_preview_btn)
+    def _open_watch_panel() -> None:
+        win._open_watch_render_panel()
+        dlg.accept()
+    open_watch_btn.clicked.connect(_open_watch_panel)
+    gl.addWidget(open_watch_btn)
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Updates ──────────────────────────────────────────────────────
     lay = _tab("Updates")
-    lay.addWidget(section_title("SOFTWARE UPDATES"))
-    lay.addWidget(hint("When a newer version is released, the app shows a popup with the "
-                       "release notes so you can download it — nothing installs without "
-                       "your say-so."))
+    g, gl = group("Software updates")
+    gl.addWidget(hint("When a newer version is released, the app shows a popup with the "
+                      "release notes so you can download it — nothing installs without "
+                      "your say-so."))
     upd_status = QLabel(f"This build is v{APP_VERSION}.")
     upd_status.setStyleSheet(f"color:{win._palette.text_muted}; font-size:12px;")
-    lay.addWidget(upd_status)
+    gl.addWidget(upd_status)
 
     launch_check_cb = QCheckBox("Check for updates on launch")
     launch_check_cb.setChecked(getattr(win, "_check_updates_on_launch", True))
-    lay.addWidget(launch_check_cb)
-    lay.addWidget(hint("Looks for a newer release a few seconds after the app starts and "
-                       "pops the update notice if one is found. Turn off to only check "
-                       "manually with the button below."))
+    gl.addWidget(launch_check_cb)
+    gl.addWidget(hint("Looks for a newer release a few seconds after the app starts and "
+                      "pops the update notice if one is found. Turn off to only check "
+                      "manually with the button below."))
 
     upd_check_btn = QPushButton("Check for Updates Now")
     upd_check_btn.clicked.connect(lambda: win._check_for_updates(manual=True))
     upd_row = QHBoxLayout()
     upd_row.addWidget(upd_check_btn)
     upd_row.addStretch()
-    lay.addLayout(upd_row)
+    gl.addLayout(upd_row)
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Deadline ─────────────────────────────────────────────────────
     lay = _tab("Deadline")
     lay.addWidget(hint("Submit Blender and Cinema 4D jobs to a Thinkbox Deadline farm. "
                        "Leave blank to render locally."))
-    lay.addWidget(section_title("CONFIGURATION"))
+    g, gl = group("Configuration")
 
     # Repo Path
     repo_row = QHBoxLayout()
@@ -411,7 +326,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     repo_row.addWidget(QLabel("Repository Path:"))
     repo_row.addWidget(repo_edit, 1)
     repo_row.addWidget(repo_locate)
-    lay.addLayout(repo_row)
+    gl.addLayout(repo_row)
 
     def do_locate_repo() -> None:
         chosen = QFileDialog.getExistingDirectory(dlg, "Select Deadline Repository Path", repo_edit.text() or "")
@@ -427,7 +342,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     cmd_row.addWidget(QLabel("Command Path:   "))
     cmd_row.addWidget(cmd_edit, 1)
     cmd_row.addWidget(cmd_locate)
-    lay.addLayout(cmd_row)
+    gl.addLayout(cmd_row)
 
     def do_locate_cmd() -> None:
         chosen, _ = QFileDialog.getOpenFileName(dlg, "Select deadlinecommand executable", cmd_edit.text() or "")
@@ -443,7 +358,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         "Use Test Connection to verify — any failure shows full details in Live Logs.")
     repo_help.setWordWrap(True)
     repo_help.setStyleSheet(f"color:{win._palette.text_muted}; font-size:11px;")
-    lay.addWidget(repo_help)
+    gl.addWidget(repo_help)
 
     # Name Template
     template_row = QHBoxLayout()
@@ -451,7 +366,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     template_edit.setPlaceholderText("e.g. Render Mapper Pro Job - {scene_name}")
     template_row.addWidget(QLabel("Name Template:  "))
     template_row.addWidget(template_edit, 1)
-    lay.addLayout(template_row)
+    gl.addLayout(template_row)
 
     # Comment
     comment_row = QHBoxLayout()
@@ -459,13 +374,13 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     comment_edit.setPlaceholderText("Optional job comment")
     comment_row.addWidget(QLabel("Job Comment:    "))
     comment_row.addWidget(comment_edit, 1)
-    lay.addLayout(comment_row)
+    gl.addLayout(comment_row)
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("CONNECTION"))
-
+    g, gl = group("Connection")
     status_lbl = QLabel("Connection status: Not tested")
     status_lbl.setStyleSheet(f"color: {win._palette.text_faint}; font-size: 11px; font-weight: bold;")
-    lay.addWidget(status_lbl)
+    gl.addWidget(status_lbl)
 
     # Buttons Row
     diag_btn_layout = QHBoxLayout()
@@ -474,19 +389,21 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     diag_btn_layout.addWidget(test_conn_btn)
     diag_btn_layout.addWidget(export_files_btn)
     diag_btn_layout.addStretch()
-    lay.addLayout(diag_btn_layout)
+    gl.addLayout(diag_btn_layout)
+    lay.addWidget(g)
     lay.addStretch()
 
     # ── Diagnostics ──────────────────────────────────────────────────
     lay = _tab("Diagnostics")
-    lay.addWidget(section_title("BUNDLED TOOLS"))
+    g, gl = group("Bundled tools")
     ff_lbl = QLabel(f"ffmpeg:   {find_ffmpeg_tool('ffmpeg') or 'not found'}\n"
                     f"ffprobe:  {_find_ffprobe() or 'not found'}")
     ff_lbl.setStyleSheet(f"color:{win._palette.text_muted}; font-size:11px;")
     ff_lbl.setWordWrap(True)
-    lay.addWidget(ff_lbl)
+    gl.addWidget(ff_lbl)
+    lay.addWidget(g)
 
-    lay.addWidget(section_title("FILES & LOGS"))
+    g, gl = group("Files & logs")
     data_dir = PROFILE_PATH.parent
     data_row = QHBoxLayout()
     data_row.addWidget(QLabel("App data folder:"))
@@ -496,7 +413,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     open_data_btn = QPushButton("Open")
     open_data_btn.clicked.connect(lambda: _open_path(data_dir))
     data_row.addWidget(open_data_btn)
-    lay.addLayout(data_row)
+    gl.addLayout(data_row)
     diag_tools = QHBoxLayout()
     open_log_btn = QPushButton("Open Logs Folder")
     open_log_btn.clicked.connect(lambda: _open_path(LOG_PATH.parent))
@@ -505,7 +422,8 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     diag_tools.addWidget(open_log_btn)
     diag_tools.addWidget(copy_diag_btn)
     diag_tools.addStretch()
-    lay.addLayout(diag_tools)
+    gl.addLayout(diag_tools)
+    lay.addWidget(g)
     lay.addStretch()
 
     # Dialog buttons live below the tabs.
@@ -538,42 +456,9 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         else:
             win._preview_enabled = preview_cb.isChecked()
 
-        # Watch / ingest options
-        def _to_float(s, d):
-            try:
-                return float(s)
-            except ValueError:
-                return d
-        interval_ms = int(max(1.0, _to_float(watch_interval_edit.text().strip(), 3.0)) * 1000)
-        settle_s = max(0.0, _to_float(watch_settle_edit.text().strip(), 2.0))
-        win.scene_panel.set_watch_options(interval_ms, settle_s)
-
-        # Auto-render (targets)
-        win._autorender_enabled = ar_enable_cb.isChecked()
-        win._autorender_start = ar_start_cb.isChecked()
-        win._autorender_output = ar_out_edit.text().strip()
-        win._autorender_pattern = ar_pat_edit.text().strip() or "{clip}_PREVIZ"
-        win._deliver_dir = dlv_edit.text().strip()
-
-        # Asset grouping
-        def _parse_pairs(text: str) -> dict:
-            out: dict[str, str] = {}
-            for part in text.split(","):
-                part = part.strip()
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    if k.strip():
-                        out[k.strip()] = v.strip()
-            return out
-        _ag = win._asset_grouping
-        _ag.enabled = ag_enable_cb.isChecked()
-        _ag.pattern = ag_pat_edit.text().strip() or _ag.pattern
-        _ag.content_type = ag_type_edit.text().strip()
-        _ag.output_template = ag_tmpl_edit.text().strip() or _ag.output_template
-        _ag.screen_to_material = _parse_pairs(ag_screen_edit.text())
-        _ag.setup_to_scene = {int(k): v for k, v in _parse_pairs(ag_setup_edit.text()).items()
-                              if k.isdigit()}
-        win._sync_grouping_mode()
+        # Watch / Auto-render / Previz settings now live in the Watch & Auto-render
+        # dock panel (which owns + persists them); the Properties tab is just a
+        # shortcut into it, so there is nothing to read back here.
 
         # Updates
         win._check_updates_on_launch = launch_check_cb.isChecked()
@@ -633,12 +518,12 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
             if ok:
                 status_lbl.setText("Connection status: Connected")
                 status_lbl.setStyleSheet(f"color: {win._palette.success}; font-size: 11px; font-weight: bold;")
-                QMessageBox.information(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
+                inform(dlg, "Deadline Connection", "Successfully connected to Deadline repository and updated pools, groups, and machine list!")
             else:
                 status_lbl.setText("Connection status: Connection failed")
                 status_lbl.setStyleSheet(f"color: {win._palette.danger}; font-size: 11px; font-weight: bold;")
-                QMessageBox.warning(dlg, "Deadline Warning",
-                                    res.get("error", "") or "deadlinecommand failed.")
+                warn(dlg, "Deadline Warning",
+                     res.get("error", "") or "deadlinecommand failed.")
         except RuntimeError:
             pass   # dialog already closed
 
@@ -649,7 +534,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
         if not Path(cmd).exists() and not shutil.which(cmd):
             status_lbl.setText("Connection status: deadlinecommand not found")
             status_lbl.setStyleSheet(f"color: {win._palette.danger}; font-size: 11px; font-weight: bold;")
-            QMessageBox.critical(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
+            error(dlg, "Deadline Connection Error", f"deadlinecommand not found at {cmd}.\nPlease check your Thinkbox Deadline installation.")
             return
         if win._props_deadline_thread is not None and win._props_deadline_thread.isRunning():
             return

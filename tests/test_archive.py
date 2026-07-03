@@ -40,6 +40,7 @@ def test_sidecar_feeds_verify(tmp_path):
     digest = sha256_file(f)
     sidecar = f"{digest}  blender-5.1.0-windows-x64.zip\n"
     expected = expected_sha256_from_sidecar(sidecar, f.name)
+    assert expected is not None
     verify_sha256(f, expected)   # must not raise
     with pytest.raises(RuntimeError):
         verify_sha256(f, "0" * 64)

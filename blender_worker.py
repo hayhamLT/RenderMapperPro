@@ -306,7 +306,13 @@ def _create_movie_texture_node(
     tex.image_user.use_auto_refresh = True
     tex.image_user.use_cyclic = True
     tex.image_user.frame_start = frame_start
-    tex.image_user.frame_duration = max(1, frame_end - frame_start + 1)
+    # The cyclic loop period must be the clip's REAL length, not the render-range
+    # length. With the range length, once the timeline ran past the clip Blender
+    # was asked for movie frames that don't exist — they rendered blank/alpha (or
+    # mis-looped) for the rest of the range. ``image.frame_duration`` is the
+    # movie's true frame count; fall back to the range only if it can't be read.
+    clip_len = int(getattr(image, "frame_duration", 0) or 0)
+    tex.image_user.frame_duration = clip_len if clip_len > 0 else max(1, frame_end - frame_start + 1)
     return tex
 
 

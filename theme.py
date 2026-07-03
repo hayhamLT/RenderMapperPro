@@ -410,6 +410,23 @@ def stylesheet(p: Palette) -> str:
         margin-top: 10px;
     }}
 
+    /* ── App message dialog (styled replacement for native QMessageBox) ──── */
+    QDialog#MessageDialog {{ background: transparent; }}
+    QFrame#DialogCard {{
+        background: {p.surface};
+        border: 1px solid {p.border_strong};
+        border-radius: {RADIUS_LG}px;
+    }}
+    QLabel#DialogTitle {{
+        color: {p.text};
+        font-size: {FONT_LG}px;
+        font-weight: 700;
+    }}
+    QLabel#DialogBody {{
+        color: {p.text_muted};
+        font-size: {FONT_BASE}px;
+    }}
+
     /* ── Lists & tables ───────────────────────────────────────────────── */
     QListWidget, QTableWidget, QTreeWidget {{
         background: {p.surface};

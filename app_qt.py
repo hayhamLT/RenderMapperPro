@@ -82,9 +82,10 @@ from app_window.preset_mixin import PRESETS_DIR, PresetMixin
 from app_window.queue_mixin import QueueMixin
 from app_window.reporting_mixin import ReportMixin
 from app_window.runtime_mixin import RuntimeMixin
-from app_window.update_mixin import UpdateMixin
+from app_window.update_mixin import GITHUB_REPO, UpdateMixin
+from app_window.watch_mixin import WatchMixin
+from core import crash as crash_capture
 from core.asset_grouping import GroupingConfig as AssetGroupingConfig
-from core.asset_grouping import group_clips, parse_clip
 from core.jobs import disk_space_warnings, migrate_profile
 from core.logging_setup import get_logger
 from core.metrics import (
@@ -109,7 +110,6 @@ from core.runtime import (
     _runtime_download_spec,
 )
 from core.utils import (
-    IMAGE_MEDIA_EXTENSIONS,
     OUTPUT_PROFILES,
     VIDEO_EXTENSIONS,
     atomic_write_text,
@@ -136,8 +136,10 @@ from panels import (
     QueuePanel,
     RenderPanel,
     ScenePanel,
+    WatchPanel,
 )
 from theme import set_active_palette
+from ui_dialogs import ask, confirm, error, inform, warn
 from ui_widgets import (
     _ImageView,
 )
@@ -155,6 +157,7 @@ HISTORY_PATH = Path.home() / ".blender_video_mapper" / "history.json"
 # Branded file extensions (JSON underneath) for user-facing Save/Open.
 PROJECT_EXT = ".rmproj"      # full project: scene, clips, mappings, queue
 LOG_PATH = Path.home() / ".blender_video_mapper" / "logs" / "app_qt.log"
+CRASH_DIR = Path.home() / ".blender_video_mapper" / "crashes"
 APP_NAME = app_version.APP_NAME
 APP_VERSION: str = app_version.__version__  # single source of truth (see app_version.py)
 PROFILE_VERSION = 3
@@ -270,8 +273,21 @@ def _resolve_runtime_script(name: str) -> str:
     raise FileNotFoundError(f"Runtime script not found: {name}")
 
 
+def _help_image_dir() -> str:
+    """The bundled User Guide screenshots (assets/help/img), '' if absent —
+    the guide degrades to text-only rather than showing broken images."""
+    roots = [Path(__file__).parent, Path.cwd()]
+    if getattr(sys, "frozen", False):
+        roots.insert(0, Path(getattr(sys, "_MEIPASS", "")))
+    for root in roots:
+        c = root / "assets" / "help" / "img"
+        if c.is_dir():
+            return str(c)
+    return ""
+
+
 class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, UpdateMixin, RuntimeMixin,
-                          ReportMixin):
+                          ReportMixin, WatchMixin):
     _update_checked = Signal(object, bool, str)   # (manifest dict | None, was-manual, error-text)
     _delivery_log = Signal(str, str)         # (message, kind) from the delivery-copy thread
     _sheets_built = Signal(int)              # count of contact sheets generated post-render
@@ -341,6 +357,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._deliver_dir = ""           # blank = no post-render delivery copy
         self._asset_grouping = AssetGroupingConfig()   # filename-convention previz assembly
         self._asset_group_jobs: dict = {}   # (setup, asset) → job id, for grouped-watch dedup
+        self._watch_first_run_seen = False   # one-time intro banner in the Watch panel
         self._restore_session_on_launch = False   # False = open clean; True = reopen last scene+queue
         self._last_session: dict = {}      # snapshot of the previous session, for Reopen Last Session
         self._material_aspects: dict = {}   # material → screen aspect (from discovery)
@@ -390,6 +407,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # turned the on-launch check off). A newer version pops the offer dialog.
         QTimer.singleShot(3000, self._launch_update_check)
         QTimer.singleShot(300, self._maybe_first_run)   # one-time welcome on first launch
+        QTimer.singleShot(900, self._offer_crash_reports)  # did the last run crash?
         # Size/position the window once it's shown: restore the user's last
         # adjustment if it's reasonable, otherwise default to 70% of the screen
         # centered.
@@ -463,6 +481,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             getattr(self, "queue_panel", None),
             getattr(self, "logs_panel", None),
             getattr(self, "preview_panel", None),
+            getattr(self, "watch_panel", None),
         ):
             if panel is not None and hasattr(panel, "restyle"):
                 panel.restyle(self._palette)
@@ -623,8 +642,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         lay.addWidget(btns)
         dlg.exec()
 
-    def _on_help_anchor(self, url: QUrl, _dlg: QDialog) -> None:
+    def _on_help_anchor(self, url: QUrl, _dlg: QDialog, browser: QTextBrowser | None = None) -> None:
         spec = url.toString()
+        # In-page jump (the How-To index links): scroll this tab, don't leave it.
+        if spec.startswith("#"):
+            if browser is not None:
+                browser.scrollToAnchor(spec[1:])
+            return
         if not spec.startswith("action:"):
             QDesktopServices.openUrl(url)   # external link → system browser
             return
@@ -677,13 +701,17 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         tabs.setDocumentMode(True)
         pal = self._palette
         css = self._help_css()
+        img_dir = _help_image_dir()
         for title, body in self._guide_sections():
             browser = QTextBrowser()
             browser.setOpenLinks(False)
+            if img_dir:
+                browser.setSearchPaths([img_dir])   # resolves the guide's <img> tags
             browser.setStyleSheet(
                 f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 20px 26px; }}")
             browser.setHtml(css + body)
-            browser.anchorClicked.connect(lambda url, d=dlg: self._on_help_anchor(url, d))
+            browser.anchorClicked.connect(
+                lambda url, d=dlg, b=browser: self._on_help_anchor(url, d, b))
             tabs.addTab(browser, title.replace("&", "&&"))   # && → literal & (not a mnemonic)
         lay.addWidget(tabs)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -703,6 +731,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         <p class="lead">PrevizRender maps your videos onto a 3D scene's
         materials and renders them — on your machine or a render farm. Each tab
         above covers one part of the app; here's the whole flow first.</p>
+        <p><img src="main-window.png" width="640"></p>
         <table class="steps" width="100%">
           <tr><td class="num" width="30">1</td><td><b>Add a scene</b> — drag a 3D
               file onto the <b>Scene</b> box, then click <b>Scan Scene</b>. See the
@@ -723,6 +752,176 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         show/hide panels from <i>View</i>. Press <kbd>⌘K</kbd> for the command
         palette, and switch light/dark in <i>View</i>. First, point the app at
         Blender (or let it fetch one) in <a href="action:properties/Render Engines">Properties</a>.</p>
+        """),
+            ("How-To Guides", """
+        <h2>How-To Guides</h2>
+        <p class="lead">Step-by-step recipes for the things you'll actually do.
+        Each is self-contained — jump to the one you need.</p>
+        <table class="steps" width="100%">
+          <tr><td class="fname">A</td><td><a href="#a">Map clips onto a scene and render (the basics)</a></td></tr>
+          <tr><td class="fname">B</td><td><a href="#b">Set up a watch folder that renders drops automatically</a></td></tr>
+          <tr><td class="fname">C</td><td><a href="#c">Auto-assemble previz from a filename convention</a></td></tr>
+          <tr><td class="fname">D</td><td><a href="#d">Route different setups to different scene files</a></td></tr>
+          <tr><td class="fname">E</td><td><a href="#e">Batch-render one mapping across many clips</a></td></tr>
+          <tr><td class="fname">F</td><td><a href="#f">Deliver finished renders to a review folder automatically</a></td></tr>
+          <tr><td class="fname">G</td><td><a href="#g">Render on a Deadline farm</a></td></tr>
+          <tr><td class="fname">H</td><td><a href="#h">Save a look as a preset and reuse it</a></td></tr>
+          <tr><td class="fname">I</td><td><a href="#i">Fix “my clips aren’t being picked up”</a></td></tr>
+        </table>
+
+        <h3 id="a">A · Map clips onto a scene and render</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Drag your 3D file (<code>.blend</code>,
+              <code>.c4d</code>, <code>.glb</code>) onto the <b>Scene</b> box and click
+              <b>Scan Scene</b>. Its materials appear in the list.</td></tr>
+          <tr><td class="num">2</td><td>Drag your videos into the <b>Videos</b> list and
+              choose a <b>Camera</b>.</td></tr>
+          <tr><td class="num">3</td><td>Click <b>Auto-match</b> to pair clips to materials
+              by name — or drag a clip onto a material to link them by hand.</td></tr>
+          <tr><td class="num">4</td><td>Check resolution, frame range, format and quality
+              in the <b>Render</b> panel (see the <b>Render Settings</b> tab).</td></tr>
+          <tr><td class="num">5</td><td>Press <b>Render</b> (<kbd>⌘R</kbd>). Watch progress
+              and the <b>Live Preview</b>; the finished file can open, reveal, or copy
+              itself somewhere when done.</td></tr>
+        </table>
+
+        <h3 id="b">B · Set up a watch folder (auto-render drops)</h3>
+        <p class="muted">Hands-off: point the app at a folder and every clip dropped
+        there imports, maps onto your scene, and renders — great for “drop a new cut,
+        get a new preview” loops.</p>
+        <p><img src="watch-source.png" width="420"></p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Load the scene and clips once, and
+              mark which screens matter: <b>right-click a material → Mark as Render
+              Target</b> (or click the coloured stripe on its left edge).</td></tr>
+          <tr><td class="num">2</td><td>Open <b>View → Watch &amp; Auto-render</b>. In
+              <b>① Source</b>, click <b>Choose…</b> and pick the folder to watch.</td></tr>
+          <tr><td class="num">3</td><td>In <b>② Mode</b>, leave it on <b>Auto-map onto the
+              current scene</b>.</td></tr>
+          <tr><td class="num">4</td><td>In <b>④ Output</b>, turn on <b>Start renders
+              automatically</b> (off = jobs just queue for you to start). Set the output
+              folder, or leave it blank for a <code>PREVIZ</code> subfolder.</td></tr>
+          <tr><td class="num">5</td><td>Press <b>Start</b>. Drop a clip named like a
+              material and it maps + renders on its own. A newer <code>_v2</code> next to
+              <code>_v1</code> takes over automatically — <b>latest wins</b>.</td></tr>
+        </table>
+        <p class="muted"><b>Tips:</b> raise <b>Wait</b> if very large files are still
+        copying when grabbed; tick <b>Include subfolders</b> to watch per-day/per-setup
+        folders too; the <b>⑤ Activity</b> feed logs every ingest (and survives a
+        restart).</p>
+
+        <h3 id="c">C · Auto-assemble previz from a filename convention</h3>
+        <p class="muted">If your footage is named by a convention, the watch folder can
+        build <b>one multi-screen render per asset</b> instead of mapping onto one
+        scene — drop 10 clips, get 5 assembled previz renders.</p>
+        <p><img src="watch-naming.png" width="420"></p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Open <b>View → Watch &amp;
+              Auto-render</b> and in <b>② Mode</b> choose <b>Previz assembly — one render
+              per asset</b>. The <b>③ Naming</b> card appears.</td></tr>
+          <tr><td class="num">2</td><td>Build the <b>filename pattern</b> from chips — no
+              regex. <code>{Field}</code> = text, <code>{Field#}</code> = number,
+              add <code>?</code> for optional. Hyphens are fine
+              (<code>TC-MASTER</code>).</td></tr>
+          <tr><td class="num">3</td><td>Paste a real filename into the <b>sample</b> box.
+              The live preview shows exactly what parses — or <i>where</i> it stopped and
+              what it expected.</td></tr>
+          <tr><td class="num">4</td><td>Fill <b>Screen → Material</b> (which material each
+              screen code drives) and, if you have multiple scenes,
+              <b>Setup # → Scene</b> (see guide&nbsp;D).</td></tr>
+          <tr><td class="num">5</td><td>Click <b>Preview (dry run)</b> to see exactly what
+              WOULD assemble — per asset: screen → material → clip → version — plus every
+              skipped clip and why. Then press <b>Start</b>.</td></tr>
+        </table>
+        <p><img src="preview-assembly.png" width="430"></p>
+        <p class="muted">Example pattern for a touring show:
+        <code>{ID#}_D{Day#}_{Section}_{Cue}_{Screen}_v{Version#}</code> parses
+        <code>80230_D2_War-Treaty_MusicH_TC-MASTER_v001.mp4</code> into its fields
+        automatically.</p>
+
+        <h3 id="d">D · Route setups to different scene files</h3>
+        <p class="muted">A show with several stage layouts (D1, D2, …) can send each
+        setup’s clips to its own scene.</p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Add a <b>Setup</b> field to your naming
+              pattern, e.g. <code>…_S{Setup#}_…</code> (or use the <b>Day</b> field if
+              that’s what distinguishes them).</td></tr>
+          <tr><td class="num">2</td><td>In the <b>③ Naming</b> card’s <b>Setup #&nbsp;→&nbsp;Scene</b>
+              table, click <b>+ Add</b> and map each setup number to its scene file —
+              <code>1 → /…/D1.c4d</code>, <code>2 → /…/D2.c4d</code>.</td></tr>
+          <tr><td class="num">3</td><td>Unmapped setups fall back to the currently loaded
+              scene. Use <b>Preview (dry run)</b> to confirm each asset shows the right
+              scene before rendering.</td></tr>
+        </table>
+
+        <h3 id="e">E · Batch-render one mapping across many clips</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Set up the scene + mapping once
+              (guide&nbsp;A).</td></tr>
+          <tr><td class="num">2</td><td>Add all the clips you want rendered with that
+              mapping to the <b>Videos</b> list.</td></tr>
+          <tr><td class="num">3</td><td>Use <b>Queue current mapping</b> — one job per clip
+              is added, each with its own resolved output name. Reorder, rename, set
+              priority, or remove any of them in the Queue.</td></tr>
+          <tr><td class="num">4</td><td>Press <b>Render All</b>. Jobs run in order; each
+              reports duration and per-frame metrics when done.</td></tr>
+        </table>
+
+        <h3 id="f">F · Deliver finished renders automatically</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Open <b>View → Watch &amp;
+              Auto-render</b> (or the render settings) and find <b>④ Output → Delivery</b>.</td></tr>
+          <tr><td class="num">2</td><td>Set a <b>Copy&nbsp;to</b> folder — a synced review
+              folder, a hand-off share, anything.</td></tr>
+          <tr><td class="num">3</td><td>Every finished render is now <b>also copied there</b>
+              automatically. Combine with a watch folder + auto-start for a fully
+              hands-off “clip lands → assembled preview appears in the review folder”
+              pipeline.</td></tr>
+        </table>
+
+        <h3 id="g">G · Render on a Deadline farm</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Open
+              <a href="action:properties/Deadline">Properties → Deadline</a> and point the
+              app at your Deadline <b>repository</b> (and <code>deadlinecommand</code> if
+              it isn’t auto-found). Click <b>Test</b>.</td></tr>
+          <tr><td class="num">2</td><td>Build your jobs in the Queue as usual (Blender
+              <i>and</i> C4D both submit).</td></tr>
+          <tr><td class="num">3</td><td>Choose <b>Submit to Deadline</b> instead of a local
+              render. Frames spread across your nodes; the app hands off and the farm
+              takes it from there.</td></tr>
+        </table>
+
+        <h3 id="h">H · Save a look as a preset</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Dial in resolution, format, quality,
+              tone-mapping and the other render settings you like.</td></tr>
+          <tr><td class="num">2</td><td><b>Save Preset…</b> and name it (e.g. “Client
+              Review 1080p”).</td></tr>
+          <tr><td class="num">3</td><td>Later, <b>Load Preset…</b> — or apply it to queued
+              jobs — to reproduce that look in one click. Presets live in the
+              <b>Presets</b> browser.</td></tr>
+        </table>
+
+        <h3 id="i">I · Fix “my clips aren’t being picked up”</h3>
+        <p><img src="watch-activity.png" width="420"></p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Skipped badge</td><td>If <b>⑤ Activity</b> shows
+              <b>“N clip(s) skipped — why?”</b>, click it — the dry run names every
+              skipped file and the reason (name doesn’t match, screen not mapped, older
+              version).</td></tr>
+          <tr><td class="fname">In a subfolder?</td><td>Turn on <b>Include subfolders</b>
+              in ① Source if clips land in nested folders.</td></tr>
+          <tr><td class="fname">Cloud placeholder</td><td>Dropbox/OneDrive “online-only”
+              files are skipped until their contents actually download — right-click →
+              <i>Always keep on this device</i>.</td></tr>
+          <tr><td class="fname">Still copying</td><td>A file must hold its size for the
+              <b>Wait</b> window before import; raise it for slow copies of huge
+              files.</td></tr>
+          <tr><td class="fname">Pattern mismatch</td><td>Use the live preview in ③ Naming
+              with a real filename — it pinpoints the first character where it
+              diverged.</td></tr>
+        </table>
         """),
             ("Scene & Clips", """
         <h2>Scene &amp; Clips</h2>
@@ -851,89 +1050,85 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         """),
             ("Watch & Auto-render", """
         <h2>Watch &amp; Auto-render</h2>
-        <p class="lead">Hands-off mode: point the app at a folder, mark the screens
-        that matter, and every time fresh footage lands it imports, maps, and
-        renders on its own — ideal for review loops and "drop a new cut, get a new
-        preview" pipelines.</p>
+        <p class="lead">Hands-off mode: point the app at a folder and every clip that
+        lands there imports, maps and renders on its own. Everything lives in the
+        <b>Watch &amp; Auto-render panel</b> (View → Watch &amp; Auto-render) — one
+        rule that reads top to bottom, ① Source → ⑤ Activity.</p>
+        <p><img src="watch-panel.png" width="430"></p>
 
-        <h3>1 · The watch folder</h3>
-        <p class="muted">Click the <b>clock</b> button under the Videos list (or set
-        it in <a href="action:properties/Watch">Properties → Watch &amp; Auto-render</a>)
-        and pick a folder. Anything you — or another app — drops there imports and
-        <b>auto-maps</b> to a material by name. It's:</p>
+        <h3>① Source — what to watch</h3>
+        <p><img src="watch-source.png" width="420"></p>
+        <p class="muted"><b>Choose…</b> a folder and press <b>Start</b>. The knobs:</p>
         <table class="feat" width="100%">
-          <tr><td class="fname">Version-aware</td><td>Drop <code>Screen_v2.mp4</code>
-              next to <code>Screen_v1.mp4</code> and the newer version takes over the
-              mapping — <b>latest wins</b>, no re-linking.</td></tr>
-          <tr><td class="fname">Instant + reliable</td><td>Local drops are picked up
-              the moment they land; folders on a <b>network share</b> or
-              <b>Dropbox/cloud</b> are polled as a backstop, so nothing is missed.</td></tr>
-          <tr><td class="fname">Copy-safe</td><td>A file is only imported once it has
-              finished writing (its size holds steady) — never a half-copied clip.</td></tr>
-          <tr><td class="fname">Cloud-aware</td><td>Dropbox/OneDrive <b>"online-only"</b>
-              placeholders are skipped until their contents are actually downloaded.</td></tr>
+          <tr><td class="fname">Wait</td><td>How long a file must stop changing before
+              it's imported — never a half-copied clip. Raise it for very large files
+              on slow copies.</td></tr>
+          <tr><td class="fname">Re-scan every</td><td>Backstop poll for network shares
+              and cloud folders; local drops are caught instantly by filesystem
+              events.</td></tr>
+          <tr><td class="fname">Include subfolders</td><td>Also watch every folder
+              inside — clips dropped into per-day or per-setup subfolders are picked
+              up too. The render output folder is always excluded.</td></tr>
+        </table>
+        <p class="muted">Dropbox/OneDrive <b>online-only placeholders</b> are skipped
+        until their bytes are actually on disk.</p>
+
+        <h3>② Mode — what happens to a clip</h3>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Auto-map</td><td>The clip maps onto the <b>current
+              scene's</b> material with the matching name; once every render-target
+              screen has a clip, one multi-screen render is queued. Drop
+              <code>Screen_v2.mp4</code> next to <code>v1</code> and the newer version
+              takes over — <b>latest wins</b>.</td></tr>
+          <tr><td class="fname">Assemble previz</td><td>For shows with a filename
+              convention: clips group into <b>one render per asset</b>, each routed to
+              the right scene file — drop 10 clips, get 5 assembled previz jobs.</td></tr>
         </table>
 
-        <h3>2 · Mark render targets</h3>
-        <p class="muted">Tell the app which screens an auto-render must cover:
-        <b>right-click a material → Mark as Render Target</b>, or click the coloured
-        <b>stripe</b> on the material's left edge. Targets are what the next step
-        waits for.</p>
-
-        <h3>3 · Auto-render</h3>
-        <p class="muted">In <a href="action:properties/Watch">Properties → Watch &amp;
-        Auto-render</a>, turn on <b>"Auto-render once every render-target screen has a
-        clip"</b>. As soon as every target has footage, a single <b>multi-screen
-        render</b> is created automatically (a burst of new versions is coalesced into
-        one render, not one per file). Choose how it behaves:</p>
+        <h3>③ Naming — teach it your convention (previz)</h3>
+        <p><img src="watch-naming.png" width="420"></p>
+        <p class="muted">Build the pattern from <b>chips</b> — no regex.
+        <code>{Field}</code> is text, <code>{Field#}</code> a number,
+        <code>{Field#?}</code> optional. Hyphenated codes like
+        <code>TC-MASTER</code> or <code>War-Treaty</code> are fine. Paste a real
+        filename into the sample box and the live preview shows exactly what parses
+        — or <i>where</i> it stopped and what it expected.</p>
         <table class="feat" width="100%">
-          <tr><td class="fname">Start automatically</td><td>On = it renders straight
-              away. Off = the job is just <b>added to the Queue</b> for you to start.</td></tr>
-          <tr><td class="fname">Output folder</td><td>Where renders go. Blank = a
-              <code>PREVIZ</code> subfolder inside the watch folder (kept out of the
-              scan, so previews never re-trigger themselves).</td></tr>
-          <tr><td class="fname">Name</td><td>Filename pattern with tokens
-              <code>{clip}</code> · <code>{scene}</code> · <code>{date}</code>.</td></tr>
+          <tr><td class="fname">Screen → Material</td><td>Which scene material each
+              screen code drives (defaults to the same name).</td></tr>
+          <tr><td class="fname">Setup # → Scene</td><td>Routes each setup number to
+              its own scene file (D1.c4d, D2.c4d, …); unmapped setups use the
+              current scene.</td></tr>
+          <tr><td class="fname">Version</td><td><b>Newest wins</b> — a newer version
+              updates that asset's existing job in place instead of piling up.</td></tr>
         </table>
+        <p class="muted"><b>Preview (dry run)</b> shows exactly what WOULD assemble —
+        per asset: screen → material → clip → version — plus every skipped clip and
+        why, before anything renders:</p>
+        <p><img src="preview-assembly.png" width="430"></p>
 
-        <h3>4 · Delivery (optional)</h3>
-        <p class="muted">Set a <b>Copy&nbsp;to</b> folder under <b>Delivery</b> and every
-        finished render is also copied there — e.g. a synced review/hand-off folder —
-        so collaborators get it without you lifting a finger. Blank = off.</p>
+        <h3>④ Output &amp; delivery</h3>
+        <p class="muted">Output name supports tokens; blank output folder = a
+        <code>PREVIZ</code> subfolder inside the watch folder (always excluded from
+        scanning). <b>Start renders automatically</b> = fully hands-off; off = jobs
+        just queue. Set a <b>delivery folder</b> and every finished render is also
+        copied there for review/hand-off.</p>
 
-        <h3>Tuning</h3>
-        <p class="muted">Two knobs in Properties: <b>poll interval</b> (how often a
-        network/cloud folder is re-checked) and the <b>settle</b> window (how long a
-        file's size must hold steady before import). Defaults suit most setups; raise
-        the settle time for very large files copied slowly.</p>
-        <p class="muted"><b>Tip:</b> watch + targets + auto-start + a delivery folder =
-        a fully automatic "new footage → rendered preview in the review folder"
-        pipeline.</p>
-
-        <h3>Asset grouping → previz auto-export (advanced)</h3>
-        <p class="muted">If your show uses a structured filename convention, the watch
-        folder can export <b>one multi-screen previz render per asset</b> instead of
-        mapping onto the current scene — drop 10 clips, get 5 assets. Turn it on in
-        <a href="action:properties/Watch">Properties → Watch &amp; Auto-render → Asset
-        grouping</a>.</p>
-        <p class="muted">From a name like
-        <code>PRJ001_D01_S01_A017_CENTER_ANIM_V003</code> it reads:</p>
+        <h3>⑤ Activity — trust, but verify</h3>
+        <p><img src="watch-activity.png" width="420"></p>
         <table class="feat" width="100%">
-          <tr><td class="fname">Setup (S##)</td><td>routes the render to that setup's
-              <b>scene</b> (or the current scene if none is mapped).</td></tr>
-          <tr><td class="fname">Asset (A###)</td><td>the <b>group key</b> — every screen
-              of one asset assembles into a single render.</td></tr>
-          <tr><td class="fname">Screen</td><td>maps to the <b>material</b> of the same name
-              (or an override you set).</td></tr>
-          <tr><td class="fname">Type (ANIM)</td><td>only this content type feeds a render;
-              stills/maps are ignored.</td></tr>
-          <tr><td class="fname">Version (V###)</td><td><b>newest wins</b>; a newer version
-              updates that asset's job in place instead of piling up.</td></tr>
+          <tr><td class="fname">Skipped badge</td><td>Clips that did <b>not</b> become
+              jobs (wrong name, unmapped screen, superseded version) are counted, not
+              swallowed — click <b>“N clip(s) skipped — why?”</b> for the per-file
+              explanation.</td></tr>
+          <tr><td class="fname">Ingest history</td><td>The feed is saved to
+              <code>logs/ingest_history.log</code> and reloaded on launch, so “did
+              that clip get picked up last night?” always has an answer. <b>Clear</b>
+              empties the visible list only.</td></tr>
         </table>
-        <p class="muted">Each asset exports as
-        <code>{prj}_D{day}_S{setup}_A{asset}_PREVIZ_V{ver}</code> (the name template,
-        parser regex, content type, screen→material map and per-setup scene are all
-        editable). Queue-only by default, or auto-start with the toggle above.</p>
+        <p class="muted"><b>Tip:</b> watch + previz mode + auto-start + a delivery
+        folder = a fully automatic “clip lands on the share → assembled preview in
+        the review folder” pipeline.</p>
         """),
             ("Render Farm", """
         <h2>Render Farm (Deadline)</h2>
@@ -1229,8 +1424,17 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         )
         self._apply_layout("default")
 
+        # Watch / Ingest: an opt-in dock for the (occasional) watch-folder
+        # workflow. Kept out of the layout presets, parked on the right and
+        # hidden until the user toggles it on from the View menu.
+        self.watch_panel = WatchPanel()
+        self.watch_dock = self._mk_dock("Watch & Auto-render", "WatchDock", self.watch_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.watch_dock)
+        self.watch_dock.hide()
+
         self.view_menu.addSeparator()
-        for d in (self.scene_dock, self.render_dock, self.deadline_dock, self.queue_dock, self.presets_dock, self.logs_dock, self.preview_dock):
+        for d in (self.scene_dock, self.render_dock, self.deadline_dock, self.queue_dock,
+                  self.presets_dock, self.logs_dock, self.preview_dock, self.watch_dock):
             self.view_menu.addAction(d.toggleViewAction())
 
         self.scene_panel.scan_requested.connect(self._scan_scene)
@@ -1241,9 +1445,23 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 f"[app] Auto-mapped {n} of {total} materials by name"
                 + ("" if n else " — no filenames matched a material name")))
         self.scene_panel.watch_status.connect(lambda msg: self._append_log(f"[app] {msg}"))
+        self.scene_panel.watch_status.connect(lambda msg: self.watch_panel.add_activity("Ingest", msg))
         self.scene_panel.watch_changed.connect(lambda *_: self._save_and_refresh_status())
+        self.scene_panel.watch_changed.connect(self._refresh_watch_panel)
         self.scene_panel.target_set_ready.connect(self._on_target_set_ready)
         self.scene_panel.watch_clips_ready.connect(self._on_watch_clips_ready)
+
+        self.watch_panel.choose_folder_requested.connect(self._pick_watch_folder)
+        self.watch_panel.watch_toggled.connect(self._toggle_watch_from_panel)
+        self.watch_panel.config_changed.connect(self._apply_watch_panel)
+        self.watch_panel.pick_output_dir_requested.connect(self._pick_watch_output_dir)
+        self.watch_panel.pick_deliver_dir_requested.connect(self._pick_watch_deliver_dir)
+        self.watch_panel.preview_requested.connect(self._preview_watch_assembly)
+        self.watch_panel.first_run_dismissed.connect(self._on_watch_first_run_dismissed)
+        # Ingest history: the activity feed writes through to disk and preloads
+        # its tail, so "did that clip get picked up last night?" is answerable.
+        self.watch_panel.set_history_path(Path(LOG_PATH).parent / "ingest_history.log")
+        self._load_watch_panel()
         self.scene_panel.targets_changed.connect(lambda *_: self._save_profile())
         self.scene_panel.assignments_cleared.connect(
             lambda snap: self._push_undo(f"Clear Mappings ({len(snap)})",
@@ -1308,6 +1526,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.scene_panel.camera_combo.currentTextChanged.connect(lambda _v: self._on_settings_changed())
 
         self.queue_panel.queue_requested.connect(self._queue_current_jobs)
+        self.queue_panel.queue_clear_videos_requested.connect(self._queue_current_jobs_clear_videos)
+        self.queue_panel.new_blank_requested.connect(self._new_blank_job)
         self.queue_panel.start_selected_requested.connect(lambda: self._start_render(render_all=False))
         self.queue_panel.start_all_requested.connect(lambda: self._start_render(render_all=True))
         self.queue_panel.cancel_requested.connect(self._cancel_render)
@@ -1652,7 +1872,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             self._c4dpy_path = found
             return found
         if interactive:
-            QMessageBox.warning(
+            warn(
                 self, "Cinema 4D Not Found",
                 "Couldn't find Cinema 4D's headless Python (c4dpy).\n\n"
                 "Install Cinema 4D (2023+) to render .c4d scenes, or use a "
@@ -1666,18 +1886,22 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             return b
         if not interactive:
             return None
-        ans = QMessageBox.question(
+        ans = ask(
             self,
             "Blender Not Found",
             "Blender is missing. Install managed Blender runtime now?\n\n"
             "Choose No to locate Blender manually.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Yes,
+            buttons=[
+                ("Yes", "yes", "primary"),
+                ("No", "no", "neutral"),
+                ("Cancel", "cancel", "neutral"),
+            ],
+            default="yes",
         )
-        if ans == QMessageBox.StandardButton.Yes:
+        if ans == "yes":
             self._install_managed_runtime()
             return None
-        if ans == QMessageBox.StandardButton.No:
+        if ans == "no":
             self._show_properties_dialog()
         return _find_blender(self._blender_path)
 
@@ -2087,208 +2311,6 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._request_auto_preview()
 
 
-    def _on_target_set_ready(self, assignments: list) -> None:
-        """All target screens have clips (and the set changed) — queue one
-        multi-screen render named after the clips with a PREVIZ suffix."""
-        if not self._autorender_enabled or not assignments:
-            return
-        scene = self.scene_panel.scene_edit.text().strip()
-        if not scene:
-            return
-        job = RenderJob(id=self._next_job_id)
-        self._next_job_id += 1
-        job.video_path = assignments[0].video_path
-        self._make_job_snapshot(job, assignments)
-
-        primary = Path(assignments[0].video_path).stem
-        base = (self._autorender_pattern or "{clip}_PREVIZ") \
-            .replace("{clip}", primary) \
-            .replace("{scene}", Path(scene).stem) \
-            .replace("{date}", datetime.now().strftime("%Y-%m-%d"))
-        out_fmt, _codec = OUTPUT_PROFILES.get(job.output_profile or "H264 MP4", ("MPEG4", "H264"))
-        ext = ext_for_format(out_fmt) or ".mp4"
-        watch_folder, _en = self.scene_panel.get_watch_folder()
-        out_dir = self._autorender_output or (
-            os.path.join(watch_folder, "PREVIZ") if watch_folder
-            else str(Path(assignments[0].video_path).parent / "PREVIZ"))
-        self.scene_panel.set_watch_ignore_dir(out_dir)   # never re-ingest our own renders
-        job.output_path = str(Path(out_dir) / f"{base}{ext}")
-        job.output_input = job.output_path
-        job.custom_label = True
-        job.label = f"Auto · {base}"
-        self._jobs.insert(0, job)
-        self._refresh_queue_view()
-        self._schedule_save()
-        screens = ", ".join(a.material_name for a in assignments)
-        self._append_log(f"[app] Auto-render queued: {job.label}  ({len(assignments)} screens: {screens})")
-        if self._autorender_start:
-            if self._is_rendering:
-                self._pending_autorender_ids.add(job.id)   # a render is busy — start it when that finishes
-                self._append_log("[app] Auto-render will start when the current render finishes.")
-            else:
-                self._start_render(only_job_ids={job.id})   # start just this auto-render job
-
-    def _sync_grouping_mode(self) -> None:
-        """Switch the watch folder between auto-map (normal) and asset-grouping."""
-        if hasattr(self, "scene_panel"):
-            self.scene_panel.set_grouping_mode(self._asset_grouping.enabled)
-
-    def _on_watch_clips_ready(self, paths: list) -> None:
-        """Asset-grouping watch path: parse the ready clips by the naming
-        convention and build one previz render job per (setup, asset). The newest
-        version of each screen wins; an existing job for that asset is updated
-        in place when a newer version lands, so re-renders don't pile up."""
-        if not self._asset_grouping.enabled or not paths:
-            return
-        try:
-            groups = group_clips(list(paths), self._asset_grouping)
-        except Exception as exc:
-            self._append_log(f"[app] Asset grouping failed: {exc}")
-            return
-        if not groups:
-            return
-        cur_scene = self.scene_panel.scene_edit.text().strip()
-        watch_folder, _en = self.scene_panel.get_watch_folder()
-        touched: set[int] = set()
-        created = updated = 0
-        for g in groups:
-            scene = (self._asset_grouping.setup_to_scene.get(g.setup) or cur_scene).strip()
-            if not scene:
-                self._append_log(
-                    f"[app] {g.prj} S{g.setup:02d} A{g.asset:03d}: no scene mapped for this "
-                    f"setup — set one in Properties → Watch & Auto-render. Skipped.")
-                continue
-            key = (g.setup, g.asset)
-            prev = self._asset_group_jobs.get(key)
-            existing = None
-            if prev is not None:
-                prev_id, prev_ver = prev
-                existing = next((j for j in self._jobs if j.id == prev_id), None)
-                if existing is not None and prev_ver >= g.version:
-                    continue   # already queued at this version or newer
-            asn = [MaterialVideoAssignment(mat, clip, VIDEO_MAPPING_MODE_EMISSION)
-                   for mat, clip in g.material_assignments(self._asset_grouping.screen_to_material)]
-            if not asn:
-                continue
-            if existing is None:
-                job = RenderJob(id=self._next_job_id)
-                self._next_job_id += 1
-                self._jobs.insert(0, job)
-                created += 1
-            else:
-                job = existing
-                updated += 1
-            job.video_path = asn[0].video_path
-            self._make_job_snapshot(job, asn)
-            job.scene_path = scene   # override: this setup's scene, not the loaded one
-            base = g.output_name(self._asset_grouping.output_template)
-            out_fmt, _c = OUTPUT_PROFILES.get(job.output_profile or "H264 MP4", ("MPEG4", "H264"))
-            ext = ext_for_format(out_fmt) or ".mp4"
-            out_dir = self._autorender_output or (
-                os.path.join(watch_folder, "PREVIZ") if watch_folder
-                else str(Path(scene).parent / "PREVIZ"))
-            self.scene_panel.set_watch_ignore_dir(out_dir)   # never re-ingest our own renders
-            job.output_path = str(Path(out_dir) / f"{base}{ext}")
-            job.output_input = job.output_path
-            job.custom_label = True
-            job.label = base
-            job.status, job.progress, job.error, job.selected = "idle", 0.0, "", True
-            self._asset_group_jobs[key] = (job.id, g.version)
-            touched.add(job.id)
-        if not touched:
-            return
-        self._refresh_queue_view()
-        self._schedule_save()
-        self._append_log(
-            f"[app] Asset grouping: {created} new + {updated} updated previz job(s) "
-            f"from {len(groups)} asset group(s).")
-        if self._autorender_start and not self._is_rendering:
-            self._start_render(only_job_ids=touched)
-
-    def _preview_assembly(self, cfg: AssetGroupingConfig | None = None) -> None:
-        """Dry-run the asset-grouping on the watch folder's current clips and show
-        exactly what WOULD be assembled — per asset: screen → material → clip →
-        version — plus any skipped clips and why. Makes the auto-assembly trustable
-        before it ever fires a render. ``cfg`` lets the Properties dialog preview its
-        in-progress edits; defaults to the saved grouping config."""
-        cfg = cfg or self._asset_grouping
-        folder, _en = self.scene_panel.get_watch_folder()
-        if not folder or not os.path.isdir(folder):
-            QMessageBox.information(self, "Preview Assembly",
-                "Choose a watch folder first (the watch button in the Scene panel).")
-            return
-        exts = VIDEO_EXTENSIONS | IMAGE_MEDIA_EXTENSIONS
-        try:
-            clips = sorted(str(p) for p in Path(folder).iterdir()
-                           if p.is_file() and p.suffix.lower() in exts)
-        except OSError:
-            clips = []
-        groups = group_clips(clips, cfg)
-        known_mats = set(self._discovered_materials)
-        cur_scene = self.scene_panel.scene_edit.text().strip()
-
-        pal = self._palette
-        rows = []
-        used: set[str] = set()
-        for g in groups:
-            scene = (cfg.setup_to_scene.get(g.setup) or cur_scene).strip()
-            scene_name = Path(scene).name if scene else "⚠ no scene mapped"
-            out = g.output_name(cfg.output_template)
-            screen_rows = []
-            for material, clip in g.material_assignments(cfg.screen_to_material):
-                used.add(clip)
-                pc = parse_clip(clip, cfg.pattern)
-                ver = f"V{pc.version:03d}" if pc else "?"
-                screen = pc.screen if pc else "?"
-                warn = "" if (not known_mats or material in known_mats) else \
-                    f" <span style='color:{pal.danger}'>(not in scene)</span>"
-                screen_rows.append(
-                    f"<tr><td style='color:{pal.text_muted}'>{screen}</td>"
-                    f"<td>→ <b>{material}</b>{warn}</td>"
-                    f"<td style='color:{pal.text_muted}'>← {Path(clip).name} · {ver}</td></tr>")
-            rows.append(
-                f"<p style='margin:14px 0 2px'><b>Asset A{g.asset:03d}</b> "
-                f"<span style='color:{pal.text_muted}'>· setup {g.setup} · scene {scene_name}</span><br>"
-                f"<span style='color:{pal.accent}'>{out}</span></p>"
-                f"<table cellpadding='2'>{''.join(screen_rows)}</table>")
-
-        skipped = []
-        for c in clips:
-            if c in used:
-                continue
-            pc = parse_clip(c, cfg.pattern)
-            if pc is None:
-                why = "doesn't match the filename pattern"
-            elif (pc.type or "").upper() != (cfg.content_type or "ANIM").upper():
-                why = f"type={pc.type} (only {cfg.content_type} is grouped)"
-            else:
-                why = "superseded by a newer version"
-            skipped.append(f"<li>{Path(c).name} <span style='color:{pal.text_muted}'>— {why}</span></li>")
-
-        summary = (f"<b>{len(groups)} asset(s)</b> from {len(clips)} clip(s) in "
-                   f"<span style='color:{pal.text_muted}'>{folder}</span>")
-        body = "".join(rows) if rows else f"<p style='color:{pal.text_muted}'>No assets matched the pattern.</p>"
-        skip_html = (f"<p style='margin-top:16px'><b>Skipped ({len(skipped)})</b></p>"
-                     f"<ul style='margin:2px 0'>{''.join(skipped)}</ul>") if skipped else ""
-        html = (f"<div style='font-size:13px'><p>{summary}</p>{body}{skip_html}</div>")
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Preview Assembly — dry run")
-        dlg.setMinimumSize(560, 480)
-        lay = QVBoxLayout(dlg)
-        view = QTextBrowser()
-        view.setHtml(html)
-        view.setStyleSheet(f"QTextBrowser{{border:1px solid {pal.border}; border-radius:8px; "
-                           f"background:{pal.surface}; padding:10px;}}")
-        lay.addWidget(view)
-        close = QPushButton("Close")
-        close.clicked.connect(dlg.accept)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(close)
-        lay.addLayout(row)
-        dlg.exec()
-
     def _request_auto_preview(self) -> None:
         """Debounced trigger: when Auto is on, re-render the preview a moment
         after the user stops changing settings/mappings."""
@@ -2620,18 +2642,19 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         names = "\n".join(f"•  {p.name}" for _, p in existing[:8])
         more = "" if len(existing) <= 8 else f"\n…and {len(existing) - 8} more"
-        box = QMessageBox(self)
-        box.setWindowTitle("Outputs Already Exist")
-        box.setText(f"{len(existing)} output(s) already exist:\n{names}{more}")
-        box.setInformativeText("Overwrite them, auto-rename to keep both, or cancel?")
-        ow = box.addButton("Overwrite", QMessageBox.ButtonRole.DestructiveRole)
-        rn = box.addButton("Auto-rename", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is ow:
+        ans = ask(
+            self, "Outputs Already Exist",
+            f"{len(existing)} output(s) already exist:\n{names}{more}\n\n"
+            "Overwrite them, auto-rename to keep both, or cancel?",
+            buttons=[
+                ("Cancel", "cancel", "neutral"),
+                ("Auto-rename", "rename", "primary"),
+                ("Overwrite", "overwrite", "danger"),
+            ],
+        )
+        if ans == "overwrite":
             return True
-        if clicked is rn:
+        if ans == "rename":
             for j, pth in existing:
                 j.output_path = self._unique_path(pth)
             self._refresh_queue_view()
@@ -2644,7 +2667,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         # Friendly guard: nothing is connected to render yet.
         if not self._jobs or not any(self._job_has_mapping(j) for j in self._jobs):
-            QMessageBox.warning(
+            warn(
                 self, "Nothing to Render",
                 "No video is connected to a material yet.\n\n"
                 "Add a video, select it together with a material, then click the "
@@ -2664,7 +2687,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             selected_ids = set(self.queue_panel.selected_job_ids()) if not render_all else set(j.id for j in self._jobs)
         pending = [j for j in self._jobs if j.id in selected_ids and j.status != "success"]
         if not pending:
-            QMessageBox.information(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
+            inform(self, "Nothing To Do", "No queued jobs selected (or all selected jobs already successful).")
             return
 
         # Cinema 4D renders via c4dpy/Redshift; web (.glb/.gltf) in a headless
@@ -2691,7 +2714,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         errs = self._preflight()
         if errs:
-            QMessageBox.critical(self, "Preflight Failed", "\n".join(errs))
+            error(self, "Preflight Failed", "\n".join(errs))
             return
 
         # Claim the rendering state NOW — the modal dialogs below spin the Qt event
@@ -2705,15 +2728,12 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                     + self._disk_space_warnings(pending)
                     + self._deadline_warnings(pending)
                     + self._render_quality_warnings(pending))
-        if warnings:
-            ans = QMessageBox.warning(
-                self, "Frame Range Warning",
-                "\n\n".join(warnings) + "\n\nProceed anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes,
-            )
-            if ans != QMessageBox.StandardButton.Yes:
-                self._is_rendering = False
-                return
+        if warnings and not confirm(
+            self, "Frame Range Warning",
+            "\n\n".join(warnings) + "\n\nProceed anyway?",
+        ):
+            self._is_rendering = False
+            return
 
         # Overwrite protection.
         if not self._resolve_output_conflicts(pending):
@@ -2724,7 +2744,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             worker = _resolve_runtime_script("blender_worker.py")
             c4d_worker = _resolve_runtime_script("c4d_worker.py") if _is_c4d else ""
         except Exception as exc:
-            QMessageBox.critical(
+            error(
                 self, "App Component Missing",
                 "The app's render component couldn't be found — the installation may be "
                 f"damaged. Reinstall {APP_NAME}.\n\nDetails: {exc}")
@@ -2850,13 +2870,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         .blend that any render farm (Deadline, BlendFarm, cloud, plain Blender)
         can render — no Deadline required."""
         if self._is_rendering:
-            QMessageBox.information(self, "Busy", "Finish the current render first.")
+            inform(self, "Busy", "Finish the current render first.")
             return
         scene = self.scene_panel.scene_edit.text().strip()
         assignments = self.scene_panel.get_assignments()
         if not scene or not file_exists(scene) or not assignments:
-            QMessageBox.information(self, "Export Prepared .blend",
-                                    "Load a scene and map at least one video first.")
+            inform(self, "Export Prepared .blend",
+                   "Load a scene and map at least one video first.")
             return
         blender = self._ensure_blender(interactive=True)
         if not blender:
@@ -2864,7 +2884,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         try:
             worker = _resolve_runtime_script("blender_worker.py")
         except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
+            warn(self, "Export Failed", str(exc))
             return
         default_name = f"{Path(scene).stem}_prepared.blend"
         out, _ = QFileDialog.getSaveFileName(
@@ -2875,12 +2895,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             out += ".blend"
         # Offer to pack the videos in so the .blend is fully portable (no shared
         # storage needed) — at the cost of a larger file.
-        pack = QMessageBox.question(
+        pack = confirm(
             self, "Pack video files?",
             "Pack the video file(s) into the .blend so it renders on any machine "
             "without shared storage?\n\nYes = one self-contained (larger) file.\n"
-            "No  = smaller file; workers must be able to reach the source videos.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
+            "No  = smaller file; workers must be able to reach the source videos.")
 
         asn = [MaterialVideoAssignment(a.material_name, a.video_path, a.mapping_mode) for a in assignments]
         opts = self.render_panel.render_options()
@@ -2900,7 +2919,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
     def _on_export_blend_done(self, ok: bool, info: str) -> None:
         if not ok:
             self._append_log(f"[error] Prepared .blend export failed: {info}")
-            QMessageBox.warning(self, "Export Failed", info)
+            warn(self, "Export Failed", info)
             return
         self._append_log(f"[app] Prepared .blend ready: {info}")
         try:
@@ -3779,14 +3798,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         if not p.exists():
             self._refresh_preset_browser()
             return
-        ans = QMessageBox.question(self, "Delete Preset", f"Delete preset '{p.stem}'?")
-        if ans != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete Preset", f"Delete preset '{p.stem}'?",
+                       ok="Delete", cancel="Cancel", danger=True):
             return
         try:
             p.unlink()
             self._refresh_preset_browser()
         except Exception as exc:
-            QMessageBox.warning(self, "Delete Failed", str(exc))
+            warn(self, "Delete Failed", str(exc))
 
 
     def _open_presets_folder(self) -> None:
@@ -3828,12 +3847,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             "watch_enabled": watch_enabled,
             "watch_interval_ms": watch_interval_ms,
             "watch_settle": watch_settle,
+            "watch_recursive": self.scene_panel.get_watch_recursive(),
             "autorender_enabled": self._autorender_enabled,
             "autorender_start": self._autorender_start,
             "autorender_output": self._autorender_output,
             "autorender_pattern": self._autorender_pattern,
             "deliver_dir": self._deliver_dir,
             "asset_grouping": self._asset_grouping.to_dict(),
+            "watch_first_run_seen": self._watch_first_run_seen,
             "restore_session_on_launch": self._restore_session_on_launch,
             "render_targets": self.scene_panel.get_targets(),
             "custom_layout": self._custom_layout_state,
@@ -4103,12 +4124,14 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 int(d.get("watch_interval_ms", 3000)), float(d.get("watch_settle", 2.0)))
         except (TypeError, ValueError):
             _log.debug("invalid watch-folder values in profile; using defaults", exc_info=True)
+        self.scene_panel.set_watch_recursive(bool(d.get("watch_recursive", False)))
         self._autorender_enabled = bool(d.get("autorender_enabled", False))
         self._autorender_start = bool(d.get("autorender_start", False))
         self._autorender_output = str(d.get("autorender_output", "") or "")
         self._autorender_pattern = str(d.get("autorender_pattern", "") or "{clip}_PREVIZ")
         self._deliver_dir = str(d.get("deliver_dir", "") or "")
         self._asset_grouping = AssetGroupingConfig.from_dict(d.get("asset_grouping"))
+        self._watch_first_run_seen = bool(d.get("watch_first_run_seen", False))
         self._sync_grouping_mode()
         tg = d.get("render_targets", [])
         if isinstance(tg, list):
@@ -4116,6 +4139,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         wf = str(d.get("watch_folder", "") or "")
         if wf:
             self.scene_panel.set_watch_folder(wf, bool(d.get("watch_enabled", False)))
+        self._load_watch_panel()   # reflect the loaded watch/auto-render config
 
         cam = d.get("camera", "")
         if cam:
@@ -4281,19 +4305,20 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         """Start a fresh, empty workspace — clear the scene, clips, mappings,
         targets and the queue (like File → New). Guarded when there's work."""
         if self._is_rendering:
-            QMessageBox.information(self, "Render In Progress",
-                                    "Stop rendering before starting a new session.")
+            inform(self, "Render In Progress",
+                   "Stop rendering before starting a new session.")
             return
         has_work = bool(self.scene_panel.scene_edit.text().strip()
                         or self.scene_panel.get_videos() or self._jobs)
         if confirm and has_work:
-            resp = QMessageBox.question(
+            resp = ask(
                 self, "New",
                 "Start a new session? The current scene, clips and queue will be "
                 "cleared (your saved projects and recents are kept).",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No)
-            if resp != QMessageBox.StandardButton.Yes:
+                kind="danger",
+                buttons=[("No", "no", "neutral"), ("Yes", "yes", "danger")],
+                default="no")
+            if resp != "yes":
                 return
         if confirm and has_work:
             self._last_session = self._capture_workspace()   # let Reopen undo an explicit New
@@ -4315,6 +4340,33 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._schedule_save()
         if announce:
             self._show_toast("New session", "info")
+
+    def _new_blank_job(self) -> None:
+        """Ctrl/⌘+Shift+New: start a brand-new empty job — clear the scene (3D
+        object), clips, mappings and targets so the workspace is blank. Unlike
+        New session this keeps the existing queue; the next mapping drafts a fresh
+        job alongside the ones already queued."""
+        if self._is_rendering:
+            inform(self, "Render In Progress",
+                   "Stop rendering before starting a new job.")
+            return
+        sp = self.scene_panel
+        self._loading_job_into_ui = True
+        try:
+            sp.set_assignments([])
+            sp.set_targets([])
+            sp.set_muted_videos([])
+            sp.set_videos([])
+            sp.scene_edit.setText("")
+        finally:
+            self._loading_job_into_ui = False
+        # Detach from any active job so the blank workspace doesn't overwrite it;
+        # the queue itself is left intact.
+        self._active_job_id = None
+        self._refresh_job_outputs()
+        self._refresh_queue_view()
+        self._schedule_save()
+        self._show_toast("New blank job", "info")
 
     def _reopen_last_session(self) -> None:
         """Bring back the session that was open before a clean launch or New."""
@@ -4362,6 +4414,46 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         # where platformName() lives.
         return isinstance(app, QGuiApplication) and app.platformName() == "offscreen"
 
+    def _offer_crash_reports(self) -> None:
+        """If the previous run crashed (native fault, or an exception the user
+        never saw), offer the report once: view it, or open a prefilled GitHub
+        issue. Nothing leaves the machine unless the user submits it."""
+        if self._is_headless():
+            return
+        try:
+            crash_capture.collect_faults(CRASH_DIR, version=APP_VERSION)
+            reports = crash_capture.pending_reports(CRASH_DIR)
+        except Exception:
+            _log.debug("crash-report sweep failed", exc_info=True)
+            return
+        if not reports:
+            return
+        report = reports[0]
+        detail = crash_capture.summarize(report)
+        extra = f" (+{len(reports) - 1} older)" if len(reports) > 1 else ""
+        clicked = ask(
+            self, f"{APP_NAME} crashed last time",
+            f"The previous session ended unexpectedly{extra}.\n\n"
+            + (f"{detail}\n\n" if detail else "")
+            + "You can look at the report, or open a prefilled GitHub issue — "
+              "nothing is sent unless you submit it yourself.",
+            kind="warning",
+            buttons=[("Dismiss", "dismiss", "neutral"),
+                     ("View Report", "view", "neutral"),
+                     ("Report on GitHub…", "report", "primary")],
+            default="dismiss",
+        )
+        if clicked == "view":
+            try:
+                reveal_in_file_manager(report)
+            except Exception:
+                _log.debug("could not reveal crash report", exc_info=True)
+        elif clicked == "report":
+            QDesktopServices.openUrl(QUrl(crash_capture.github_issue_url(
+                GITHUB_REPO, report, version=APP_VERSION)))
+        for r in reports:
+            crash_capture.acknowledge(r)
+
     def _maybe_first_run(self) -> None:
         """A one-time welcome on the very first launch: show what's detected and
         point new users at setup + Quick Start."""
@@ -4385,29 +4477,29 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                 if blender else
                 "\n\nNo Blender yet? Click “Download Blender” and the app fetches a "
                 "managed copy — nothing else to install.")
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowTitle(f"Welcome to {APP_NAME}")
-        box.setText(f"Welcome to {APP_NAME}!")
-        box.setInformativeText(
+        buttons = [("Open Quick Start", "quickstart", "neutral")]
+        # When Blender is missing, lead with the one-click auto-download.
+        has_dl = not blender and can_fetch
+        has_loc = not blender
+        if has_dl:
+            buttons.append(("Download Blender", "download", "neutral"))
+        if has_loc:
+            buttons.append(("Locate Blender…", "locate", "neutral"))
+        buttons.append(("Get Started", "go", "primary"))
+        clicked = ask(
+            self, f"Welcome to {APP_NAME}",
+            f"Welcome to {APP_NAME}!\n\n"
             "Map your videos onto a 3D scene's materials and render them — on your "
             "machine or a farm.\n\nWhat's ready on this computer:\n\n"
-            + "\n".join(lines) + tail)
-        qs = box.addButton("Open Quick Start", QMessageBox.ButtonRole.ActionRole)
-        # When Blender is missing, lead with the one-click auto-download.
-        dl = box.addButton("Download Blender", QMessageBox.ButtonRole.ActionRole) \
-            if (not blender and can_fetch) else None
-        loc = box.addButton("Locate Blender…", QMessageBox.ButtonRole.ActionRole) \
-            if not blender else None
-        go = box.addButton("Get Started", QMessageBox.ButtonRole.AcceptRole)
-        box.setDefaultButton(dl or go)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is qs:
+            + "\n".join(lines) + tail,
+            kind="info",
+            buttons=buttons,
+            default="download" if has_dl else "go")
+        if clicked == "quickstart":
             self._show_quick_start()
-        elif dl is not None and clicked is dl:
+        elif has_dl and clicked == "download":
             self._install_managed_runtime()
-        elif loc is not None and clicked is loc:
+        elif has_loc and clicked == "locate":
             self._show_properties_dialog()
         self._save_profile()   # ensure a profile exists so this won't show again
 
@@ -4520,6 +4612,9 @@ def _install_crash_handler(window) -> None:
                 f.write(f"\n[{datetime.now().isoformat()}] UNHANDLED EXCEPTION\n{text}\n")
         except Exception:
             _log.warning("failed to write crash traceback to the log file", exc_info=True)
+        # Also keep a structured report: if the dialog below is shown, it's
+        # acknowledged right away; if the app dies first, next launch offers it.
+        report = crash_capture.write_crash_report(CRASH_DIR, text, version=APP_VERSION)
         if showing["active"]:
             return
         showing["active"] = True
@@ -4536,6 +4631,8 @@ def _install_crash_handler(window) -> None:
             box.addButton(QMessageBox.StandardButton.Close)
             box.exec()
             clicked = box.clickedButton()
+            if report is not None:            # surfaced live — don't re-offer next launch
+                crash_capture.acknowledge(report)
             if clicked is copy_btn:
                 QApplication.clipboard().setText(text)
             elif clicked is log_btn:
@@ -4566,6 +4663,11 @@ def run_qt_app() -> None:
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("Toy Robot Media")
     app.setWindowIcon(_make_app_icon())
+
+    # Native-crash evidence: faulthandler writes a per-pid dump that a clean
+    # exit removes; a dump left behind means the next launch offers a report.
+    crash_capture.enable_fault_capture(CRASH_DIR)
+    app.aboutToQuit.connect(crash_capture.disable_fault_capture)
 
     # ── Single-instance guard ────────────────────────────────────────────
     # If another copy is already running, ask it to surface its window and

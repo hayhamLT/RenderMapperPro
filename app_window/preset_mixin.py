@@ -7,12 +7,13 @@ import json
 import re
 from pathlib import Path
 
-from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QFileDialog, QInputDialog
 
 from app_window.base import _WindowMembers
 from core.logging_setup import get_logger
 from core.models import RenderOptions
 from core.utils import atomic_write_text
+from ui_dialogs import inform, warn
 
 _log = get_logger(__name__)
 
@@ -29,7 +30,7 @@ class PresetMixin(_WindowMembers):
             return
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")
         if not safe:
-            QMessageBox.warning(self, "Invalid", "Preset name is invalid.")
+            warn(self, "Invalid", "Preset name is invalid.")
             return
         try:
             PRESETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -40,7 +41,7 @@ class PresetMixin(_WindowMembers):
             self._refresh_preset_browser()
             self._show_toast(f"Preset “{safe}” saved", "success")
         except Exception as exc:
-            QMessageBox.warning(self, "Save Failed", str(exc))
+            warn(self, "Save Failed", str(exc))
 
     def _load_preset(self) -> None:
         try:
@@ -68,7 +69,7 @@ class PresetMixin(_WindowMembers):
             self._schedule_save()
             self._show_toast(f"Applied preset “{Path(preset_path).stem}”", "success")
         except Exception as exc:
-            QMessageBox.warning(self, "Load Failed", str(exc))
+            warn(self, "Load Failed", str(exc))
 
     def _apply_preset_to_queue(self, entry: object, checked_only: bool) -> None:
         if not isinstance(entry, dict):
@@ -76,7 +77,7 @@ class PresetMixin(_WindowMembers):
 
         target_ids = set(self.queue_panel.selected_job_ids() if checked_only else self.queue_panel.selected_row_job_ids())
         if not target_ids:
-            QMessageBox.information(self, "Preset", "Select queue rows (or check Run) before applying a preset.")
+            inform(self, "Preset", "Select queue rows (or check Run) before applying a preset.")
             return
 
         p = str(entry.get("path", "")).strip()
@@ -86,7 +87,7 @@ class PresetMixin(_WindowMembers):
         try:
             preset_dict = json.loads(Path(p).read_text())
         except Exception as exc:
-            QMessageBox.warning(self, "Preset", f"Failed to read preset: {exc}")
+            warn(self, "Preset", f"Failed to read preset: {exc}")
             return
 
         def coerce(field: str, value, fallback):
