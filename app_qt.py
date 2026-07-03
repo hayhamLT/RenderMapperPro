@@ -642,8 +642,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         lay.addWidget(btns)
         dlg.exec()
 
-    def _on_help_anchor(self, url: QUrl, _dlg: QDialog) -> None:
+    def _on_help_anchor(self, url: QUrl, _dlg: QDialog, browser: QTextBrowser | None = None) -> None:
         spec = url.toString()
+        # In-page jump (the How-To index links): scroll this tab, don't leave it.
+        if spec.startswith("#"):
+            if browser is not None:
+                browser.scrollToAnchor(spec[1:])
+            return
         if not spec.startswith("action:"):
             QDesktopServices.openUrl(url)   # external link → system browser
             return
@@ -705,7 +710,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             browser.setStyleSheet(
                 f"QTextBrowser {{ border: none; background: {pal.surface}; padding: 20px 26px; }}")
             browser.setHtml(css + body)
-            browser.anchorClicked.connect(lambda url, d=dlg: self._on_help_anchor(url, d))
+            browser.anchorClicked.connect(
+                lambda url, d=dlg, b=browser: self._on_help_anchor(url, d, b))
             tabs.addTab(browser, title.replace("&", "&&"))   # && → literal & (not a mnemonic)
         lay.addWidget(tabs)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -746,6 +752,176 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         show/hide panels from <i>View</i>. Press <kbd>⌘K</kbd> for the command
         palette, and switch light/dark in <i>View</i>. First, point the app at
         Blender (or let it fetch one) in <a href="action:properties/Render Engines">Properties</a>.</p>
+        """),
+            ("How-To Guides", """
+        <h2>How-To Guides</h2>
+        <p class="lead">Step-by-step recipes for the things you'll actually do.
+        Each is self-contained — jump to the one you need.</p>
+        <table class="steps" width="100%">
+          <tr><td class="fname">A</td><td><a href="#a">Map clips onto a scene and render (the basics)</a></td></tr>
+          <tr><td class="fname">B</td><td><a href="#b">Set up a watch folder that renders drops automatically</a></td></tr>
+          <tr><td class="fname">C</td><td><a href="#c">Auto-assemble previz from a filename convention</a></td></tr>
+          <tr><td class="fname">D</td><td><a href="#d">Route different setups to different scene files</a></td></tr>
+          <tr><td class="fname">E</td><td><a href="#e">Batch-render one mapping across many clips</a></td></tr>
+          <tr><td class="fname">F</td><td><a href="#f">Deliver finished renders to a review folder automatically</a></td></tr>
+          <tr><td class="fname">G</td><td><a href="#g">Render on a Deadline farm</a></td></tr>
+          <tr><td class="fname">H</td><td><a href="#h">Save a look as a preset and reuse it</a></td></tr>
+          <tr><td class="fname">I</td><td><a href="#i">Fix “my clips aren’t being picked up”</a></td></tr>
+        </table>
+
+        <h3 id="a">A · Map clips onto a scene and render</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Drag your 3D file (<code>.blend</code>,
+              <code>.c4d</code>, <code>.glb</code>) onto the <b>Scene</b> box and click
+              <b>Scan Scene</b>. Its materials appear in the list.</td></tr>
+          <tr><td class="num">2</td><td>Drag your videos into the <b>Videos</b> list and
+              choose a <b>Camera</b>.</td></tr>
+          <tr><td class="num">3</td><td>Click <b>Auto-match</b> to pair clips to materials
+              by name — or drag a clip onto a material to link them by hand.</td></tr>
+          <tr><td class="num">4</td><td>Check resolution, frame range, format and quality
+              in the <b>Render</b> panel (see the <b>Render Settings</b> tab).</td></tr>
+          <tr><td class="num">5</td><td>Press <b>Render</b> (<kbd>⌘R</kbd>). Watch progress
+              and the <b>Live Preview</b>; the finished file can open, reveal, or copy
+              itself somewhere when done.</td></tr>
+        </table>
+
+        <h3 id="b">B · Set up a watch folder (auto-render drops)</h3>
+        <p class="muted">Hands-off: point the app at a folder and every clip dropped
+        there imports, maps onto your scene, and renders — great for “drop a new cut,
+        get a new preview” loops.</p>
+        <p><img src="watch-source.png" width="420"></p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Load the scene and clips once, and
+              mark which screens matter: <b>right-click a material → Mark as Render
+              Target</b> (or click the coloured stripe on its left edge).</td></tr>
+          <tr><td class="num">2</td><td>Open <b>View → Watch &amp; Auto-render</b>. In
+              <b>① Source</b>, click <b>Choose…</b> and pick the folder to watch.</td></tr>
+          <tr><td class="num">3</td><td>In <b>② Mode</b>, leave it on <b>Auto-map onto the
+              current scene</b>.</td></tr>
+          <tr><td class="num">4</td><td>In <b>④ Output</b>, turn on <b>Start renders
+              automatically</b> (off = jobs just queue for you to start). Set the output
+              folder, or leave it blank for a <code>PREVIZ</code> subfolder.</td></tr>
+          <tr><td class="num">5</td><td>Press <b>Start</b>. Drop a clip named like a
+              material and it maps + renders on its own. A newer <code>_v2</code> next to
+              <code>_v1</code> takes over automatically — <b>latest wins</b>.</td></tr>
+        </table>
+        <p class="muted"><b>Tips:</b> raise <b>Wait</b> if very large files are still
+        copying when grabbed; tick <b>Include subfolders</b> to watch per-day/per-setup
+        folders too; the <b>⑤ Activity</b> feed logs every ingest (and survives a
+        restart).</p>
+
+        <h3 id="c">C · Auto-assemble previz from a filename convention</h3>
+        <p class="muted">If your footage is named by a convention, the watch folder can
+        build <b>one multi-screen render per asset</b> instead of mapping onto one
+        scene — drop 10 clips, get 5 assembled previz renders.</p>
+        <p><img src="watch-naming.png" width="420"></p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Open <b>View → Watch &amp;
+              Auto-render</b> and in <b>② Mode</b> choose <b>Previz assembly — one render
+              per asset</b>. The <b>③ Naming</b> card appears.</td></tr>
+          <tr><td class="num">2</td><td>Build the <b>filename pattern</b> from chips — no
+              regex. <code>{Field}</code> = text, <code>{Field#}</code> = number,
+              add <code>?</code> for optional. Hyphens are fine
+              (<code>TC-MASTER</code>).</td></tr>
+          <tr><td class="num">3</td><td>Paste a real filename into the <b>sample</b> box.
+              The live preview shows exactly what parses — or <i>where</i> it stopped and
+              what it expected.</td></tr>
+          <tr><td class="num">4</td><td>Fill <b>Screen → Material</b> (which material each
+              screen code drives) and, if you have multiple scenes,
+              <b>Setup # → Scene</b> (see guide&nbsp;D).</td></tr>
+          <tr><td class="num">5</td><td>Click <b>Preview (dry run)</b> to see exactly what
+              WOULD assemble — per asset: screen → material → clip → version — plus every
+              skipped clip and why. Then press <b>Start</b>.</td></tr>
+        </table>
+        <p><img src="preview-assembly.png" width="430"></p>
+        <p class="muted">Example pattern for a touring show:
+        <code>{ID#}_D{Day#}_{Section}_{Cue}_{Screen}_v{Version#}</code> parses
+        <code>80230_D2_War-Treaty_MusicH_TC-MASTER_v001.mp4</code> into its fields
+        automatically.</p>
+
+        <h3 id="d">D · Route setups to different scene files</h3>
+        <p class="muted">A show with several stage layouts (D1, D2, …) can send each
+        setup’s clips to its own scene.</p>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Add a <b>Setup</b> field to your naming
+              pattern, e.g. <code>…_S{Setup#}_…</code> (or use the <b>Day</b> field if
+              that’s what distinguishes them).</td></tr>
+          <tr><td class="num">2</td><td>In the <b>③ Naming</b> card’s <b>Setup #&nbsp;→&nbsp;Scene</b>
+              table, click <b>+ Add</b> and map each setup number to its scene file —
+              <code>1 → /…/D1.c4d</code>, <code>2 → /…/D2.c4d</code>.</td></tr>
+          <tr><td class="num">3</td><td>Unmapped setups fall back to the currently loaded
+              scene. Use <b>Preview (dry run)</b> to confirm each asset shows the right
+              scene before rendering.</td></tr>
+        </table>
+
+        <h3 id="e">E · Batch-render one mapping across many clips</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Set up the scene + mapping once
+              (guide&nbsp;A).</td></tr>
+          <tr><td class="num">2</td><td>Add all the clips you want rendered with that
+              mapping to the <b>Videos</b> list.</td></tr>
+          <tr><td class="num">3</td><td>Use <b>Queue current mapping</b> — one job per clip
+              is added, each with its own resolved output name. Reorder, rename, set
+              priority, or remove any of them in the Queue.</td></tr>
+          <tr><td class="num">4</td><td>Press <b>Render All</b>. Jobs run in order; each
+              reports duration and per-frame metrics when done.</td></tr>
+        </table>
+
+        <h3 id="f">F · Deliver finished renders automatically</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Open <b>View → Watch &amp;
+              Auto-render</b> (or the render settings) and find <b>④ Output → Delivery</b>.</td></tr>
+          <tr><td class="num">2</td><td>Set a <b>Copy&nbsp;to</b> folder — a synced review
+              folder, a hand-off share, anything.</td></tr>
+          <tr><td class="num">3</td><td>Every finished render is now <b>also copied there</b>
+              automatically. Combine with a watch folder + auto-start for a fully
+              hands-off “clip lands → assembled preview appears in the review folder”
+              pipeline.</td></tr>
+        </table>
+
+        <h3 id="g">G · Render on a Deadline farm</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Open
+              <a href="action:properties/Deadline">Properties → Deadline</a> and point the
+              app at your Deadline <b>repository</b> (and <code>deadlinecommand</code> if
+              it isn’t auto-found). Click <b>Test</b>.</td></tr>
+          <tr><td class="num">2</td><td>Build your jobs in the Queue as usual (Blender
+              <i>and</i> C4D both submit).</td></tr>
+          <tr><td class="num">3</td><td>Choose <b>Submit to Deadline</b> instead of a local
+              render. Frames spread across your nodes; the app hands off and the farm
+              takes it from there.</td></tr>
+        </table>
+
+        <h3 id="h">H · Save a look as a preset</h3>
+        <table class="steps" width="100%">
+          <tr><td class="num" width="30">1</td><td>Dial in resolution, format, quality,
+              tone-mapping and the other render settings you like.</td></tr>
+          <tr><td class="num">2</td><td><b>Save Preset…</b> and name it (e.g. “Client
+              Review 1080p”).</td></tr>
+          <tr><td class="num">3</td><td>Later, <b>Load Preset…</b> — or apply it to queued
+              jobs — to reproduce that look in one click. Presets live in the
+              <b>Presets</b> browser.</td></tr>
+        </table>
+
+        <h3 id="i">I · Fix “my clips aren’t being picked up”</h3>
+        <p><img src="watch-activity.png" width="420"></p>
+        <table class="feat" width="100%">
+          <tr><td class="fname">Skipped badge</td><td>If <b>⑤ Activity</b> shows
+              <b>“N clip(s) skipped — why?”</b>, click it — the dry run names every
+              skipped file and the reason (name doesn’t match, screen not mapped, older
+              version).</td></tr>
+          <tr><td class="fname">In a subfolder?</td><td>Turn on <b>Include subfolders</b>
+              in ① Source if clips land in nested folders.</td></tr>
+          <tr><td class="fname">Cloud placeholder</td><td>Dropbox/OneDrive “online-only”
+              files are skipped until their contents actually download — right-click →
+              <i>Always keep on this device</i>.</td></tr>
+          <tr><td class="fname">Still copying</td><td>A file must hold its size for the
+              <b>Wait</b> window before import; raise it for slow copies of huge
+              files.</td></tr>
+          <tr><td class="fname">Pattern mismatch</td><td>Use the live preview in ③ Naming
+              with a real filename — it pinpoints the first character where it
+              diverged.</td></tr>
+        </table>
         """),
             ("Scene & Clips", """
         <h2>Scene &amp; Clips</h2>

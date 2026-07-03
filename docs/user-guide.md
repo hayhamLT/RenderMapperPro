@@ -20,11 +20,16 @@ screenshots and clickable links into the relevant settings).
    - [③ Naming](#-naming--teach-it-your-convention)
    - [④ Output & delivery](#-output--delivery)
    - [⑤ Activity](#-activity--trust-but-verify)
-3. [Filename pattern reference](#filename-pattern-reference)
-4. [The queue](#the-queue)
-5. [Render engines](#render-engines)
-6. [Crash reports](#crash-reports)
-7. [Troubleshooting & FAQ](#troubleshooting--faq)
+3. [How-to recipes](#how-to-recipes)
+4. [Filename pattern reference](#filename-pattern-reference)
+5. [The queue](#the-queue)
+6. [Render engines](#render-engines)
+7. [Crash reports](#crash-reports)
+8. [Troubleshooting & FAQ](#troubleshooting--faq)
+
+> The same guidance is built into the app under **Help → User Guide** — the
+> **How-To Guides** tab has these recipes with screenshots and clickable links
+> into the relevant settings.
 
 ---
 
@@ -41,6 +46,82 @@ screenshots and clickable links into the relevant settings).
 5. **Automate it** — open **View → Watch & Auto-render** and let the app do
    steps 2–4 by itself whenever a clip lands in a folder. That's the rest of
    this guide.
+
+---
+
+## How-to recipes
+
+Task-oriented walkthroughs for the things you'll actually do. The [Watch &
+Auto-render](#watch--auto-render) deep dive below covers the panel field by
+field; these are the "just tell me the steps" versions.
+
+### A · Map clips onto a scene and render
+
+1. Drag your 3D file (`.blend`, `.c4d`, `.glb`) onto the **Scene** box → **Scan Scene**.
+2. Drag your videos into the **Videos** list, choose a **Camera**.
+3. **Auto-match** to pair clips to materials by name, or drag a clip onto a material.
+4. Set resolution / range / format / quality in the **Render** panel.
+5. **Render** (`⌘R`). Watch the Live Preview; the output can open/reveal/copy itself when done.
+
+### B · Set up a watch folder (auto-render drops)
+
+1. Load the scene + clips once, then **right-click a material → Mark as Render Target** for each screen that matters.
+2. **View → Watch & Auto-render → ① Source → Choose…** the folder.
+3. **② Mode** = *Auto-map onto the current scene*.
+4. **④ Output** → turn on **Start renders automatically** (off = jobs just queue). Set an output folder or leave blank for a `PREVIZ` subfolder.
+5. Press **Start**. Drops import, map and render; a newer `_v2` supersedes `_v1` automatically.
+
+### C · Auto-assemble previz from a filename convention
+
+1. **② Mode** = *Previz assembly — one render per asset*. The **③ Naming** card appears.
+2. Build the **pattern** from chips (no regex): `{Field}` text, `{Field#}` number, add `?` for optional. Hyphens are fine.
+3. Paste a real filename into the **sample** box — the live preview shows what parses (or where it stopped).
+4. Fill **Screen → Material** and, for multiple scenes, **Setup # → Scene** (recipe D).
+5. **Preview (dry run)** to confirm what would assemble + what's skipped, then **Start**.
+
+Example: `{ID#}_D{Day#}_{Section}_{Cue}_{Screen}_v{Version#}` parses
+`80230_D2_War-Treaty_MusicH_TC-MASTER_v001.mp4` into its fields automatically.
+
+### D · Route setups to different scene files
+
+1. Include a `{Setup#}` (or `{Day#}`) field in the pattern.
+2. In **Setup # → Scene**, **+ Add** each setup number → its scene (`1 → D1.c4d`, `2 → D2.c4d`).
+3. Unmapped setups use the loaded scene. **Preview (dry run)** confirms each asset's scene.
+
+### E · Batch-render one mapping across many clips
+
+1. Set up the scene + mapping once (recipe A).
+2. Add every clip you want rendered with it to the **Videos** list.
+3. **Queue current mapping** → one job per clip, each with its own output name.
+4. **Render All**. Jobs run in order and report metrics when done.
+
+### F · Deliver finished renders automatically
+
+1. Find **④ Output → Delivery** (or the render settings).
+2. Set a **Copy to** folder (a synced review/hand-off folder).
+3. Every finished render is also copied there. Combine with B for a fully hands-off pipeline.
+
+### G · Render on a Deadline farm
+
+1. **Properties → Deadline** → point at your repository (and `deadlinecommand` if not auto-found) → **Test**.
+2. Build jobs in the Queue as usual (Blender *and* C4D both submit).
+3. Choose **Submit to Deadline** instead of a local render — frames spread across your nodes.
+
+### H · Save a look as a preset
+
+1. Dial in resolution, format, quality, tone-mapping, etc.
+2. **Save Preset…** and name it.
+3. **Load Preset…** later (or apply to queued jobs) to reproduce it in one click.
+
+### I · Fix "my clips aren't being picked up"
+
+| Check | Fix |
+|---|---|
+| **Skipped badge** in ⑤ Activity | Click **"N clip(s) skipped — why?"** — the dry run names every file and reason. |
+| Clip in a subfolder | Turn on **Include subfolders** in ① Source. |
+| Cloud placeholder | Right-click → *Always keep on this device* (online-only files are skipped until downloaded). |
+| Still copying | Raise the **Wait** window for slow copies of huge files. |
+| Pattern mismatch | Use the live preview in ③ Naming — it pinpoints the first divergence. |
 
 ---
 
