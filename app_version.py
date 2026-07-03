@@ -5,4 +5,8 @@ CI, so the version lives in exactly one place. CI fails a ``v<X.Y.Z>`` release
 tag whose value doesn't match this string.
 """
 __version__ = "1.8.27"
-APP_NAME = "Render Mapper Pro"   # display name; single source shared by the app + mixins
+# Display name; single source shared by the app + mixins. "PrevizRender" is
+# the product name (formerly "Render Mapper Pro"); installer/bundle artifact
+# names in BlenderVideoMapper.spec and installer/windows.iss intentionally keep
+# the old name so the auto-update chain and install paths stay valid.
+APP_NAME = "PrevizRender"

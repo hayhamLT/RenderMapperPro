@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PrevizRender — render the comps, before load-in.</title>
+<meta name="description" content="A standalone desktop app that maps videos onto 3D-scene materials and renders them headlessly — Blender or Cinema 4D + Redshift, on your own machine. Built for LED-wall and screen-content workflows. Formerly Render Mapper Pro." />
+<meta name="theme-color" content="#050506" />
+<meta property="og:site_name" content="PrevizRender" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="PrevizRender — render the comps, before load-in." />
+<meta property="og:description" content="Map videos onto 3D-scene materials and render headlessly — Blender or Cinema 4D + Redshift, on your own machine. No farm required." />
+<meta property="og:url" content="https://render.preshow.link/" />
+<link rel="canonical" href="https://render.preshow.link/" />
+<link rel="icon" type="image/svg+xml" href="previzrender-logo.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* ── Family design tokens (shared with Preshow.link + UV Studio) ──
+     Structure, radii, type scale and the dark warm wash come from
+     Preshow.link's landing; only the accent + logo differ per sibling. */
+  :root{
+    --bg:#09090b;                      /* zinc-950 body, as Preshow.link dark */
+    --panel:#06060a;                   /* hero/viewer panel */
+    --card:#0c0d11;
+    --line:rgba(255,255,255,0.10);
+    --line-soft:rgba(255,255,255,0.06);
+    --text:#fafafa;
+    --muted:rgba(255,255,255,0.64);
+    --faint:rgba(255,255,255,0.44);
+    --accent-300:#ffb894;              /* ← per-app accent: Toy Robot orange */
+    --accent-400:#ff8a5c;
+    --accent-500:#ff6f3c;
+    --accent-600:#e04e1f;
+    --accent-rgb:255,111,60;
+    --on-accent:#1f0d05;
+    --radius-hero:2rem;                /* Preshow rounded-[2rem] hero panel */
+    --radius-card:1rem;                /* rounded-2xl cards + buttons */
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  html,body{margin:0;padding:0;overflow-x:hidden;}
+  body{
+    background:
+      radial-gradient(circle at 8% 0%, rgba(var(--accent-rgb),0.07), transparent 34%),
+      radial-gradient(circle at 92% 12%, rgba(var(--accent-rgb),0.05), transparent 36%),
+      var(--bg);
+    color:var(--muted);
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.6; font-size:16px;
+  }
+  a{color:inherit; text-decoration:none;}
+  img{max-width:100%; display:block;}
+  h1,h2,h3{color:var(--text); font-weight:700; letter-spacing:-0.025em; margin:0; line-height:1.1;}
+  .wrap{max-width:1120px; margin:0 auto; padding:0 24px;}
+  .eyebrow{font-size:11px; font-weight:600; letter-spacing:0.16em; text-transform:uppercase; color:rgba(255,255,255,0.55);}
+
+  /* buttons — Preshow.link pill language (h-10, rounded-2xl) */
+  .btn{display:inline-flex; align-items:center; justify-content:center; gap:8px; height:40px; padding:0 20px;
+    border-radius:var(--radius-card); font-size:14px; font-weight:600; border:1px solid transparent;
+    white-space:nowrap; cursor:pointer; transition:transform .12s ease, background .15s ease, border-color .15s ease, color .15s ease;}
+  .btn:hover{transform:translateY(-1px);}
+  .btn:active{transform:translateY(0);}
+  .btn.primary{background:var(--accent-500); color:var(--on-accent); box-shadow:0 8px 24px -10px rgba(var(--accent-rgb),0.9);}
+  .btn.primary:hover{background:var(--accent-400);}
+  .btn.ghost{background:rgba(0,0,0,0.35); color:rgba(255,255,255,0.8); border-color:var(--line); backdrop-filter:blur(8px);}
+  .btn.ghost:hover{color:#fff; border-color:rgba(255,255,255,0.25);}
+  .btn.lg{height:46px; padding:0 26px; font-size:15px;}
+
+  /* nav — Preshow SiteHeader pattern */
+  .nav{position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:16px;
+    padding:14px 24px; max-width:1120px; margin:0 auto;}
+  .nav-bg{position:fixed; inset:0 0 auto 0; height:68px; z-index:49; pointer-events:none;
+    background:rgba(9,9,11,0.72); backdrop-filter:blur(14px) saturate(140%);
+    border-bottom:1px solid transparent; transition:border-color .2s, opacity .2s; opacity:0;}
+  .nav-bg.on{opacity:1; border-bottom-color:var(--line-soft);}
+  .brand{display:flex; align-items:center; gap:10px;}
+  .brand img.mark{width:30px; height:30px; border-radius:9px;}
+  .brand .names{display:flex; flex-direction:column; gap:1px;}
+  .brand .name{font-weight:600; color:var(--text); font-size:16px; letter-spacing:-0.02em; line-height:1;}
+  .brand .powered{display:inline-flex; align-items:center; gap:4px; opacity:0.75;}
+  .brand .powered:hover{opacity:1;}
+  .brand .powered span{font-size:6.5px; font-weight:500; letter-spacing:0.08em; text-transform:uppercase; color:rgba(255,255,255,0.4);}
+  .brand .powered img{height:11px; width:auto; opacity:0.6; filter:brightness(0) invert(1);}
+  .nav .links{margin-left:auto; display:flex; align-items:center; gap:24px; font-size:14px;}
+  .nav .links a.link{color:var(--muted); transition:color .15s;}
+  .nav .links a.link:hover{color:var(--text);}
+
+  /* hero — Preshow.link's rounded-[2rem] panel with the warm dark wash */
+  .hero{padding:26px 0 0;}
+  .hero-panel{position:relative; overflow:hidden; border-radius:var(--radius-hero); background:var(--panel);
+    padding:56px 28px 40px; text-align:center; isolation:isolate;
+    box-shadow:0 12px 24px rgba(0,0,0,0.2);}
+  .hero-panel::before{content:''; position:absolute; inset:0; z-index:0; pointer-events:none;
+    background:linear-gradient(155deg, rgba(22,16,15,0.74), rgba(34,24,20,0.72) 48%, rgba(18,31,30,0.7));}
+  .hero-panel::after{content:''; position:absolute; top:-240px; left:50%; transform:translateX(-50%);
+    width:960px; height:560px; z-index:0; pointer-events:none;
+    background:radial-gradient(ellipse at center, rgba(var(--accent-rgb),0.2), transparent 68%);}
+  .hero-panel > *{position:relative; z-index:1;}
+  .badge{display:inline-flex; align-items:center; gap:8px; padding:7px 14px; border-radius:999px;
+    background:rgba(0,0,0,0.45); border:1px solid var(--line); backdrop-filter:blur(8px);
+    font-size:12.5px; font-weight:600; color:var(--muted); margin-bottom:22px;}
+  .badge .dot{width:7px; height:7px; border-radius:999px; background:#46d39a; box-shadow:0 0 10px #46d39a;}
+  .hero h1{font-size:54px; max-width:800px; margin:0 auto 18px;}
+  .hero h1 em{font-style:normal; background:linear-gradient(110deg,var(--accent-300),var(--accent-500)); -webkit-background-clip:text; background-clip:text; color:transparent;}
+  .hero .sub{color:var(--muted); font-size:17px; max-width:620px; margin:0 auto 30px;}
+  .hero .cta{display:flex; gap:12px; justify-content:center; flex-wrap:wrap;}
+  .hero .fine{margin-top:14px; font-size:13px; color:var(--faint);}
+  .hero .fine a{color:var(--muted); text-decoration:underline; text-underline-offset:2px;}
+
+  /* viewer frame — Preshow's rounded viewer with accent glow */
+  .frame{border:1px solid rgba(255,255,255,0.08); border-radius:1.25rem; overflow:hidden; background:var(--panel);
+    box-shadow:0 0 0 1px rgba(255,255,255,0.04), 0 32px 80px rgba(0,0,0,0.6), 0 0 60px rgba(var(--accent-rgb),0.12);}
+  .frame .bar{display:flex; align-items:center; gap:7px; padding:11px 14px; background:rgba(0,0,0,0.5); border-bottom:1px solid var(--line-soft);}
+  .frame .bar i{width:11px; height:11px; border-radius:999px; background:rgba(255,255,255,0.12); display:block;}
+  .frame .bar i:nth-child(1){background:#ff5f57;} .frame .bar i:nth-child(2){background:#febc2e;} .frame .bar i:nth-child(3){background:#28c840;}
+  .frame .bar .u{margin-left:12px; flex:1; height:20px; border-radius:6px; background:rgba(255,255,255,0.04); border:1px solid var(--line-soft);
+    display:flex; align-items:center; padding:0 10px; font-size:11px; color:var(--faint);}
+  .frame img{width:100%; display:block; aspect-ratio:16/10; object-fit:cover; object-position:center top;}
+  .hero-shot{max-width:980px; margin:44px auto 0;}
+  .worked{margin:30px auto 0; display:flex; align-items:center; justify-content:center; gap:24px; flex-wrap:wrap;
+    color:var(--faint); font-size:13px;}
+  .worked b{color:var(--muted); font-weight:600;}
+
+  /* sections */
+  section{padding:96px 0;}
+  .head{text-align:center; max-width:640px; margin:0 auto 52px;}
+  .head .eyebrow{display:block; margin-bottom:13px;}
+  .head h2{font-size:36px; margin-bottom:14px;}
+  .head p{color:var(--muted); font-size:16px;}
+
+  /* cards — Preshow rounded-2xl / border-white-10 language */
+  .card{background:rgba(0,0,0,0.35); border:1px solid var(--line); border-radius:var(--radius-card); backdrop-filter:blur(8px);}
+
+  /* how it works */
+  .steps{display:grid; grid-template-columns:repeat(4,1fr); gap:16px;}
+  .step{padding:26px 22px; position:relative;}
+  .step .n{width:30px; height:30px; border-radius:10px; background:rgba(var(--accent-rgb),0.16);
+    color:var(--accent-300); font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:center; margin-bottom:16px;}
+  .step h3{font-size:16px; margin-bottom:7px;}
+  .step p{font-size:13.5px; color:var(--muted); margin:0;}
+
+  /* feature switcher */
+  .showcase{display:grid; grid-template-columns:340px 1fr; gap:30px; align-items:start;}
+  .tabs{display:flex; flex-direction:column; gap:8px;}
+  .tab{text-align:left; background:transparent; border:1px solid transparent; border-radius:var(--radius-card); padding:16px 17px; cursor:pointer;
+    font-family:inherit; transition:background .15s, border-color .15s; display:flex; gap:13px; align-items:flex-start;}
+  .tab:hover{background:rgba(0,0,0,0.35);}
+  .tab.active{background:rgba(0,0,0,0.45); border-color:rgba(var(--accent-rgb),0.4);}
+  .tab .ic{width:34px; height:34px; border-radius:10px; flex-shrink:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,0.05); color:var(--faint); transition:background .15s, color .15s;}
+  .tab.active .ic{background:rgba(var(--accent-rgb),0.18); color:var(--accent-300);}
+  .tab > span:last-child{min-width:0;}
+  .tab .tt{display:block; font-weight:600; color:var(--muted); font-size:15px;}
+  .tab.active .tt{color:var(--text);}
+  .tab .td{display:block; font-size:13px; color:var(--faint); margin-top:3px; line-height:1.4;}
+  .stage .frame img{transition:opacity .28s ease;}
+
+  /* integrations */
+  .bridges{display:grid; grid-template-columns:1fr 1fr; gap:18px;}
+  .bridge{padding:28px; transition:border-color .2s, transform .2s;}
+  .bridge:hover{border-color:rgba(var(--accent-rgb),0.34); transform:translateY(-2px);}
+  .bridge h3{display:flex; align-items:center; gap:11px; font-size:17px; margin-bottom:10px;}
+  .bridge .b{width:32px; height:32px; border-radius:10px; display:flex; align-items:center; justify-content:center;
+    background:rgba(var(--accent-rgb),0.16); font-weight:700; font-size:13px; color:var(--accent-300);}
+  .bridge p{color:var(--muted); font-size:14px; margin:0;}
+  .bridge .lossless{margin-top:14px; display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:#46d39a;}
+
+  /* family — the Toy Robot Media siblings */
+  .family{display:grid; grid-template-columns:repeat(3,1fr); gap:16px;}
+  .kin{padding:24px 22px; display:flex; flex-direction:column; gap:10px; transition:border-color .2s, transform .2s;}
+  a.kin:hover{border-color:rgba(255,255,255,0.28); transform:translateY(-2px);}
+  .kin.here{border-color:rgba(var(--accent-rgb),0.45); box-shadow:0 0 24px rgba(var(--accent-rgb),0.1);}
+  .kin .mark{width:34px; height:34px; border-radius:10px;}
+  .kin h3{font-size:16px; display:flex; align-items:center; gap:8px;}
+  .kin h3 .you{font-size:9px; font-weight:600; letter-spacing:0.12em; text-transform:uppercase; color:var(--accent-300);
+    background:rgba(var(--accent-rgb),0.14); border-radius:999px; padding:3px 8px;}
+  .kin p{font-size:13px; color:var(--muted); margin:0;}
+  .kin .role{font-size:10px; font-weight:600; letter-spacing:0.14em; text-transform:uppercase; color:var(--faint);}
+
+  /* download */
+  .dl-panel{position:relative; overflow:hidden; max-width:840px; margin:0 auto; border-radius:1.5rem;
+    background:var(--panel); border:1px solid var(--line); padding:46px 40px; text-align:center; isolation:isolate;}
+  .dl-panel::before{content:''; position:absolute; inset:0; z-index:0; pointer-events:none;
+    background:linear-gradient(155deg, rgba(22,16,15,0.74), rgba(34,24,20,0.72) 48%, rgba(18,31,30,0.7));}
+  .dl-panel::after{content:''; position:absolute; top:-160px; left:50%; transform:translateX(-50%); width:600px; height:340px; z-index:0;
+    background:radial-gradient(ellipse, rgba(var(--accent-rgb),0.16), transparent 70%); pointer-events:none;}
+  .dl-panel > *{position:relative; z-index:1;}
+  .platforms{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:30px;}
+  .platform{padding:24px; display:flex; flex-direction:column; align-items:center; gap:10px;}
+  .platform svg{width:32px; height:32px; color:var(--text);}
+  .platform .os{font-weight:600; color:var(--text); font-size:15px;}
+  .platform .ver{font-size:11.5px; color:var(--faint); min-height:15px;}
+  .platform .btn{width:100%; margin-top:4px;}
+  .web-cta{margin-top:26px; font-size:14px; color:var(--muted);}
+  .web-cta a{color:var(--accent-400);}
+
+  /* footer — Preshow SiteFooter clone */
+  footer{margin-top:10px; padding:0 24px 34px;}
+  footer .inner{max-width:1120px; margin:0 auto; border-top:1px solid var(--line); padding-top:20px;
+    display:flex; flex-direction:column; gap:12px; font-size:12px; color:var(--faint);}
+  footer .row{display:flex; flex-direction:column; gap:12px;}
+  footer .fnav{display:flex; align-items:center; gap:14px; flex-wrap:wrap;}
+  footer a{transition:color .15s;}
+  footer a:hover{color:var(--accent-400);}
+  footer .credit{font-size:11px; color:rgba(255,255,255,0.35);}
+  @media (min-width:768px){ footer .row{flex-direction:row; align-items:center; justify-content:space-between;} }
+
+  /* scroll reveal */
+  .reveal{opacity:0; transform:translateY(18px); transition:opacity .6s ease, transform .6s ease;}
+  .reveal.in{opacity:1; transform:none;}
+  @media (prefers-reduced-motion: reduce){ .reveal{opacity:1; transform:none; transition:none;} html{scroll-behavior:auto;} }
+
+  /* responsive */
+  @media (max-width: 940px){
+    .showcase{grid-template-columns:1fr; gap:20px;}
+    .tabs{flex-direction:row; overflow-x:auto; gap:10px; padding-bottom:6px; -webkit-overflow-scrolling:touch;}
+    .tab{flex:0 0 auto; width:220px;}
+    .steps{grid-template-columns:1fr 1fr;}
+    .family{grid-template-columns:1fr;}
+  }
+  @media (max-width: 860px){
+    .hero-panel{padding:44px 18px 30px;}
+    .hero h1{font-size:38px;}
+    .hero .sub{font-size:16px;}
+    section{padding:64px 0;}
+    .head{margin-bottom:38px;} .head h2{font-size:29px;}
+    .bridges{grid-template-columns:1fr;}
+    .platforms{grid-template-columns:1fr;}
+  }
+  @media (max-width: 560px){
+    .wrap{padding:0 16px;} .nav{padding:12px 16px;}
+    .nav .links{gap:16px;} .nav .links a.link{display:none;}
+    .hero h1{font-size:30px;} .hero .cta{flex-direction:column;} .hero .cta .btn{width:100%;}
+    .steps{grid-template-columns:1fr;}
+    .head h2{font-size:24px;}
+    .dl-panel{padding:34px 20px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="nav-bg" id="navbg"></div>
+<div class="nav">
+  <a class="brand" href="./">
+    <img class="mark" src="previzrender-logo.svg" alt="" width="30" height="30">
+    <span class="names">
+      <span class="name">PrevizRender</span>
+      <span class="powered"><span>Powered by</span><img src="img/toy-robot-media-logo.png" alt="Toy Robot Media"></span>
+    </span>
+  </a>
+  <div class="links">
+    <a class="link" href="#how">How it works</a>
+    <a class="link" href="#features">Features</a>
+    <a class="link" href="https://github.com/hayhamLT/RenderMapperPro">GitHub</a>
+    <a class="btn primary" href="#download">Download</a>
+  </div>
+</div>
+
+<!-- HERO -->
+<header class="hero wrap">
+  <div class="hero-panel">
+    <span class="badge"><span class="dot"></span> Free · macOS (Apple Silicon) &amp; Windows</span>
+    <h1>Render the <em>comps</em>, before load-in.</h1>
+    <p class="sub">Map videos onto 3D-scene materials and render headlessly — Blender or Cinema&nbsp;4D&nbsp;+&nbsp;Redshift, on your own machine. One scene, many screens, no farm required.</p>
+    <div class="cta">
+      <a class="btn primary lg" href="#download">Download free</a>
+      <a class="btn ghost lg" href="https://github.com/hayhamLT/RenderMapperPro#quick-start">Quick start ↗</a>
+    </div>
+    <div class="fine">Formerly Render Mapper Pro. Auto-updates on launch — <a href="https://github.com/hayhamLT/RenderMapperPro/releases/latest">see the latest release →</a></div>
+
+    <div class="hero-shot reveal">
+      <div class="frame">
+        <div class="bar"><i></i><i></i><i></i><span class="u">PrevizRender</span></div>
+        <img src="img/app.png" alt="PrevizRender — scene, clips, and render queue with a live preview" />
+      </div>
+    </div>
+
+    <div class="worked reveal">
+      <span>Renders with</span> <b>Blender</b> <span>·</span> <b>Cinema 4D + Redshift</b> <span>·</span> <span>ships <b>bundled ffmpeg</b></span>
+    </div>
+  </div>
+</header>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+ <div class="wrap">
+  <div class="head reveal">
+    <span class="eyebrow">Four steps, start to finish</span>
+    <h2>From a scene and clips to finished frames</h2>
+    <p>No render setup, no scripting. Scan the scene, link clips to materials, queue it.</p>
+  </div>
+  <div class="steps reveal">
+    <div class="step card">
+      <div class="n">1</div><h3>Add a scene</h3>
+      <p>Drag a .blend / .c4d / .glb (or .fbx, .usd, …) onto the Scene box, then Scan — materials, cameras, and render settings load automatically.</p>
+    </div>
+    <div class="step card">
+      <div class="n">2</div><h3>Add clips</h3>
+      <p>Drag your videos into the list and pick a camera. Resolution, fps, and frame ranges auto-fill from the scene.</p>
+    </div>
+    <div class="step card">
+      <div class="n">3</div><h3>Link them</h3>
+      <p>Auto-map matches clips to materials by name — or link any pair by hand. Every screen gets its content.</p>
+    </div>
+    <div class="step card">
+      <div class="n">4</div><h3>Queue &amp; render</h3>
+      <p>Hit Start and watch the live preview. The renderer runs headless in the background — a crash can never take down the app.</p>
+    </div>
+  </div>
+ </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features">
+ <div class="wrap">
+  <div class="head reveal">
+    <span class="eyebrow">A closer look</span>
+    <h2>A render pipeline in one window</h2>
+    <p>Click a feature to read what it does.</p>
+  </div>
+  <div class="showcase reveal">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-cap="The right backend is chosen automatically by scene type — Blender for .blend / .fbx / .usd and friends, Cinema 4D + Redshift for .c4d. Same workflow either way.">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 21 8v8l-9 5-9-5V8l9-5Z"/><path d="M3.5 8 12 13l8.5-5"/></svg></span>
+        <span><span class="tt">Two render backends</span><span class="td">Picked by scene type</span></span>
+      </button>
+      <button class="tab" data-cap="Scan pulls the scene's own render settings — fps, frame range, resolution, engine, samples, and for C4D the Redshift sampling — straight into the UI. Outputs auto-fill next to each clip.">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></span>
+        <span><span class="tt">Scene scan</span><span class="td">Settings come to you</span></span>
+      </button>
+      <button class="tab" data-cap="The renderer runs as a separate background process, so a renderer crash can never take down the app or your queue — the next job just keeps going.">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 4.4-3 8.4-7 9-4-.6-7-4.6-7-9V7l7-4Z"/></svg></span>
+        <span><span class="tt">Crash-proof queue</span><span class="td">Renderer runs sandboxed</span></span>
+      </button>
+      <button class="tab" data-cap="ffmpeg and ffprobe ship inside the app, so audio muxing and clip probing work out of the box. If Blender isn't installed, one click downloads a managed runtime.">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></span>
+        <span><span class="tt">Self-contained</span><span class="td">Bundled ffmpeg, managed Blender</span></span>
+      </button>
+      <button class="tab" data-cap="On launch the app checks Releases and, with one click, downloads and runs the right installer for your platform — no manual replace.">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg></span>
+        <span><span class="tt">Auto-updates</span><span class="td">One click on launch</span></span>
+      </button>
+    </div>
+    <div class="stage">
+      <div class="frame">
+        <div class="bar"><i></i><i></i><i></i><span class="u">PrevizRender</span></div>
+        <img id="shot" src="img/app.png" alt="PrevizRender feature" />
+      </div>
+      <p id="shot-cap" style="margin-top:14px; font-size:14px; color:var(--muted); text-align:center;">The right backend is chosen automatically by scene type — Blender for .blend / .fbx / .usd and friends, Cinema 4D + Redshift for .c4d. Same workflow either way.</p>
+    </div>
+  </div>
+ </div>
+</section>
+
+<!-- BACKENDS -->
+<section id="backends">
+ <div class="wrap">
+  <div class="head reveal">
+    <span class="eyebrow">Backends</span>
+    <h2>Your scenes, your renderers</h2>
+    <p>PrevizRender drives the renderer you already use — headlessly, in the background.</p>
+  </div>
+  <div class="bridges reveal">
+    <div class="bridge card">
+      <h3><span class="b">Bl</span> Blender</h3>
+      <p>.blend, .fbx, .obj, .glb, .usd, .abc and more. No Blender on the machine? The app offers a managed runtime download — one click, with a progress bar.</p>
+      <span class="lossless"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg> Nothing else to install</span>
+    </div>
+    <div class="bridge card">
+      <h3><span class="b">C4</span> Cinema 4D + Redshift</h3>
+      <p>.c4d scenes render through your own C4D + Redshift install — the app pulls the Redshift sampling settings straight from the scene.</p>
+      <span class="lossless"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg> Uses your licensed install</span>
+    </div>
+  </div>
+ </div>
+</section>
+
+<!-- FAMILY -->
+<section id="family">
+ <div class="wrap">
+  <div class="head reveal">
+    <span class="eyebrow">Part of the family</span>
+    <h2>Plan it. Map it. Render it.</h2>
+    <p>Three sibling tools by hamLT, powered by Toy Robot Media — one for each stage of getting content onto real-world screens.</p>
+  </div>
+  <div class="family reveal">
+    <a class="kin card" href="https://www.preshow.link" target="_blank" rel="noopener">
+      <svg class="mark" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="psbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ef9b54"/><stop offset="1" stop-color="#a84422"/></linearGradient></defs><rect width="512" height="512" rx="115" fill="url(#psbg)"/><g fill="#fff"><rect x="118" y="150" width="276" height="160" rx="18" opacity="0.92"/><rect x="150" y="344" width="212" height="30" rx="15" opacity="0.55"/><rect x="196" y="398" width="120" height="22" rx="11" opacity="0.3"/></g></svg>
+      <span class="role">Plan</span>
+      <h3>Preshow.link</h3>
+      <p>Previz the whole show in 3D — venues, screens, timelines, comps, and client review links.</p>
+    </a>
+    <a class="kin card" href="https://uv.preshow.link" target="_blank" rel="noopener">
+      <svg class="mark" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="uvbg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5cc8ff"/><stop offset="1" stop-color="#1183d6"/></linearGradient></defs><rect width="512" height="512" rx="115" fill="url(#uvbg)"/><g fill="#fff"><rect x="128" y="128" width="82" height="82" rx="7"/><rect x="300" y="128" width="82" height="82" rx="7"/><rect x="214" y="214" width="82" height="82" rx="7"/><rect x="128" y="300" width="82" height="82" rx="7"/><rect x="300" y="300" width="82" height="82" rx="7"/></g><g fill="#fff" opacity="0.26"><rect x="214" y="128" width="82" height="82" rx="7"/><rect x="128" y="214" width="82" height="82" rx="7"/><rect x="300" y="214" width="82" height="82" rx="7"/><rect x="214" y="300" width="82" height="82" rx="7"/></g></svg>
+      <span class="role">Map</span>
+      <h3>UV Studio</h3>
+      <p>Map artwork onto every screen in the venue, with lossless C4D and Blender round-trips.</p>
+    </a>
+    <span class="kin card here">
+      <img class="mark" src="previzrender-logo.svg" alt="">
+      <span class="role">Render</span>
+      <h3>PrevizRender <span class="you">You're here</span></h3>
+      <p>Render the comps locally — video mapped onto 3D scenes via headless Blender or Cinema&nbsp;4D.</p>
+    </span>
+  </div>
+ </div>
+</section>
+
+<!-- DOWNLOAD -->
+<section id="download">
+ <div class="wrap">
+  <div class="dl-panel reveal">
+    <h2 style="font-size:30px; margin-bottom:10px;">Get PrevizRender</h2>
+    <p style="color:var(--muted); font-size:15px; margin:0;">Free. Installer or portable zip — updates arrive automatically.</p>
+    <div class="platforms">
+      <div class="platform card">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.365 1.43c0 1.14-.415 2.19-1.24 3.15-.995 1.14-2.196 1.8-3.5 1.7-.045-1.1.42-2.24 1.25-3.16.87-.96 2.35-1.68 3.49-1.69zM20.5 17.32c-.55 1.27-.82 1.83-1.53 2.95-.99 1.56-2.39 3.5-4.13 3.52-1.54.02-1.94-1.01-4.03-1-2.09.01-2.53 1.02-4.07.99-1.74-.02-3.06-1.77-4.05-3.33-2.78-4.35-3.07-9.46-1.35-12.18 1.22-1.93 3.15-3.06 4.96-3.06 1.85 0 3.01 1.02 4.55 1.02 1.49 0 2.39-1.02 4.53-1.02 1.61 0 3.32.88 4.54 2.4-3.99 2.19-3.34 7.9.58 9.71z"/></svg>
+        <div class="os">macOS <span style="font-weight:400; color:var(--faint);">(Apple Silicon)</span></div>
+        <div class="ver" id="mac-ver">Checking latest version…</div>
+        <a class="btn primary" id="mac-dl" href="https://github.com/hayhamLT/RenderMapperPro/releases/latest">Download for Mac</a>
+      </div>
+      <div class="platform card">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10.5 4.4V11.5H3V5.5zM11.5 4.25 21 3V11.4H11.5V4.25zM3 12.5H10.5V19.6L3 18.5V12.5zM11.5 12.5H21V21L11.5 19.75V12.5z"/></svg>
+        <div class="os">Windows <span style="font-weight:400; color:var(--faint);">(x64)</span></div>
+        <div class="ver" id="win-ver">Checking latest version…</div>
+        <a class="btn primary" id="win-dl" href="https://github.com/hayhamLT/RenderMapperPro/releases/latest">Download for Windows</a>
+      </div>
+    </div>
+    <div class="web-cta">Prefer no install? Portable zips for both platforms are on the <a href="https://github.com/hayhamLT/RenderMapperPro/releases/latest">Releases page →</a></div>
+  </div>
+ </div>
+</section>
+
+<footer>
+  <div class="inner">
+    <div class="row">
+      <p>Built for rendering show content on your own metal — overnight, without a farm.</p>
+      <div class="fnav">
+        <a href="https://github.com/hayhamLT/RenderMapperPro">GitHub</a>
+        <a href="https://github.com/hayhamLT/RenderMapperPro/releases/latest">Releases</a>
+        <a href="https://github.com/hayhamLT/RenderMapperPro#quick-start">Quick start</a>
+      </div>
+    </div>
+    <p class="credit">
+      Built by <a href="https://motion.hamlt.com" target="_blank" rel="noopener">hamLT</a>
+      · powered by <a href="https://toyrobotmedia.com" target="_blank" rel="noopener">Toy Robot Media</a>
+      — alongside <a href="https://www.preshow.link" target="_blank" rel="noopener" title="Plan and previz real-world shows — screens, timelines, review">Preshow.link</a>
+      and <a href="https://uv.preshow.link" target="_blank" rel="noopener" title="Map artwork onto venue screens — C4D and Blender round-trips">UV Studio</a>.
+    </p>
+  </div>
+</footer>
+
+<script>
+  // sticky nav background
+  const navbg = document.getElementById('navbg');
+  addEventListener('scroll', () => navbg.classList.toggle('on', scrollY > 8), { passive:true });
+
+  // scroll reveal
+  const io = new IntersectionObserver((es) => {
+    for (const e of es) if (e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); }
+  }, { threshold:0.12 });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+  // feature switcher (single screenshot for now — captions swap)
+  const shot = document.getElementById('shot');
+  const cap = document.getElementById('shot-cap');
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      if (tab.classList.contains('active')) return;
+      document.querySelector('.tab.active')?.classList.remove('active');
+      tab.classList.add('active');
+      cap.textContent = tab.dataset.cap;
+      if (tab.dataset.img){
+        shot.style.opacity = '0';
+        setTimeout(() => { shot.src = tab.dataset.img; shot.style.opacity = '1'; }, 200);
+      }
+    });
+    if (tab.dataset.img){ const pre = new Image(); pre.src = tab.dataset.img; }
+  });
+
+  // live latest-release download links (falls back to the releases page)
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/hayhamLT/RenderMapperPro/releases/latest');
+      if (!res.ok) return;
+      const rel = await res.json();
+      const assets = rel.assets || [];
+      const ver = (rel.tag_name || '').replace(/^v/, '');
+      const find = re => assets.find(a => re.test(a.name));
+      const dmg = find(/\.dmg$/i);
+      if (dmg){ document.getElementById('mac-dl').href = dmg.browser_download_url; }
+      document.getElementById('mac-ver').textContent = dmg && ver ? `Version ${ver}` : '';
+      const exe = find(/setup\.exe$/i) || find(/\.exe$/i) || find(/\.msi$/i);
+      if (exe){ document.getElementById('win-dl').href = exe.browser_download_url; }
+      document.getElementById('win-ver').textContent = exe && ver ? `Version ${ver}` : '';
+    } catch {
+      document.getElementById('mac-ver').textContent = '';
+      document.getElementById('win-ver').textContent = '';
+    }
+  })();
+</script>
+</body>
+</html>

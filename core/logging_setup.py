@@ -63,7 +63,7 @@ def setup_logging(log_path: Path | str | None = None, level: int = logging.INFO,
 
     logger.propagate = False
     logger.info("%s", "=" * 60)
-    logger.info("Render Mapper Pro %s — session start", version or "?")
+    logger.info("PrevizRender %s — session start", version or "?")
     return logger
 
 

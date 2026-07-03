@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="pvrbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff8a5c"/>
+      <stop offset="1" stop-color="#e04e1f"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="url(#pvrbg)"/>
+  <!-- Timeline layers: three render passes, top one "playing" -->
+  <g fill="#ffffff" opacity="0.26">
+    <rect x="128" y="236" width="256" height="56" rx="14"/>
+    <rect x="128" y="322" width="184" height="56" rx="14"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="128" y="150" width="150" height="56" rx="14"/>
+    <!-- Play head / render triangle -->
+    <path d="M318 138 L402 178 L318 218 Z" rx="6"/>
+  </g>
+</svg>

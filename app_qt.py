@@ -286,7 +286,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._c4dpy_path = _find_c4dpy()   # Cinema 4D headless Python, if installed
         self._deadline_repo_path = ""
         self._deadline_command_path = ""
-        self._deadline_job_name_template = "Render Mapper Pro Job - {scene_name}"
+        self._deadline_job_name_template = f"{APP_NAME} Job - {{scene_name}}"
         self._deadline_comment = ""
         self._discovered_materials: list[str] = []
         self._discovered_cameras: list[str] = []
@@ -700,7 +700,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         return [
             ("Getting Started", """
         <h2>Welcome</h2>
-        <p class="lead">Render Mapper Pro maps your videos onto a 3D scene's
+        <p class="lead">PrevizRender maps your videos onto a 3D scene's
         materials and renders them — on your machine or a render farm. Each tab
         above covers one part of the app; here's the whole flow first.</p>
         <table class="steps" width="100%">
@@ -1146,12 +1146,22 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         name = centered(QLabel(APP_NAME))
         name.setStyleSheet(f"color:{pal.text}; font-size:19px; font-weight:700; margin-top:8px;")
-        ver = centered(QLabel(f"Version {APP_VERSION}"))
+        ver = centered(QLabel(f"Version {APP_VERSION} · formerly Render Mapper Pro"))
         ver.setStyleSheet(f"color:{pal.text_muted}; font-size:12px;")
         desc = centered(QLabel("Automated video-texture mapping and headless\n"
                                "rendering — Blender, Cinema 4D and three.js."))
         desc.setStyleSheet(f"color:{pal.text_muted}; font-size:12px; margin-top:8px;")
         desc.setWordWrap(True)
+
+        family = centered(QLabel(
+            'Sibling apps: '
+            f'<a style="color:{pal.accent}; text-decoration:none;" '
+            'href="https://www.preshow.link">Preshow.link</a> for show previz · '
+            f'<a style="color:{pal.accent}; text-decoration:none;" '
+            'href="https://uv.preshow.link">UV Studio</a> for screen UVs'))
+        family.setStyleSheet(f"color:{pal.text_muted}; font-size:12px; margin-top:4px;")
+        family.setOpenExternalLinks(True)
+        family.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -2717,7 +2727,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             QMessageBox.critical(
                 self, "App Component Missing",
                 "The app's render component couldn't be found — the installation may be "
-                f"damaged. Reinstall Render Mapper Pro.\n\nDetails: {exc}")
+                f"damaged. Reinstall {APP_NAME}.\n\nDetails: {exc}")
             self._is_rendering = False
             return
         # Bundled ffmpeg path for the workers: C4D always muxes its movie with it,
@@ -3437,8 +3447,8 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
     # ── Project save/open ────────────────────────────────────────────────
     def _save_project(self) -> None:
         p, _ = QFileDialog.getSaveFileName(
-            self, "Save Project", str(Path.home() / f"render_mapper_project{PROJECT_EXT}"),
-            f"Render Mapper Project (*{PROJECT_EXT})")
+            self, "Save Project", str(Path.home() / f"previzrender_project{PROJECT_EXT}"),
+            f"PrevizRender Project (*{PROJECT_EXT})")
         if not p:
             return
         if not p.lower().endswith(PROJECT_EXT):
@@ -3456,7 +3466,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
     def _open_project(self) -> None:
         p, _ = QFileDialog.getOpenFileName(
             self, "Open Project", str(Path.home()),
-            f"Render Mapper Project (*{PROJECT_EXT})")
+            f"PrevizRender Project (*{PROJECT_EXT})")
         if not p:
             return
         try:
@@ -3565,7 +3575,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             if not self._discord_webhook:
                 self._show_toast("Enter a webhook URL first.", "warning")
                 return
-            self._dispatch_discord("✅ Test notification from Render Mapper Pro")
+            self._dispatch_discord(f"✅ Test notification from {APP_NAME}")
             self._show_toast("Test sent — check Discord (and Live Logs for errors).", "info")
 
         test_btn.clicked.connect(_send_test)
@@ -3960,9 +3970,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.deadline_panel.dl_chunk_spin.setValue(int(d.get("deadline_chunk_size", 1)))
         self.deadline_panel.dl_suspended_cb.setChecked(bool(d.get("deadline_suspended", False)))
         self.deadline_panel.dl_submit_scene_cb.setChecked(bool(d.get("deadline_submit_scene", True)))
-        self._deadline_job_name_template = str(d.get("deadline_job_name_template", "Render Mapper Pro Job - {scene_name}"))
+        self._deadline_job_name_template = str(d.get("deadline_job_name_template", f"{APP_NAME} Job - {{scene_name}}"))
         if self._deadline_job_name_template == "BlenderRender Job - {scene_name}":   # migrate old app name
-            self._deadline_job_name_template = "Render Mapper Pro Job - {scene_name}"
+            self._deadline_job_name_template = f"{APP_NAME} Job - {{scene_name}}"
         self.deadline_panel.dl_name_template_edit.setText(self._deadline_job_name_template)
         self.deadline_panel.dl_machine_limit_spin.setValue(int(d.get("deadline_machine_limit", 0)))
         self.deadline_panel.dl_limits_edit.setText(str(d.get("deadline_limits", "")))
@@ -4161,7 +4171,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
                         deadline_chunk_size=int(jd.get("deadline_chunk_size", 1)),
                         deadline_suspended=bool(jd.get("deadline_suspended", False)),
                         deadline_submit_scene=bool(jd.get("deadline_submit_scene", True)),
-                        deadline_job_name_template=str(jd.get("deadline_job_name_template", "Render Mapper Pro Job - {scene_name}")),
+                        deadline_job_name_template=str(jd.get("deadline_job_name_template", f"{APP_NAME} Job - {{scene_name}}")),
                         deadline_machine_limit=int(jd.get("deadline_machine_limit", 0)),
                         deadline_limits=str(jd.get("deadline_limits", "")),
                         deadline_command_path=str(jd.get("deadline_command_path", "")),
@@ -4570,7 +4580,7 @@ def run_qt_app() -> None:
         if probe.state() == QLocalSocket.LocalSocketState.ConnectedState:
             probe.waitForBytesWritten(250)
             probe.disconnectFromServer()
-        print("Render Mapper Pro is already running — focusing the existing window.", file=sys.stderr)
+        print(f"{APP_NAME} is already running — focusing the existing window.", file=sys.stderr)
         return
     # No live instance; clear any stale socket and become the server.
     QLocalServer.removeServer(SINGLE_INSTANCE_KEY)

@@ -1,0 +1,43 @@
+# Deploy the static marketing site (site/) to GitHub Pages at
+# render.preshow.link — same mechanism as UV Studio's uv.preshow.link.
+#
+# The deploy is OPT-IN — it only runs when the repo variable
+# DEPLOY_PAGES == 'true'. To enable it (needs a public repo OR a plan with
+# private Pages, e.g. Pro):
+#   repo Settings → Pages → Source: "GitHub Actions"
+#   gh variable set DEPLOY_PAGES --body true
+# Then add a DNS CNAME record: render.preshow.link → hayhamlt.github.io
+# The custom domain is baked in via the CNAME file below, so the site is
+# served at root — no subpath rewrites needed.
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/site.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: ${{ vars.DEPLOY_PAGES == 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo 'render.preshow.link' > site/CNAME
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
