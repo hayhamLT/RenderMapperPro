@@ -308,8 +308,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/PrevizRender" \
-            -DestinationPath "PrevizRender-${{ matrix.label }}.zip"
+          Compress-Archive -Path "dist/PrevizRender" -DestinationPath "PrevizRender-${{ matrix.label }}.zip"
           choco install innosetup --no-progress -y
           $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
