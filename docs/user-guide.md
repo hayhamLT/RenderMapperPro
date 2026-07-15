@@ -1,4 +1,4 @@
-# Render Mapper Pro — User Guide
+# PrevizRender — User Guide
 
 Map video clips onto a 3D scene's materials and render them headlessly — via
 **Blender**, **Cinema 4D + Redshift**, or the built-in **three.js** web
@@ -301,5 +301,5 @@ reports. Delete the folder for a factory reset.
 
 **Is the download safe?**
 Releases ship a `SHA256SUMS.txt`, signed build provenance
-(`gh attestation verify <file> --repo hayhamLT/RenderMapperPro`), and macOS
+(`gh attestation verify <file> --repo hayhamLT/PrevizRender`), and macOS
 builds are Developer-ID signed + notarized by Apple.

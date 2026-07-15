@@ -149,7 +149,7 @@ jobs:
       # updater reads Releases over the anonymous GitHub API. (A token in a
       # shipped binary would be extractable, so we deliberately ship none.)
       - name: Build with PyInstaller
-        run: python -m PyInstaller --noconfirm --clean BlenderVideoMapper.spec
+        run: python -m PyInstaller --noconfirm --clean PrevizRender.spec
       # ── macOS code-signing + notarization ──────────────────────────────────
       # Requires four repository secrets (Settings → Secrets → Actions):
       #   MACOS_CERTIFICATE      base64-encoded Developer ID Application .p12
@@ -190,7 +190,7 @@ jobs:
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
         run: |
           if [ -z "$MACOS_CERTIFICATE" ]; then exit 0; fi
-          APP="dist/Render Mapper Pro.app"
+          APP="dist/PrevizRender.app"
           ENT="installer/entitlements.plist"
           # Sign EVERY Mach-O inside the bundle (dylib/so/bare executables like
           # the bundled ffmpeg), each with a secure timestamp + hardened runtime
@@ -220,7 +220,7 @@ jobs:
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
-          bash installer/make_dmg.sh "RenderMapperPro-${{ matrix.label }}.dmg"
+          bash installer/make_dmg.sh "PrevizRender-${{ matrix.label }}.dmg"
       - name: Notarize and staple (macOS)
         if: runner.os == 'macOS'
         env:
@@ -237,8 +237,8 @@ jobs:
             [ -z "$NOTARIZATION_APPLE_ID" ] && \
               echo "::warning::NOTARIZATION_APPLE_ID not set — skipping notarization"
             ditto -c -k --sequesterRsrc --keepParent \
-              "dist/Render Mapper Pro.app" \
-              "RenderMapperPro-${{ matrix.label }}.zip"
+              "dist/PrevizRender.app" \
+              "PrevizRender-${{ matrix.label }}.zip"
             exit 0
           fi
           # Submit the DMG; Apple validates every binary inside it. Parse the
@@ -248,7 +248,7 @@ jobs:
             echo "::error::NOTARIZATION_PWD is empty — create the repo secret with the app-specific password from account.apple.com"
             exit 1
           fi
-          xcrun notarytool submit "RenderMapperPro-${{ matrix.label }}.dmg" \
+          xcrun notarytool submit "PrevizRender-${{ matrix.label }}.dmg" \
             --apple-id "$NOTARIZATION_APPLE_ID" \
             --team-id "$NOTARIZATION_TEAM_ID" \
             --password "$NOTARIZATION_PWD" \
@@ -268,12 +268,12 @@ jobs:
             exit 1
           fi
           # Staple the ticket to the DMG and to the .app (so the zip is clean too)
-          xcrun stapler staple "RenderMapperPro-${{ matrix.label }}.dmg"
-          xcrun stapler staple "dist/Render Mapper Pro.app"
+          xcrun stapler staple "PrevizRender-${{ matrix.label }}.dmg"
+          xcrun stapler staple "dist/PrevizRender.app"
           # Build the zip from the now-stapled .app
           ditto -c -k --sequesterRsrc --keepParent \
-            "dist/Render Mapper Pro.app" \
-            "RenderMapperPro-${{ matrix.label }}.zip"
+            "dist/PrevizRender.app" \
+            "PrevizRender-${{ matrix.label }}.zip"
           echo "Notarization and stapling complete"
       # ── Windows code-signing (Authenticode) ────────────────────────────────
       # Optional, mirroring the macOS pattern: set two repository secrets and
@@ -301,19 +301,19 @@ jobs:
             Sort-Object FullName | Select-Object -Last 1
           & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PWD `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "dist/Render Mapper Pro/Render Mapper Pro.exe"
+            "dist/PrevizRender/PrevizRender.exe"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "App executable signed"
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/Render Mapper Pro" `
-            -DestinationPath "RenderMapperPro-${{ matrix.label }}.zip"
+          Compress-Archive -Path "dist/PrevizRender" \
+            -DestinationPath "PrevizRender-${{ matrix.label }}.zip"
           choco install innosetup --no-progress -y
           $ver = (Select-String -Path app_version.py -Pattern '__version__ = "([^"]+)"').Matches[0].Groups[1].Value
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer\windows.iss
-          Copy-Item "installer\Output\RenderMapperPro-Windows-x64-Setup.exe" .
+          Copy-Item "installer\Output\PrevizRender-Windows-x64-Setup.exe" .
       - name: Sign installer (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -328,7 +328,7 @@ jobs:
             Sort-Object FullName | Select-Object -Last 1
           & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PWD `
             /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "RenderMapperPro-Windows-x64-Setup.exe"
+            "PrevizRender-Windows-x64-Setup.exe"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "Installer signed"
       # Signed SLSA build-provenance for each shipped artifact (verifiable with
@@ -339,22 +339,22 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            RenderMapperPro-${{ matrix.label }}.zip
-            RenderMapperPro-${{ matrix.label }}.dmg
+            PrevizRender-${{ matrix.label }}.zip
+            PrevizRender-${{ matrix.label }}.dmg
       - name: Attest build provenance (Windows)
         if: runner.os == 'Windows'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            RenderMapperPro-${{ matrix.label }}.zip
-            RenderMapperPro-Windows-x64-Setup.exe
+            PrevizRender-${{ matrix.label }}.zip
+            PrevizRender-Windows-x64-Setup.exe
       - uses: actions/upload-artifact@v7
         with:
-          name: RenderMapperPro-${{ matrix.label }}
+          name: PrevizRender-${{ matrix.label }}
           path: |
-            RenderMapperPro-${{ matrix.label }}.zip
-            RenderMapperPro-${{ matrix.label }}.dmg
-            RenderMapperPro-Windows-x64-Setup.exe
+            PrevizRender-${{ matrix.label }}.zip
+            PrevizRender-${{ matrix.label }}.dmg
+            PrevizRender-Windows-x64-Setup.exe
           if-no-files-found: ignore
 
   # Publish the Release as soon as the macOS-arm64 + Windows builds are ready.
@@ -405,12 +405,12 @@ jobs:
             SHA256SUMS.txt
           generate_release_notes: true
           body: |
-            Standalone builds of **Render Mapper Pro**.
+            Standalone builds of **PrevizRender**.
 
             | Platform | Installer (recommended) | Portable |
             |----------|-------------------------|----------|
-            | Windows (x64) | `RenderMapperPro-Windows-x64-Setup.exe` | `RenderMapperPro-Windows-x64.zip` |
-            | macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.dmg` | `RenderMapperPro-macOS-arm64.zip` |
+            | Windows (x64) | `PrevizRender-Windows-x64-Setup.exe` | `PrevizRender-Windows-x64.zip` |
+            | macOS (Apple Silicon) | `PrevizRender-macOS-arm64.dmg` | `PrevizRender-macOS-arm64.zip` |
 
             **Windows:** run the **Setup.exe** (installs to Program Files + Start-Menu shortcut). Windows SmartScreen may prompt on first run.
             **macOS:** open the **.dmg** and drag the app to Applications. The app is signed and notarized — it opens normally on first launch. Apple Silicon only.

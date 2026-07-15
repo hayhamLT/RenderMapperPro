@@ -3,7 +3,7 @@ import os
 import platform
 import sys
 
-APP_NAME = "Render Mapper Pro"
+APP_NAME = "PrevizRender"
 
 
 def _app_version():
@@ -194,7 +194,7 @@ if sys.platform == 'darwin':
         coll,
         name=f'{APP_NAME}.app',
         icon='assets/app_icon.icns',
-        bundle_identifier='com.toyrobotmedia.rendermapperpro',
+        bundle_identifier='com.toyrobotmedia.previzrender',
         version=APP_VERSION,
         info_plist={
             'CFBundleName': APP_NAME,

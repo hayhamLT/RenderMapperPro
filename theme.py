@@ -1,4 +1,4 @@
-"""Central design-token system for Render Mapper Pro.
+"""Central design-token system for PrevizRender.
 
 Single source of truth for colors, spacing, radius and fonts. Replaces the
 ~25 hard-coded hex values that used to be scattered across inline stylesheets.

@@ -12,8 +12,8 @@
 set -euo pipefail
 
 OUT="${1:?usage: make_dmg.sh <output.dmg> [app]}"
-APP="${2:-dist/Render Mapper Pro.app}"
-VOL="Render Mapper Pro"
+APP="${2:-dist/PrevizRender.app}"
+VOL="PrevizRender"
 BG="$(cd "$(dirname "$0")" && pwd)/dmg-background.png"
 
 [ -d "$APP" ] || { echo "App not found: $APP" >&2; exit 1; }

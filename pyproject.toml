@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "render-mapper-pro"
+name = "previz-render"
 description = "Map videos onto 3D-scene materials and render them headlessly via Blender, Cinema 4D/Redshift, or three.js."
 requires-python = ">=3.12"
 dynamic = ["version"]

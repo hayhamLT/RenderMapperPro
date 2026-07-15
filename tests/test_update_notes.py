@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from app_window.update_mixin import _clean_release_notes
 
-_BODY = """Standalone builds of **Render Mapper Pro**.
+_BODY = """Standalone builds of **PrevizRender**.
 
 | Platform | Installer (recommended) | Portable |
 |----------|-------------------------|----------|

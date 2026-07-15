@@ -57,7 +57,7 @@ def write_commandline_job_info(f, job: JobConfig, scene_name: str, video_name: s
     source of truth shared by farm submission AND the 'Export job files' action,
     so the two can never drift (they had)."""
     template = getattr(job, "deadline_job_name_template", "") or ""
-    name = f"Render Mapper Pro Job - {scene_name}"
+    name = f"PrevizRender Job - {scene_name}"
     if template:
         try:
             name = template.format(scene_name=scene_name, video_name=video_name)
@@ -236,12 +236,12 @@ def submit_deadline_job(
             except ValueError:
                 return ""
 
-        name = f"RenderMapperPro - {scene_path.name}"
+        name = f"PrevizRender - {scene_path.name}"
         job_info_path = staging_dir / "job_info.job"
         plugin_info_path = staging_dir / "plugin_info.job"
         with open(job_info_path, "w") as f:
             _write_job_info_common(f, job, name)
-            f.write("Plugin=RenderMapperPro\n")
+            f.write("Plugin=PrevizRender\n")
             f.write(f"Frames={job.render.frame_start}-{job.render.frame_end}\n")
             chunk = getattr(job, "deadline_chunk_size", 1)
             frame_count = job.render.frame_end - job.render.frame_start + 1

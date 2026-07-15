@@ -41,7 +41,7 @@ _fault_path: Path | None = None
 
 def _header(version: str, kind: str) -> str:
     return (
-        f"Render Mapper Pro crash report\n"
+        f"PrevizRender crash report\n"
         f"kind: {kind}\n"
         f"version: {version}\n"
         f"os: {platform.platform()}\n"

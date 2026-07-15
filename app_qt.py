@@ -1153,7 +1153,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
               farm; right-click a queued job to <b>Set Priority</b> or <b>Requeue</b>.</td></tr>
         </table>
         <p class="muted"><b>One-time setup:</b> install the bundled
-        <code>RenderMapperPro</code> Deadline plugin into your repository's
+        <code>PrevizRender</code> Deadline plugin into your repository's
         <code>custom/plugins/</code>, and make sure each node is licensed for the
         renderer it runs.</p>
         """),
@@ -1341,7 +1341,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
 
         name = centered(QLabel(APP_NAME))
         name.setStyleSheet(f"color:{pal.text}; font-size:19px; font-weight:700; margin-top:8px;")
-        ver = centered(QLabel(f"Version {APP_VERSION} · formerly Render Mapper Pro"))
+        ver = centered(QLabel(f"Version {APP_VERSION}"))
         ver.setStyleSheet(f"color:{pal.text_muted}; font-size:12px;")
         desc = centered(QLabel("Automated video-texture mapping and headless\n"
                                "rendering — Blender, Cinema 4D and three.js."))
@@ -1554,6 +1554,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self.presets_panel.refresh_requested.connect(self._refresh_preset_browser)
         self.presets_panel.open_folder_requested.connect(self._open_presets_folder)
         self._refresh_preset_browser()
+        self._init_preset_watcher()
 
         self.logs_panel.copy_diag.connect(self._copy_diagnostics)
         self.preview_panel.preview_frame_requested.connect(self._render_preview_frame)
@@ -1576,9 +1577,9 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         )
         # When a dock gets tabbed / untabbed / floated, re-evaluate whether its
         # title bar should be hidden (tabbed → tab is the header) or shown.
-        dock.dockLocationChanged.connect(lambda *_: self._schedule_titlebar_sync())
-        dock.topLevelChanged.connect(lambda *_: self._schedule_titlebar_sync())
-        dock.visibilityChanged.connect(lambda *_: self._schedule_titlebar_sync())
+        dock.dockLocationChanged.connect(lambda *_: self._on_dock_layout_changed())
+        dock.topLevelChanged.connect(lambda *_: self._on_dock_layout_changed())
+        dock.visibilityChanged.connect(lambda *_: self._on_dock_layout_changed())
         return dock
 
     def _schedule_titlebar_sync(self) -> None:
@@ -1586,6 +1587,11 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
             return
         self._titlebar_sync_pending = True
         QTimer.singleShot(0, self._sync_dock_titlebars)
+
+    def _on_dock_layout_changed(self) -> None:
+        self._schedule_titlebar_sync()
+        if not getattr(self, "_loading_profile", False):
+            self._schedule_save()
 
     def _make_solo_tab_titlebar(self, dock: QDockWidget) -> QWidget:
         """A title bar that renders the panel name as a single left-aligned tab,
@@ -4393,10 +4399,13 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         self._is_first_run = not PROFILE_PATH.exists()
         if not PROFILE_PATH.exists():
             return
+        self._loading_profile = True
         try:
             self._apply_profile_data(json.loads(PROFILE_PATH.read_text()))
         except Exception:
             _log.warning("failed to load saved profile; using defaults", exc_info=True)
+        finally:
+            self._loading_profile = False
         # Widgets were built under the construction-time theme; re-apply the saved
         # choice (system/light/dark may differ from what was painted) and sync the
         # View-menu actions.
@@ -4555,7 +4564,7 @@ class BlenderVideoMapperQt(QMainWindow, QueueMixin, PresetMixin, DeadlineMixin, 
         event.accept()
 
 
-SINGLE_INSTANCE_KEY = "RenderMapperPro.singleton"
+SINGLE_INSTANCE_KEY = "PrevizRender.singleton"
 
 
 def _set_macos_app_name(name: str) -> None:

@@ -363,7 +363,7 @@ def build_properties_dialog(win, initial_tab: str | None = None) -> None:
     # Name Template
     template_row = QHBoxLayout()
     template_edit = QLineEdit(win._deadline_job_name_template)
-    template_edit.setPlaceholderText("e.g. Render Mapper Pro Job - {scene_name}")
+    template_edit.setPlaceholderText("e.g. PrevizRender Job - {scene_name}")
     template_row.addWidget(QLabel("Name Template:  "))
     template_row.addWidget(template_edit, 1)
     gl.addLayout(template_row)

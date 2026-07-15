@@ -4,7 +4,7 @@ Label=About
 Category=About Plugin
 CategoryOrder=-1
 Index=0
-Default=Render Mapper Pro — video-mapped Cinema 4D / Redshift renders
+Default=PrevizRender — video-mapped Cinema 4D / Redshift renders
 Description=Not configurable
 
 [ConcurrentTasks]

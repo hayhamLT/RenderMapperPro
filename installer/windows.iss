@@ -1,14 +1,14 @@
-; Inno Setup script for Render Mapper Pro (Windows).
+; Inno Setup script for PrevizRender (Windows).
 ; Build:  iscc /DMyAppVersion=1.7.3 installer\windows.iss
-; Produces installer\Output\RenderMapperPro-Windows-x64-Setup.exe
+; Produces installer\Output\PrevizRender-Windows-x64-Setup.exe
 ;
 ; Installs the PyInstaller onedir build to Program Files (a stable location, so
 ; in-app updates aren't fighting a running .exe in Downloads), with Start-Menu /
 ; optional desktop shortcuts and a proper uninstaller. Unsigned — SmartScreen
 ; shows a one-time "unknown publisher" prompt until a code-signing cert is added.
 
-#define MyAppName "Render Mapper Pro"
-#define MyAppExeName "Render Mapper Pro.exe"
+#define MyAppName "PrevizRender"
+#define MyAppExeName "PrevizRender.exe"
 #define MyAppPublisher "Toy Robot Media"
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
@@ -25,7 +25,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=Output
-OutputBaseFilename=RenderMapperPro-Windows-x64-Setup
+OutputBaseFilename=PrevizRender-Windows-x64-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -46,7 +46,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; The whole PyInstaller onedir output (exe + _internal/).
-Source: "..\dist\Render Mapper Pro\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\dist\PrevizRender\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

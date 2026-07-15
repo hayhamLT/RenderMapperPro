@@ -20,7 +20,7 @@ class DownloadCancelled(Exception):
     """Raised by :func:`download_with_progress` when ``should_cancel()`` returns True."""
 
 
-def fetch_text(url: str, *, user_agent: str = "RenderMapperPro/1.0", timeout: int = 30) -> str:
+def fetch_text(url: str, *, user_agent: str = "PrevizRender/1.0", timeout: int = 30) -> str:
     """GET a small text resource over the verifying SSL context (e.g. a checksum
     sidecar). Uses the same bundled-CA context as the big download."""
     from core.utils import ssl_context
@@ -32,7 +32,7 @@ def fetch_text(url: str, *, user_agent: str = "RenderMapperPro/1.0", timeout: in
 def download_with_progress(url: str, dest: str | Path, on_log: LogCallback | None = None,
                            *, on_progress: ProgressCallback | None = None,
                            should_cancel: CancelCheck | None = None,
-                           user_agent: str = "RenderMapperPro/1.0", timeout: int = 120,
+                           user_agent: str = "PrevizRender/1.0", timeout: int = 120,
                            chunk: int = 512 * 1024, tag: str = "[runtime]") -> int:
     """Stream ``url`` to ``dest``, logging percent / speed / ETA every ~5%.
 

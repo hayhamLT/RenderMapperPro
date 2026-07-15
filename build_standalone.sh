@@ -58,6 +58,6 @@ echo "Using build virtualenv: $BUILD_VENV_DIR"
 "$BUILD_PYTHON" -m PyInstaller \
   --noconfirm \
   --clean \
-  BlenderVideoMapper.spec
+  PrevizRender.spec
 
-echo "Build complete: 'dist/Render Mapper Pro.app'"
+echo "Build complete: 'dist/PrevizRender.app'"

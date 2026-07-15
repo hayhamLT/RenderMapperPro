@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -717,6 +717,13 @@ class PairTableEditor(QWidget):
         self.table.setMinimumHeight(92)
         self.table.itemChanged.connect(lambda *_: self.changed.emit())
         v.addWidget(self.table)
+        # Delete selected rows with Delete/Backspace.
+        del_act = QAction("Delete Selected", self.table)
+        del_act.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
+        del_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        del_act.triggered.connect(self._remove_row)
+        self.table.addAction(del_act)
+
         row = QHBoxLayout()
         row.setSpacing(6)
         add = QPushButton("+ Add")

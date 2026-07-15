@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-Render Mapper Pro bundles the following third-party software.
+PrevizRender bundles the following third-party software.
 
 ## FFmpeg / FFprobe
 

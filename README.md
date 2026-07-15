@@ -1,8 +1,8 @@
-# PrevizRender <sub>(formerly Render Mapper Pro)</sub>
+# PrevizRender
 
 A standalone desktop app that maps videos onto 3D‑scene materials and renders them headlessly — built for LED‑wall / screen‑content workflows where one scene drives many video surfaces.
 
-PrevizRender is one of three sibling tools built by [hamLT](https://motion.hamlt.com) and powered by [Toy Robot Media](https://toyrobotmedia.com): **[Preshow.link](https://www.preshow.link)** plans and previzes the show, **[UV Studio](https://uv.preshow.link)** maps artwork onto the venue's screens, and **PrevizRender** renders the comps locally. Product site: **[render.preshow.link](https://render.preshow.link)** (deployed from [`site/`](site/) via GitHub Pages, same as UV Studio's). (Installer and bundle artifacts keep the `RenderMapperPro` name so auto-updates and install paths stay valid.)
+PrevizRender is one of three sibling tools built by [hamLT](https://motion.hamlt.com) and powered by [Toy Robot Media](https://toyrobotmedia.com): **[Preshow.link](https://www.preshow.link)** plans and previzes the show, **[UV Studio](https://uv.preshow.link)** maps artwork onto the venue's screens, and **PrevizRender** renders the comps locally. Product site: **[render.preshow.link](https://render.preshow.link)** (deployed from [`site/`](site/) via GitHub Pages, same as UV Studio's).
 
 It supports **two render backends**, chosen automatically by scene type: **Blender** (`.blend`, `.fbx`, `.usd`, …) and **Cinema 4D + Redshift** (`.c4d`). It runs the renderer in the background, so a renderer crash can never take down the app, and ships bundled static `ffmpeg`/`ffprobe` so audio muxing and clip probing work out of the box.
 
@@ -14,8 +14,8 @@ Grab the latest from the [**Releases**](../../releases) page. The **installer** 
 
 | Platform | Installer (recommended) | Portable |
 |----------|-------------------------|----------|
-| Windows (x64) | `RenderMapperPro-Windows-x64-Setup.exe` | `RenderMapperPro-Windows-x64.zip` |
-| macOS (Apple Silicon) | `RenderMapperPro-macOS-arm64.dmg` | `RenderMapperPro-macOS-arm64.zip` |
+| Windows (x64) | `PrevizRender-Windows-x64-Setup.exe` | `PrevizRender-Windows-x64.zip` |
+| macOS (Apple Silicon) | `PrevizRender-macOS-arm64.dmg` | `PrevizRender-macOS-arm64.zip` |
 
 - **Windows:** run **Setup.exe** — it installs to Program Files with a Start‑Menu shortcut. If SmartScreen warns, **More info → Run anyway** (the build isn't code‑signed).
 - **macOS:** open the **.dmg** and drag the app to **Applications**. The app is **Developer‑ID signed and notarized by Apple** — it opens normally, no Gatekeeper warnings.
@@ -101,10 +101,10 @@ Both are JSON under the hood. App data lives in `~/.blender_video_mapper/`:
 - `theme.py` / `icons.py` — dark theme tokens + SVG icon set that drive all styling.
 - `blender_worker.py` / `blender_discover.py` — headless Blender render + scene discovery.
 - `c4d_worker.py` / `c4d_discover.py` — headless Cinema 4D + Redshift render/bake + discovery (run under `c4dpy`).
-- `deadline/RenderMapperPro/` — custom Deadline plugin (app icon + cross‑platform C4D Commandline render); installed into the repository's `custom/plugins/`.
+- `deadline/PrevizRender/` — custom Deadline plugin (app icon + cross‑platform C4D Commandline render); installed into the repository's `custom/plugins/`.
 - `core/` — UI‑agnostic logic: `models.py` (job config), `runner.py` (subprocess + Deadline submission), `discovery.py`, `utils.py` (output paths, name auto‑match, version reconciliation).
 - `tests/` — pytest suite for `core/` (matching, versioning, runner, Deadline submission).
-- `BlenderVideoMapper.spec` — PyInstaller build spec (bundles both workers + ffmpeg).
+- `PrevizRender.spec` — PyInstaller build spec (bundles both workers + ffmpeg).
 
 ## Run from source
 
@@ -123,8 +123,8 @@ Then set the Blender executable in **Properties** (e.g. `/Applications/Blender.a
 ```bash
 python -m pip install -r requirements-build.txt
 python tools/fetch_ffmpeg.py
-python -m PyInstaller --noconfirm --clean BlenderVideoMapper.spec
-# → dist/Render Mapper Pro.app  (macOS)  /  dist/Render Mapper Pro/  (Windows)
+python -m PyInstaller --noconfirm --clean PrevizRender.spec
+# → dist/PrevizRender.app  (macOS)  /  dist/PrevizRender/  (Windows)
 ```
 
 GitHub Actions (`.github/workflows/build.yml`) does this for macOS (Apple Silicon) + Windows on every push to `main`. The Windows job also compiles a `Setup.exe` with **Inno Setup** and the macOS job builds a `.dmg` (see `installer/`); pushing a `v*` tag publishes a Release with both the installers and the portable zips. _(macOS is Apple-Silicon-only — the deprecated Intel runner build was dropped; a universal2 build is the path back to Intel support if needed.)_
@@ -149,4 +149,4 @@ CI runs the same lint + tests as a gate before the build matrix.
 
 - Requires Cinema 4D 2026 (auto‑detected via `c4dpy`) with Redshift; the clip is injected into the target material's **Redshift emission** as a full‑bright image sequence (Redshift can't read `.mp4`, so frames are extracted with the bundled `ffmpeg`).
 - **Local renders/preview** run under `c4dpy`. **Farm renders** bake a self‑contained `.c4d` (relative sequence paths) and render it with the licensed Cinema 4D **Commandline** — so any node that already renders C4D works, with no extra licensing setup.
-- **Farm prerequisites:** each render node needs Cinema 4D + Redshift licensed (as for the stock Cinema4D plugin). The `RenderMapperPro` Deadline plugin lives in `deadline/RenderMapperPro/` and is installed into the repository's `custom/plugins/`.
+- **Farm prerequisites:** each render node needs Cinema 4D + Redshift licensed (as for the stock Cinema4D plugin). The `PrevizRender` Deadline plugin lives in `deadline/PrevizRender/` and is installed into the repository's `custom/plugins/`.

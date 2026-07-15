@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Render Mapper Pro — Deadline plugin.
+"""PrevizRender — Deadline plugin.
 
-Runs a Render Mapper Pro job (video mapped onto a Cinema 4D / Redshift scene)
+Runs a PrevizRender job (video mapped onto a Cinema 4D / Redshift scene)
 on any render node, regardless of the OS the job was submitted from. The node
 locates its own c4dpy, translates the staged file paths to its own repository
 mount, feeds c4dpy's license prompt, and runs the bundled worker for this
-task's frame range. Carries the app icon (RenderMapperPro.ico) so jobs show it
+task's frame range. Carries the app icon (PrevizRender.ico) so jobs show it
 in the Deadline Monitor.
 
 Submitted with:
-  Plugin=RenderMapperPro
+  Plugin=PrevizRender
   plugin_info: SubmitRepoRoot, ConfigFile (repo-relative), WorkerScript
                (repo-relative), C4DPyExecutable (optional override)
 """
@@ -25,14 +25,14 @@ from Deadline.Scripting import RepositoryUtils
 
 
 def GetDeadlinePlugin():
-    return RenderMapperProPlugin()
+    return PrevizRenderPlugin()
 
 
 def CleanupDeadlinePlugin(deadlinePlugin):
     deadlinePlugin.Cleanup()
 
 
-class RenderMapperProPlugin(DeadlinePlugin):
+class PrevizRenderPlugin(DeadlinePlugin):
     def __init__(self):
         if sys.version_info.major == 3:
             super().__init__()
@@ -112,16 +112,16 @@ class RenderMapperProPlugin(DeadlinePlugin):
             pass
 
         exe = cmdl_override or self._find_commandline()
-        self.LogInfo("RenderMapperPro: repo=%s" % node_repo)
-        self.LogInfo("RenderMapperPro: scene=%s" % scene)
-        self.LogInfo("RenderMapperPro: output=%s prefix=%s" % (out_dir, out_prefix))
-        self.LogInfo("RenderMapperPro: Commandline=%s" % exe)
+        self.LogInfo("PrevizRender: repo=%s" % node_repo)
+        self.LogInfo("PrevizRender: scene=%s" % scene)
+        self.LogInfo("PrevizRender: output=%s prefix=%s" % (out_dir, out_prefix))
+        self.LogInfo("PrevizRender: Commandline=%s" % exe)
         if not exe:
-            self.FailRender("RenderMapperPro: could not locate the Cinema 4D Commandline "
+            self.FailRender("PrevizRender: could not locate the Cinema 4D Commandline "
                             "renderer on this node. Set 'CommandlineExecutable' to override.")
             return
         if not os.path.isfile(scene):
-            self.FailRender("RenderMapperPro: prepared scene not found: %s" % scene)
+            self.FailRender("PrevizRender: prepared scene not found: %s" % scene)
             return
 
         start, end = self.GetStartFrame(), self.GetEndFrame()
@@ -131,11 +131,11 @@ class RenderMapperProPlugin(DeadlinePlugin):
         # already baked into the scene as an image sequence.
         args = '-nogui -render "%s" -frame %d %d -oimage "%s" -oformat PNG' % (
             scene, start, end, out_image)
-        self.LogInfo("RenderMapperPro: rendering frames %d-%d" % (start, end))
+        self.LogInfo("PrevizRender: rendering frames %d-%d" % (start, end))
         exit_code = self.RunProcess(exe, args, os.path.dirname(scene), -1)
-        self.LogInfo("RenderMapperPro: Commandline exit code %s" % exit_code)
+        self.LogInfo("PrevizRender: Commandline exit code %s" % exit_code)
 
         if self._produced(out_dir, out_prefix, start):
-            self.LogInfo("RenderMapperPro: output present — task succeeded.")
+            self.LogInfo("PrevizRender: output present — task succeeded.")
             return
-        self.FailRender("RenderMapperPro: no output produced (Commandline exit %s)." % exit_code)
+        self.FailRender("PrevizRender: no output produced (Commandline exit %s)." % exit_code)

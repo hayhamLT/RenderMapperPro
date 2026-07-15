@@ -1,4 +1,4 @@
-"""Unified, theme-tinted icon set for Render Mapper Pro.
+"""Unified, theme-tinted icon set for PrevizRender.
 
 One coherent stroke-based icon family (Lucide-style: 24x24 viewBox, 2px round
 stroke) rendered to QIcon at any color/size. Replaces the previous mix of

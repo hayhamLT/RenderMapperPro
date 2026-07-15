@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 RUNTIME_ROOT = Path.home() / ".blender_video_mapper" / "runtime"
-BLENDER_RUNTIME_VERSION = "5.1.0"
+BLENDER_RUNTIME_VERSION = "5.2.0"
 
 
 def _runtime_download_spec() -> tuple[str, str] | None:

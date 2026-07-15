@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 
+from PySide6.QtCore import QFileSystemWatcher
 from PySide6.QtWidgets import QFileDialog, QInputDialog
 
 from app_window.base import _WindowMembers
@@ -129,3 +130,12 @@ class PresetMixin(_WindowMembers):
         except Exception:
             presets = []
         self.presets_panel.set_presets(presets)
+
+    def _init_preset_watcher(self) -> None:
+        self._preset_watcher = QFileSystemWatcher(self)
+        try:
+            PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+            self._preset_watcher.addPath(str(PRESETS_DIR))
+        except Exception:
+            _log.debug("could not initialize preset directory watcher", exc_info=True)
+        self._preset_watcher.directoryChanged.connect(lambda *_: self._refresh_preset_browser())

@@ -128,7 +128,7 @@ class DeadlineFields:
     deadline_department: str = ""
     deadline_chunk_size: int = 1
     deadline_suspended: bool = False
-    deadline_job_name_template: str = "Render Mapper Pro Job - {scene_name}"
+    deadline_job_name_template: str = "PrevizRender Job - {scene_name}"
     deadline_machine_limit: int = 0
     deadline_limits: str = ""
     deadline_command_path: str = ""
