@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
 
-from tests.test_watch_wiring import _make_window
+from test_watch_wiring import _make_window
 
 
 def test_presets_watcher_initialized(tmp_path, monkeypatch):
