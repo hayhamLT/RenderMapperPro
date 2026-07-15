@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence
-
 from test_watch_wiring import _make_window
 
 
