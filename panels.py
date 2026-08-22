@@ -92,6 +92,7 @@ from core.utils import (
     IMAGE_MEDIA_EXTENSIONS,
     OUTPUT_PROFILES,
     OUTPUT_TOKENS,
+    SCENE_EXTENSIONS,
     VIDEO_EXTENSIONS,
     auto_match_media_to_materials,
     is_cloud_placeholder,
@@ -107,7 +108,7 @@ from media import (
     video_has_audio,
 )
 from theme import LINK_COLORS, active_palette
-from ui_dialogs import confirm
+from ui_dialogs import confirm, inform, warn
 from ui_widgets import (
     ROLE_HAS_AUDIO,
     ROLE_MAP_COLOR,
@@ -503,14 +504,28 @@ class ScenePanel(QWidget):
             "3D Files (*.blend *.c4d *.fbx *.obj *.glb *.gltf *.usd *.usda *.usdc *.abc *.stl *.ply);;All Files (*)",
         )
         if path:
-            self.scene_edit.setText(path)
-            self.scan_requested.emit()
+            self._on_scene_file_dropped(path)
 
     def _on_scene_file_dropped(self, path: str) -> None:
         if not path:
             return
-        self.scene_edit.setText(path)
-        self.scan_requested.emit()
+        ext = Path(path).suffix.lower()
+        if ext in SCENE_EXTENSIONS:
+            self.scene_edit.setText(path)
+            self.scan_requested.emit()
+            return
+        name = Path(path).name
+        if ext in VIDEO_EXTENSIONS or ext in IMAGE_MEDIA_EXTENSIONS:
+            # Almost certainly meant for the clips list, not the scene slot —
+            # route it there instead of the drop having no visible effect.
+            self._add_video_paths([path])
+            inform(self, "Added as a clip",
+                f"{name} looks like a video or image, not a 3D scene — "
+                f"added it to your clips instead.")
+            return
+        warn(self, "Unsupported scene file",
+            f"{name} isn't a 3D scene format PrevizRender can open.\n\n"
+            "Supported: " + ", ".join(sorted(SCENE_EXTENSIONS)))
 
     def _add_videos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(

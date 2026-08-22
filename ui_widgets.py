@@ -6,10 +6,12 @@ mapping/render-target indicator; the speaker badge handles per-clip audio mute.
 from __future__ import annotations
 
 import os
+import tempfile
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -33,7 +35,6 @@ from PySide6.QtWidgets import (
 
 import icons
 import theme as T
-from core.utils import SCENE_EXTENSIONS
 from theme import active_palette
 
 # Item-data roles for the material / video lists.
@@ -46,6 +47,27 @@ ROLE_TARGET = Qt.ItemDataRole.UserRole + 5          # bool: material is a render
 _AUDIO_BADGE_PX = 14                    # logical size of the speaker glyph
 _AUDIO_BADGE_MARGIN = 6                # inset from the left row edge — clears the 3px stripe (ends at x≈5)
 _AUDIO_TEXT_INDENT = 17               # fixed slot reserved on every row so text always aligns
+
+_DROPPED_IMAGE_DIR = Path(tempfile.gettempdir()) / "rmp_dropped_images"
+
+
+def _save_dropped_image(mime_data) -> str:
+    """Write a drag's raw pixel data to a temp PNG and return its path, or ''.
+
+    Some drag sources — a browser image, or Preview/Photos/Mail on macOS — hand
+    over pixel bytes instead of a file:// URL, so there's nothing to import
+    without this: the drop would otherwise be silently ignored."""
+    img = mime_data.imageData()
+    if not isinstance(img, QImage) or img.isNull():
+        return ""
+    try:
+        _DROPPED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        dest = _DROPPED_IMAGE_DIR / f"dropped_{uuid.uuid4().hex[:8]}.png"
+        if not img.save(str(dest)):   # extension picks the format (.png)
+            return ""
+        return str(dest)
+    except OSError:
+        return ""
 
 
 class MappingStripeDelegate(QStyledItemDelegate):
@@ -348,7 +370,28 @@ class VideoListWidget(QListWidget):
                 s = raw.strip().removeprefix("file://").replace("%20", " ")
                 if os.path.isabs(s):
                     paths.append(s)
+        if not paths and md.hasImage():
+            saved = _save_dropped_image(md)
+            if saved:
+                paths.append(saved)
         return paths
+
+    @staticmethod
+    def _event_is_droppable(event) -> bool:
+        # Cheap accept/reject check for DragEnter/DragMove — mirrors
+        # _paths_from_event's sources without paying for the image save on
+        # every move tick (that only happens once, on the actual Drop).
+        md = event.mimeData() if hasattr(event, "mimeData") else None
+        if not md:
+            return False
+        if md.hasUrls():
+            return any(u.isLocalFile() for u in md.urls())
+        if md.hasText():
+            return any(
+                os.path.isabs(raw.strip().removeprefix("file://").replace("%20", " "))
+                for raw in md.text().splitlines()
+            )
+        return bool(md.hasImage())
 
     def eventFilter(self, watched, event):  # type: ignore[override]
         try:
@@ -358,7 +401,7 @@ class VideoListWidget(QListWidget):
         if watched is vp:
             t = event.type()
             if t in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
-                if self._paths_from_event(event):
+                if self._event_is_droppable(event):
                     event.acceptProposedAction()
                     return True
             elif t == QEvent.Type.Drop:
@@ -382,32 +425,35 @@ class ScenePathLineEdit(QLineEdit):
         self.setAcceptDrops(True)
 
     @staticmethod
-    def _extract_scene_file_path(event) -> str:
+    def _extract_local_file_path(event) -> str:
+        # Any local file, not just a recognized scene extension — the panel-
+        # level handler decides what to do with an unexpected format (route a
+        # video/image to the clips list, warn on anything else) instead of the
+        # drop silently having no effect.
         md = event.mimeData()
         if not md or not md.hasUrls():
             return ""
         for u in md.urls():
-            if not u.isLocalFile():
-                continue
-            p = Path(u.toLocalFile()).expanduser()
-            if p.suffix.lower() in SCENE_EXTENSIONS:
-                return str(p)
+            if u.isLocalFile():
+                p = Path(u.toLocalFile()).expanduser()
+                if p.name:
+                    return str(p)
         return ""
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
-        if self._extract_scene_file_path(event):
+        if self._extract_local_file_path(event):
             event.acceptProposedAction()
             return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[override]
-        if self._extract_scene_file_path(event):
+        if self._extract_local_file_path(event):
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
 
     def dropEvent(self, event) -> None:  # type: ignore[override]
-        path = self._extract_scene_file_path(event)
+        path = self._extract_local_file_path(event)
         if path:
             self.file_dropped.emit(path)
             event.acceptProposedAction()
@@ -428,13 +474,15 @@ class MaterialListWidget(QListWidget):
 
     @staticmethod
     def _scene_path(event) -> str:
+        # Any local file, not just a recognized scene extension — see
+        # ScenePathLineEdit._extract_local_file_path for why.
         md = event.mimeData()
         if not md or not md.hasUrls():
             return ""
         for u in md.urls():
             if u.isLocalFile():
                 p = Path(u.toLocalFile())
-                if p.suffix.lower() in SCENE_EXTENSIONS:
+                if p.name:
                     return str(p)
         return ""
 
