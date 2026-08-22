@@ -301,5 +301,5 @@ reports. Delete the folder for a factory reset.
 
 **Is the download safe?**
 Releases ship a `SHA256SUMS.txt`, signed build provenance
-(`gh attestation verify <file> --repo hayhamLT/RenderMapperPro`), and macOS
+(`gh attestation verify <file> --repo hayhamLT/PrevizRender`), and macOS
 builds are Developer-ID signed + notarized by Apple.
