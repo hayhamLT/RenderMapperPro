@@ -33,7 +33,7 @@ from media import reveal_in_file_manager
 from ui_dialogs import error, inform, warn
 from workers import FuncThread
 
-GITHUB_REPO = "hayhamLT/RenderMapperPro"   # for the auto-updater
+GITHUB_REPO = "hayhamLT/PrevizRender"   # for the auto-updater
 
 
 def _clean_release_notes(body: str) -> str:
